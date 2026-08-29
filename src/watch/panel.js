@@ -333,25 +333,24 @@ const STYLE = `
 :root {
   color-scheme: dark;
 
-  /* Borrowed simplicity, not a borrowed skin.
-     The app this sits beside is a flat neutral grey with hairline borders and
-     small radii, and copying that wholesale made this look like a piece of it
-     rather than a thing of its own. So: the same restraint, a different surface.
-     A degree or two cooler and a shade deeper, so the panel reads as the quiet
-     instrument next to the window rather than as more of the window. */
-  --ground: #14161a;
-  --lift: #1b1e23;
-  --card: rgba(200, 220, 255, 0.035);
-  --card-hover: rgba(200, 220, 255, 0.06);
-  --well: #0f1114;
-  --glass: rgba(20, 22, 26, 0.9);
+  /* Neutral black. No warm cast, no cool cast — every tint I tried made the
+     panel look like it was lit by something that was not in the room. The
+     character comes from the three state colours and nothing else. */
+  --ground: #101010;
+  --lift: #191919;
+  --card: rgba(255, 255, 255, 0.035);
+  --card-hover: rgba(255, 255, 255, 0.06);
+  --well: #0a0a0a;
+  --glass: rgba(16, 16, 16, 0.9);
 
-  --ink: #e8eaee;
-  --soft: #aeb3bb;
-  --faint: #8b9098;
-  --faintest: #6b7079;
+  --ink: #ededed;
+  --soft: #b2b2b2;
+  --faint: #8d8d8d;
+  --faintest: #6d6d6d;
+  /* Not sure yet: it wobbled, it needed a second go, or the answer is soft. */
+  --doubt: #e8b85c;
 
-  --line: rgba(255, 255, 255, 0.05);
+  --line: rgba(255, 255, 255, 0.055);
   --line-firm: rgba(255, 255, 255, 0.17);
   --sheen: rgba(255, 255, 255, 0.03);
   --shadow: rgba(0, 0, 0, 0.5);
@@ -359,16 +358,25 @@ const STYLE = `
   /* Activity, not state. Something is happening — the shutter, a running dot,
      a live segment of the meter. Deliberately colourless: "happening" is not
      news, and the moment it has news it has a colour instead. */
-  --accent: #9a9a9a;
+  /* The brand mark, the thing that is running, and the check that wants a person
+     are all this one colour — so on a page that is otherwise grey, this means
+     "you". A clear sky blue: bright enough to find at a glance, cool enough not
+     to be mistaken for the amber that means something moved. */
+  --accent: #4fb3f0;
 
-  /* Held is a grey. It is the whole idea: nothing to say, so nothing is said. */
-  --held: #6b7079;
+  /* Held is green, and visibly so.
+     It was a grey at first, on the argument that a check which passed has
+     nothing to say. True of a whole run — the verdict line and the meter are
+     quiet when all is well — but wrong of the individual check: a person
+     scanning a list of thirty things wants to SEE that twenty-nine of them
+     held, not infer it from an absence. Green passed, red broke, amber not
+     sure. Grey is only for what never ran. */
+  --held: #25d366;
 
   /* The three that have something to say. Pure, because they are alone. */
   --broke: #ff4438;
-  /* Not the blue next door — a teal, so "this one wants you" is unmistakably
-     this panel talking and not the app it is watching. */
-  --wait: #3fb9a6;
+  /* Waiting for a person is the brand colour itself. */
+  --wait: #4fb3f0;
   --moved: #ffc24d;
 
   /* Nobody ran it. Barely there on purpose. */
@@ -468,17 +476,17 @@ img { display: block; }
 button { font: inherit; color: inherit; }
 .glyph { width: 16px; height: 16px; flex: 0 0 auto; }
 
-/* One light from above, one shadow below, and a thin sheen along the very top
-   edge of the window. Three flat washes, no pattern and no edge you could point
-   at — it is what stops a page of greys reading as paint. The light takes the
-   colour of the worst thing that has happened, which on a run where everything
-   held is no colour at all: only a little more light. */
+/* One light above, one shadow below. Nothing else.
+   There was a five-bloom mesh here with warm and coloured washes in it; on a
+   neutral black ground it read as a stain rather than as depth. What is left is
+   the least that stops a page of greys looking like flat paint, plus the tint of
+   the worst thing that has happened — which on a run where everything held is no
+   colour at all. */
 .aura {
   position: fixed; inset: 0; pointer-events: none; z-index: 0;
   background:
-    radial-gradient(132% 44% at 50% -12%, color-mix(in srgb, var(--tint) 14%, transparent), transparent 68%),
-    radial-gradient(74% 26% at 50% -4%, var(--sheen), transparent 76%),
-    radial-gradient(120% 62% at 50% 114%, var(--shadow), transparent 64%);
+    radial-gradient(126% 42% at 50% -12%, color-mix(in srgb, var(--tint) 12%, transparent), transparent 70%),
+    radial-gradient(128% 56% at 50% 116%, var(--shadow), transparent 62%);
   transition: background 620ms var(--ease);
 }
 
@@ -845,6 +853,7 @@ button { font: inherit; color: inherit; }
   transition: background var(--calm) var(--ease), box-shadow var(--calm) var(--ease);
 }
 .item.held .dot { width: 7px; height: 7px; background: var(--held); box-shadow: none; }
+.item.held .rverdict { color: color-mix(in srgb, var(--held) 78%, var(--faint)); }
 .item.wait .dot { background: var(--wait); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--wait) 42%, transparent), 0 0 0 4px color-mix(in srgb, var(--wait) 12%, transparent); }
 .item.moved .dot { background: var(--moved); box-shadow: 0 0 0 4px color-mix(in srgb, var(--moved) 17%, transparent); }
 .item.broke .dot {
@@ -958,7 +967,7 @@ button { font: inherit; color: inherit; }
   padding: 4px 0 4px 11px;
   box-shadow: inset 1px 0 0 var(--line);
 }
-.step.warn { box-shadow: inset 1.5px 0 0 var(--moved); }
+.step.warn { box-shadow: inset 1.5px 0 0 var(--doubt); }
 .step.bad { box-shadow: inset 1.5px 0 0 var(--broke); }
 .step.skipped, .step.ended { box-shadow: inset 1px 0 0 var(--resting); }
 .step.running { box-shadow: inset 1.5px 0 0 color-mix(in srgb, var(--accent) 66%, transparent); }
@@ -971,18 +980,34 @@ button { font: inherit; color: inherit; }
    ticking off rather than a table that appears when it is all over. A step
    still running carries a soft dot that breathes — an honest "this one is
    happening", with nothing that spins on after the step it belongs to.
-   A tick is grey. Twenty grey ticks and one red cross is a page you can read
-   in a glance; twenty green ticks and one red cross is a Christmas tree. */
+   A check that passed wears a filled green disc with a white tick in it. The
+   first version drew a bare grey tick on the argument that twenty green ticks
+   is a Christmas tree — true of a colour used for decoration, wrong here: a
+   person scanning the list wants to SEE that these held, and a disc reads as
+   done from further away than a hairline tick ever will. */
 .stepmark {
   /* Level with the first line of the label, never floating between the label
      and the number under it. */
-  flex: 0 0 13px; align-self: flex-start;
+  flex: 0 0 16px; align-self: flex-start;
   display: flex; align-items: center; justify-content: center;
-  height: 18px; color: var(--faint);
+  width: 16px; height: 18px; color: var(--faint);
   transition: color var(--calm) var(--ease);
 }
 .stepmark .glyph { width: 13px; height: 13px; }
-.step.ok .stepmark { color: var(--held); }
+
+/* The disc. Only for a settled verdict — a step still running keeps its bare
+   mark, because a filled circle would say it had finished. */
+.step.ok .stepmark, .step.warn .stepmark, .step.bad .stepmark {
+  width: 16px; height: 16px; margin-top: 1px;
+  border-radius: 50%;
+  color: #0b1a10;
+}
+.step.ok .stepmark .glyph, .step.warn .stepmark .glyph, .step.bad .stepmark .glyph {
+  width: 11px; height: 11px;
+}
+.step.ok .stepmark { background: var(--held); color: #06230f; }
+.step.warn .stepmark { background: var(--doubt); color: #2a1c00; }
+.step.bad .stepmark { background: var(--broke); color: #2a0703; }
 .step.skipped .stepmark, .step.ended .stepmark { color: var(--faintest); }
 .step.running .stepmark { color: var(--accent); }
 .step.running .stepmark .glyph { animation: markpulse 1.6s var(--ease) infinite; }
@@ -1020,8 +1045,8 @@ button { font: inherit; color: inherit; }
    be read from across the row: its words go to full strength, its number takes
    the colour of what happened. */
 .step.warn .stepwhat, .step.bad .stepwhat { color: var(--ink); font-weight: 560; }
-.step.warn .stepno, .step.warn .stepnum, .step.warn .stepmark { color: var(--moved); }
-.step.bad .stepno, .step.bad .stepnum, .step.bad .stepmark { color: var(--broke); }
+.step.warn .stepno, .step.warn .stepnum { color: var(--doubt); }
+.step.bad .stepno, .step.bad .stepnum { color: var(--broke); }
 .step.skipped .stepwhat, .step.skipped .stepno, .step.skipped .stepnum,
 .step.ended .stepwhat, .step.ended .stepno, .step.ended .stepnum { color: var(--faintest); }
 
@@ -1462,7 +1487,7 @@ const SCRIPT = `
       return 'broken again';
     }
     switch (status) {
-      case 'passed': return 'matches';
+      case 'passed': return 'unchanged';
       case 'changed':
         var n = ev.diffPixels || 0;
         return commas(n) + ' ' + plural(n, 'pixel', 'pixels') + ' moved';
@@ -2223,10 +2248,13 @@ const SCRIPT = `
   // scrolls for themselves. Nothing is more annoying than a list that yanks
   // itself back while you are reading it.
   var following = true;
+  var runOver = false;
   function stopFollowing() {
     if (!following) return;
     following = false;
-    ui.follow.hidden = false;
+    // Nothing to follow once the run has ended, so the pill would be an offer
+    // to do nothing — and it sits over the list while it makes it.
+    ui.follow.hidden = runOver;
   }
   ['wheel', 'touchmove', 'keydown'].forEach(function (name) {
     ui.scroll.addEventListener(name, stopFollowing, { passive: true });
@@ -3021,6 +3049,7 @@ const SCRIPT = `
         syncWork(order[q]);
       }
       runningItem = null;
+      runOver = true;
       ui.follow.hidden = true;
       scanning(false);
       var summary = ev.summary || null;
