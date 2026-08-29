@@ -1,295 +1,210 @@
 # Stays Fixed
 
-A test runner that proves what already worked still works after an AI agent
-changed the code.
+**Prove that nothing which already worked has changed — and let the agent do the
+reviewing.**
 
-AI agents change a lot of code very quickly, and the thing that breaks is almost
-never the thing they were working on — it is something in the corner that had
-already been built, already been fixed, and that nobody thought to look at again.
-Ordinary tests read the code, and code that reads fine can still render a page
-with no stylesheet, a collapsed sidebar or a button pushed off the screen. A
-picture can see that. So Stays Fixed opens your real app, photographs the screens
-that matter, and compares them against pictures a human approved.
+An AI agent changes twenty files in four minutes. What breaks is almost never the
+thing it was working on: it is something in a corner that had already been built,
+already been fixed, and that nobody thought to look at again. The agent cannot
+check that corner, because it does not know the corner exists.
 
-Four nets, one engine:
+So Stays Fixed runs your product through the same steps twice, compares it
+against the build you were last happy with, subtracts everything the product
+disagrees with itself about, and hands back **only the differences nobody asked
+for**. Everything unchanged is skipped and never mentioned. The agent already
+knows what it *meant* to change, so what is left is its work queue.
 
-| | |
-| --- | --- |
-| **Picture checks** | Photograph the screens that matter and fail on any visible difference — until a person approves the new picture. |
-| **Guards** | One check per bug that was already fixed once, named in plain English, whose only job is to fail the day that bug comes back. |
-| **Walk** | Before a release, open the real built app, walk the main routes, and photograph every step onto one page you can scroll. |
-| **Markers** | Pin each known-good release, so when something does regress you trace it to the exact commit in minutes. |
-
-It runs as a command you type, and as an MCP server so Claude Code, Codex, Gemini
-CLI or Cursor can check their own work the moment they finish editing. **An agent
-can check. Only a human can approve.**
+You are not in that loop. You hear about it only when a difference lands in a
+class no agent may wave through: money, signing in, lost data, a crash, or a bug
+you already reported once.
 
 ---
 
-## Install and first run
+## The loop
+
+1. The agent changes some code.
+2. It calls `staysfixed_check` over MCP.
+3. Everything unchanged is skipped and never reaches its context.
+4. What comes back is what changed. It already knows what it intended, so the
+   targets are the differences it did **not** intend.
+5. It fixes those and runs again.
+
+> "You will call the MCP, make it run the tests, the results come back, then you
+> decide. Whatever is unchanged will be skipped. The things that changed other
+> than the ones you actually did yourself — those ones are the targets. So you
+> will not burn your tokens reviewing every single thing. You will only review
+> what actually matters."
+
+---
+
+## Install
 
 ```
 npx staysfixed init
 npx staysfixed check
 ```
 
-No install, no account, no sign-up. It works in any project, in any language —
-it only needs to be able to open your app.
+No account, no sign-up, no server anywhere, nothing uploaded. It works in any
+project in any language — it only needs to be able to run your product.
 
-`init` asks what your app is, writes a `staysfixed.config.js` you can read, makes
-the `.staysfixed/` folder and adds the two lines to your `.gitignore` that keep
-the throwaway results out of git.
-
-`check` opens the app, takes the pictures, and — the first time — tells you that
-nobody has approved any of them yet. Look at them, and approve the ones that are
-right:
+Requirements: **Node 22 or newer**. Everything else depends on what you are
+watching, and the tool works out what it has:
 
 ```
-npx staysfixed approve --all
+npx staysfixed doctor
+npx staysfixed doctor --json      # the same answer, for an agent
 ```
 
-From then on, `check` is silent unless something actually moved.
-
-Requirements: **Node 22 or newer**, and a Chromium-based browser on the machine
-(Chrome, Chromium, Edge or Brave — or, for a desktop app, the Chromium already
-inside your Electron build). `npx staysfixed doctor` tells you what it
-found and what it is missing.
-
-Two runtime dependencies, `pngjs` and `pixelmatch`. No build step: the JavaScript
-in the repository is the JavaScript that runs.
+`doctor` is the first thing you should run and the first thing an agent should
+call. It says what it can check on this machine, what it cannot, what is missing,
+and the exact command that would fix each gap — and it never suggests setting up
+something that already works, because everything it lists as missing failed a
+real check first.
 
 ---
 
-## The four nets
+## What is real today
 
-### 1. Picture checks
+This is a repository in the middle of a rebuild, and the README is not going to
+pretend otherwise.
 
-Photograph the screens that matter, compare against the approved picture, fail on
-any visible difference.
+| | State |
+| --- | --- |
+| Picture checks, guards, walk, markers, flake register, MCP server | **Shipped.** Published as `staysfixed` 0.3.x and in use. |
+| `doctor` describing this machine in plain English and as JSON | **Shipped.** |
+| The parts of the difference engine — the address space, normalisation, wobble subtraction, clustering, ranking, causal proof, the store, the MCP tools, the self-check corpus | **Written, being wired together.** |
+| The engine assembled behind `staysfixed check`, on command-line tools and libraries | **Being built.** This is the next thing to land. |
+| Web and Electron through the difference engine | Next. |
+| The reference cut automatically when you ship, and the waiver system | After that. |
+| Android, then the iOS simulator | After that. |
+| Native Windows | Only if somebody ships a native Windows product. |
 
-```
-$ staysfixed check
+`staysfixed check` is the front door for both. Version 1's flags still mean
+exactly what they meant yesterday — `--pictures`, `--guards`, `--watch` and
+`--only` reach the same code they always did. Nobody who installed this last week
+has to change anything.
 
-✓  home                           still the same 1.4s
-✓  signed-in-dashboard            still the same 2.1s
-✓  settings-notifications         still the same 1.9s
-✗  billing-empty                  looks different — 4,118 pixels changed 2.3s
-!  pricing-card-pro               nobody has approved this picture yet 900ms
-    look at it, then run: staysfixed approve pricing-card-pro
-✓  the sidebar still collapses    still holds 400ms
-✓  logging out clears the session still holds 700ms
+## How it proves nothing changed
 
-✗ 1 thing changed. Look at it before you ship. 1 new screen is waiting for a person to approve it.
-  5 screens, 2 guards, about 12 seconds.
+Three ideas, in order of how much weight they carry.
 
-What is not right
-  name              what happened                           where to look
-  billing-empty     looks different — 4,118 pixels changed  .staysfixed/results/diffs/billing-empty.diff.png
-  pricing-card-pro  nobody has approved this picture yet    .staysfixed/results/pricing-card-pro.png
+### 1. Measure the wobble. Never guess a tolerance.
 
-What to do next
-  Look at each picture in the report. If the new one is what you meant, approve it:
-    staysfixed approve billing-empty
-    staysfixed approve pricing-card-pro
-  Or accept every one of them: staysfixed approve --all
-  The pictures, side by side: .staysfixed/report.html
-```
+Every product disagrees with itself a little between runs — a timestamp, an
+animation frame, an id. So the tool runs the **new build twice**. Anything that
+differs between two runs of the same build was not caused by your change: it is
+the product's own wobble, and it is subtracted arithmetically.
 
-Open `.staysfixed/report.html` — one self-contained page with the old picture,
-the new one and the difference side by side. If the new look is what you meant,
-approve it and it becomes the picture everything is measured against from now on.
+There is no tolerance setting in version 2 and there is not going to be one.
+Tolerance knobs are how tools like this die — too loose to catch the real thing,
+too tight to leave switched on.
 
-Approved pictures live in `.staysfixed/approved/` and belong in git. They are the
-promise. The `results/` folder is only evidence from the last run and is ignored.
+It also catches a bug class no screenshot tool has ever caught. A path that was
+**steady** in the old build and **wobbles** in the new one means the change made
+something unpredictable. That is a finding, even though no single value can be
+pointed at.
 
-### 2. Guards
+### 2. Cheap suspicion, expensive proof.
 
-One check per bug that has already been fixed once. Its only job is to fail on
-the day that bug comes back.
+Comparing against the stored record is fast and needs no rebuild, so that runs
+first. Every path that then looks different gets the old build **booted live, on
+the same machine, in the same minute**, and walked again. Only differences that
+survive that live re-run are reported.
 
-```js
-// .staysfixed/guards/the-sidebar-still-collapses.js
-export default {
-  name: 'the sidebar still collapses',
-  because: 'A CSS rename broke the toggle handler and it shipped unnoticed for four days.',
-  async run(app) {
-    await app.open('/');
-    await app.click('[data-action="toggle-sidebar"]');
-    await app.expect('the sidebar is hidden', async () => !(await app.page.visible('.sidebar')));
-  },
-};
-```
+`--paired` goes straight to the expensive half — old build live from the start.
+That is for pre-release, and for the first run on a product with nothing recorded.
 
-```
-$ staysfixed check --guards-only
+### 3. Sequential, never simultaneous.
 
-✗  prices still show two decimals This should still be true, and it is not: "the total shows two decimals". 300ms
-    expected: the total shows two decimals
-    why this guard exists: A rounding change made the cart show $12.5 instead of $12.50 for two days.
-```
-
-The name is not decoration. It is what prints when the guard fails, what goes in
-the report, and what an agent reads before deciding whether it broke something.
-So names are enforced: `sidebar_collapse_test` and `#4412` are refused, with an
-explanation and — where one can honestly be built — a rewrite. Three plain words
-minimum, present tense, no test ids. See [docs/guards.md](docs/guards.md).
-
-**It does not steal your screen.** A desktop app has to really open to be
-photographed, but it opens *behind* whatever you are using and stays there. The
-rendering flags keep it painting while it sits in the background, so the pictures
-are identical either way — bring it to the front yourself whenever you want to
-watch it work. Set `app.foreground: true` if you would rather it came forward.
-
-### 3. Walk
-
-Before a release, open the real built app, walk the main routes, photograph each
-step, and leave behind one page you can scroll through in thirty seconds.
-
-```
-$ staysfixed walk
-
-✓ Walked 6 screens and every one of them opened.
-  Every screen it photographed: .staysfixed/results/walk-20260829-013245/index.html
-```
-
-Nothing is compared and nothing can fail on a pixel here. This net is for the
-question a picture check cannot answer: *does the thing I am about to ship
-actually open?*
-
-### 4. Markers
-
-Pin each known-good moment — a release, or just before you start something risky.
-Everything is checked first, and the marker is refused if anything is not
-passing.
-
-```
-$ staysfixed mark v0.1.0 --note "first public build"
-```
-
-Then, when something has regressed and you have no idea when:
-
-```
-$ staysfixed trace billing-empty
-
-billing-empty
-  It was still right at "v0.1.0" and already different by "v0.2.0". The change is in between.
-  2 commits landed in between:
-    3f9c1ab  2026-08-24  Move the empty state into its own component  Asad Iqbal
-    77d0e42  2026-08-25  Tidy the card styles                         Asad Iqbal
-  files those commits touched:
-    src/billing/EmptyState.jsx
-    src/styles/cards.css
-
-Looked through 3 markers.
-```
-
-### And the rest
-
-```
-staysfixed check --watch             watch the run in a panel beside your app
-staysfixed check --profile           where the time went, printed at the end
-staysfixed status                    what is set up here, and how the last check went
-staysfixed flake                     checks that have changed their mind
-staysfixed doctor                    what is missing before any of this can run
-staysfixed mcp                       serve to an AI agent (see below)
-```
-
-```
-$ staysfixed status
-
-Stays Fixed
-  watching ~/Projects/shop
-  settings in ~/Projects/shop/staysfixed.config.js
-
-  6  approved pictures
-  6  screens in the settings
-  3  guards
-  2  known-good markers
-  newest marker: v0.1.0 — pinned 2 days ago
-
-  last checked 11 minutes ago at a1b2c3d on main, took about 12 seconds
-✓ Everything that worked still works.
-```
+Two builds at the same instant fight over ports, single-instance locks, user data
+directories, databases and relay slots. The value was never in the same *second*:
+it is in the same machine, same fonts, same operating system, same data, minutes
+apart. Runs are sequential with a full state reset between them, interleaved
+journey by journey so drift cannot accumulate.
 
 ---
 
-## Watch it work
+## What it looks at
 
-A check is normally something you start and then look away from. `--watch` opens
-a slim panel beside your app and draws the run as it happens: every screen and
-guard ticking over from waiting to done, a thumbnail of each picture the moment
-it is taken, the approved one and the new one side by side for anything that
-changed, and how long each check took.
+Seven channels, all flattened to one shape — a path, a channel, and a value — so
+one comparison engine serves every platform. Pixels are last and are only ever
+evidence for something another channel already found.
+
+| Channel | What it holds |
+| --- | --- |
+| `meaning` | What the interface says a control is and does — its role, its name, whether it is on, off or disabled. Not the underlying markup, because markup changes when nothing did. |
+| `effects` | What the product sent out into the world: calls made, files written, processes started, things saved. |
+| `complaints` | What the product complained about: console messages, errors, crashes, the code it exited with. |
+| `results` | What the product gave back: what it printed, what it answered, what it offers other code. |
+| `contract` | The doors the source says exist: routes, exported functions, message channels. Read without running anything. Free, and exact. |
+| `counters` | Rough counts and rough timings. Deliberately rough — precise timing is noise, not information. |
+| `pixels` | What it looked like. Used to show a person a problem another channel already found. |
+
+An address reads left to right, widest thing first:
 
 ```
-staysfixed check --watch
+api.GET./users.status
+cli.build.exit
+ipc.session:create.registered
+screen.home.tree.button:Save.enabled
 ```
 
-It opens behind whatever you are using and keeps working there, and it only
-reads the run — it never touches the app being photographed, so the pictures come
-out the same whether you watch or not. If no browser will open it, you get one
-line saying so and the run carries on without it. There is also `--profile`,
-which needs no window at all and prints where the seconds went when the run ends:
-[docs/watching.md](docs/watching.md).
+Three kinds of difference come out, and the last one is the kind no screenshot
+comparison has ever noticed: **changed**, **appeared**, and **vanished** — a
+door that closed.
+
+**Where the steps come from**, ranked, because this is the real workload
+question: read the code (free, exact) → run the project's own existing test suite
+under instrumentation → recorded real sessions → the agent exploring one named
+gap and freezing it into a replayable file → never a person clicking through an
+app.
+
+## Keeping it quiet
+
+Four layers before anything reaches the agent: **normalise** volatile shapes by
+rules kept in git, so a version bump in a footer reports zero differences instead
+of five hundred; **cluster** by signature, so one cause reads as one finding;
+**rank by distance from the changed code**, so a difference far from your edit
+sorts to the **top** — that is the definition of a side effect; then let the agent
+**prove causation** by reverting the suspect hunk and running again. That last
+step is a proof, not a heuristic.
+
+Every normalisation rule buys quiet by making some real differences invisible.
+The rule that quietens a wobbling clock also hides a genuinely wrong date. So the
+rules are data, not code: they live in git, they get reviewed like any other
+change, and every one carries a `wouldHide` field in plain English saying what it
+covers up. `explain()` answers for any value it changed — what was replaced,
+where, by which rule, and what that rule admits it might be hiding. The test
+suite fails if a rule ships without one. See
+[docs/how-v2-works.md](docs/how-v2-works.md).
 
 ---
 
-## How it keeps pictures stable
+## Where the approval line sits
 
-A picture check is only worth having if it is silent when nothing changed. The
-moment it fails for a reason nobody caused, people learn to ignore it — and once
-they ignore it, the real regression walks through with everything else. So most
-of the work in this tool is removing every reason a picture could change on its
-own:
+The word "approve" was hiding four different decisions.
 
-1. **Frozen clock.** The app always believes it is the same instant, in the same
-   time zone and locale. Timers still fire, so nothing hangs; only the reading of
-   the clock is pinned.
-2. **No motion.** Animations, transitions, smooth scrolling and video are stopped
-   three different ways, and the page is told the machine prefers reduced motion.
-3. **Seeded randomness.** `Math.random`, `crypto.getRandomValues` and
-   `randomUUID` are replaced with a seeded generator, so a shuffled list is
-   shuffled the same way every time.
-4. **Frozen data.** External network requests are blocked, or replayed byte for
-   byte from recordings kept in the repository, so your picture never depends on
-   somebody else's server.
-5. **Pinned rendering.** Text smoothing, glyph positioning and font synthesis are
-   fixed in CSS; hinting, LCD text, subpixel positioning and GPU rasterisation
-   are switched off in the browser; the colour profile is forced to sRGB.
-6. **Wait for stillness.** Fonts and images are waited for, focus rings are
-   cleared, and then the tool photographs the screen repeatedly and only accepts a
-   picture once two in a row are identical.
-7. **Blackout boxes.** Anything genuinely allowed to change — a live clock, a
-   session id, a "3 minutes ago" — is painted over on **both** pictures, so
-   adding a mask never forces a re-approval.
-8. **Sensible tolerance.** 0.05% of pixels by default: enough to absorb hinting
-   noise, nowhere near enough to hide a missing stylesheet or a shifted column.
-9. **A flake register.** Every run is remembered. A check that changes its mind
-   while the code stood still is recorded, and past the limit it is condemned and
-   says so in red until a person fixes it or deletes it. There is no option to
-   tolerate one.
+1. **What counts as working** — you, and only you. But never by opening this
+   tool. The reference is cut by something you already do: saying ship. You
+   approve in bulk, retrospectively, by shipping.
+2. **Is this difference real or is it noise** — the machine, arithmetically, from
+   running the new build twice. No judgement, nobody's opinion.
+3. **Did my own edit cause this** — the agent. That is a *causal* claim, which is
+   checkable: revert the suspect hunk, run again, and if the difference survives
+   the revert the agent was wrong and it escalates.
+4. **Is an unintended difference acceptable anyway** — you. This is the only thing
+   that reaches a person, and it should be a handful of items a month.
 
-**The honest caveat.** A picture is tied to the operating system that took it. A
-picture approved on macOS will not match on Linux — the font stack is different,
-the fallback faces are different, and the text rasteriser is a different piece of
-code. No flag fixes this. Approved pictures are stamped with the platform that
-took them and comparing across platforms warns you.
-
-Two ways to live with it. **Take the pictures in one place** — approve on CI, or
-on one machine everyone shares. That is simpler and it is what most projects
-should do. Or **approve per platform**, by setting `dir` from an environment
-variable so each platform keeps its own approved folder.
-
-The long version, with what each trick cannot fix, is in
-[docs/how-it-stays-stable.md](docs/how-it-stays-stable.md).
+**An agent cannot write a reference.** It can only write a waiver, through four
+machine-checked gates: sealed classes are unwaivable; the waiver must agree with
+an intent the agent sealed **before** the run, so it has to say what it meant to
+change before it sees what broke; five waivers per change and no more; and every
+waiver is fingerprinted to one exact difference and expires when the reference
+moves.
 
 ---
 
 ## For AI agents (MCP)
-
-An agent that has just changed twenty files has no way of knowing whether it
-broke the settings page, because it never opened the settings page. With this
-wired in, it can check before it tells you it is done.
 
 Claude Code:
 
@@ -297,8 +212,8 @@ Claude Code:
 claude mcp add staysfixed -- npx -y staysfixed mcp
 ```
 
-Cursor, Gemini CLI, and most other clients take the same block —
-`.cursor/mcp.json`, `~/.gemini/settings.json`, or your project's `.mcp.json`:
+Cursor, Gemini CLI and most other clients take the same block — `.cursor/mcp.json`,
+`~/.gemini/settings.json`, or your project's `.mcp.json`:
 
 ```json
 {
@@ -321,227 +236,185 @@ args = ["-y", "staysfixed", "mcp"]
 cwd = "/absolute/path/to/your/project"
 ```
 
-The tools an agent gets:
-
 | Tool | What it does |
 | --- | --- |
-| `staysfixed_screens` | Lists the screens and guards this project watches. Cheap — does not open the app. Call it first. |
-| `staysfixed_check` | Opens the app, photographs everything, runs the guards. Returns the verdict, what is not passing, and the diff image of each changed screen. |
-| `staysfixed_capture` | Photographs one screen and hands back the picture. Compares nothing, changes nothing. |
-| `staysfixed_status` | Approved pictures, guards, markers, last run, anything condemned for flaking. |
-| `staysfixed_trace` | Which change broke this screen — last good marker, first bad one, the commits between. |
+| `staysfixed_capabilities` | **Call this first, once per session.** What it can check on this machine right now, what it cannot and why, what is missing that would unlock more, and the exact shape of every reply. It runs nothing. After this call an agent should not need to read any documentation about this tool. |
+| `staysfixed_intent` | Seal what you **meant** to change, before you run a check. This is what makes a later "that one was me" claim checkable instead of a story. |
+| `staysfixed_check` | Run it. Returns only the differences you did not account for, ranked with the ones furthest from your edit at the top. Unchanged paths never reach you; the reply says how many were skipped. |
+| `staysfixed_explain` | One finding, in depth — both values in full, the journey that reached it, the code around it, the evidence. Never pushed into a check reply, so ask for it on the two or three you intend to act on. |
+| `staysfixed_prove` | Test a causal claim by undoing a change and running again. If the difference survives the revert, your edit did not cause it and you were about to fix the wrong thing. |
+| `staysfixed_waive` | Record that a difference was intended. Not approval, and it makes nothing the new normal — only shipping does that. |
+| `staysfixed_coverage` | What was **not** checked. Read it before telling anyone a change is safe. |
 
-**An agent can check; only a human can approve.** `staysfixed_approve` is not
-merely refused — it is not in the tool list at all unless the project explicitly
-opts in, so the agent never sees a door to push on. That is the entire point of
-the tool: an agent that can bless its own screenshots would edit the code, notice
-the picture moved, approve the new picture, and report success, and your safety
-net would have become a rubber stamp.
+**An agent can check; only a person can approve.** `staysfixed_approve` is not
+merely refused — it is not on the tool list at all unless the project explicitly
+opts in, so the agent never sees a door to push on. An agent that could bless its
+own results would edit the code, notice something moved, approve it, and report
+success, and your safety net would have become a rubber stamp.
 
-Full wiring instructions for every client: [docs/mcp.md](docs/mcp.md).
+Full wiring for every client: [docs/mcp.md](docs/mcp.md).
+
+### Nothing here should need a human to read documentation
+
+Every version ships knowing, in machine-readable form and in plain English: what
+it can check on this machine right now and what it cannot; what is missing that
+would unlock more, and whether the tool can install it itself or a person has to;
+which other machines it can already reach, **found by dialling them** rather than
+by asking you; and the shape of its own results, so an agent can act on them
+without being taught. That is `staysfixed doctor --json`, and it is
+`staysfixed_capabilities` over MCP.
 
 ---
 
-## Config reference
+## The nets that are already shipped
 
-Everything is optional except `app` and `screens`. A five-line config works.
+### Guards — one check per bug that was already fixed once
 
 ```js
-/** @type {import('staysfixed/src/types.js').StaysFixedConfig} */
+// .staysfixed/guards/the-sidebar-still-collapses.js
 export default {
-  // --- What to open -------------------------------------------------------
-  app: {
-    kind: 'web',                       // 'web' or 'electron'
-
-    // web:
-    url: 'http://localhost:3000',      // the address; relative screen urls hang off it
-    start: 'npm run preview',          // optional command that starts the app
-    browser: '/path/to/chrome',        // optional; found on the system by default
-    headless: true,                    // default true
-
-    // electron:
-    // binary: '/Applications/Your App.app/Contents/MacOS/Your App',
-    // args: ['--skip-onboarding'],
-    // windowMatch: 'Your App',        // only drive the window whose title/url contains this
-
-    cwd: '.',                          // working directory for start / binary
-    env: { NODE_ENV: 'production' },   // extra environment for the launched process
-    startTimeoutMs: 60000,             // how long to wait for the app to answer
-    debugPort: 9333,                   // default: a free one is picked
-    // attach: 'http://127.0.0.1:9333' // drive something already running instead of launching
+  name: 'the sidebar still collapses',
+  because: 'A CSS rename broke the toggle handler and it shipped unnoticed for four days.',
+  async run(app) {
+    await app.open('/');
+    await app.click('[data-action="toggle-sidebar"]');
+    await app.expect('the sidebar is hidden', async () => !(await app.page.visible('.sidebar')));
   },
-
-  // --- How big the window is ----------------------------------------------
-  // Change this and every approved picture stops matching. Pick a size once.
-  viewport: {
-    width: 1440,
-    height: 900,
-    deviceScaleFactor: 2,              // 2 = retina-sharp, still deterministic
-    mobile: false,                     // emulate a touch device
-  },
-
-  // --- Holding the app still ----------------------------------------------
-  freeze: {
-    clock: '2026-01-01T12:00:00.000Z', // the instant the app believes it is; false = leave time alone
-    timezone: 'UTC',
-    locale: 'en-US',
-    motion: true,                      // kill animations, transitions, video, smooth scroll
-    random: 'seeded',                  // 'seeded' or 'off'
-    seed: 20260101,
-    fonts: true,                       // wait for fonts and images, pin text rendering
-    network: 'block-external',         // 'block-external' | 'replay' | 'live'
-    networkAllow: ['https://fonts.gstatic.com/**'],  // globs let out even when blocking
-    hideScrollbars: true,
-    hideCaret: true,                   // the text cursor blinks; hide it
-    settle: {
-      frames: 2,                       // identical photos in a row before we accept one
-      intervalMs: 250,
-      timeoutMs: 10000,
-      maxDriftPixels: 0,               // pixels allowed to differ and still count as identical
-    },
-  },
-
-  // --- How much difference is allowed --------------------------------------
-  tolerance: {
-    pixels: 0.0005,                    // share of pixels allowed to differ, 0..1
-    threshold: 0.12,                   // per-pixel colour sensitivity, lower = stricter
-    antialiasing: true,                // ignore anti-aliasing noise
-    maxPixels: 500,                    // a hard cap; overrides `pixels` when set
-  },
-
-  // --- Things allowed to change, painted over before comparing -------------
-  // A CSS selector covers every element it matches; a rectangle covers an exact
-  // area in CSS pixels. Applied to every screen.
-  masks: ['[data-live-clock]', { x: 0, y: 0, width: 240, height: 32 }],
-
-  // --- The screens ---------------------------------------------------------
-  screens: [
-    {
-      name: 'billing-empty',           // file-safe id; becomes the picture's file name
-      describe: 'Billing with no invoices yet',   // shown to humans
-      url: '/billing',                 // shorthand for a single goto step
-
-      // Or a list of steps, which also works in staysfixed.config.json:
-      steps: [
-        { goto: '/billing' },          // navigate; relative resolves against app.url
-        { waitFor: '.invoice-list' },  // wait for a selector
-        { waitForGone: '.spinner' },   // wait for one to disappear
-        { scrollTo: '#totals' },       // scroll an element into view
-        { hover: '.plan-card' },
-        { click: 'button.new' },
-        { type: 'input[name="q"]', text: 'hello' },  // type into a field
-        { press: 'Enter' },
-        { evaluate: 'window.scrollTo(0, 0)' },       // run JavaScript in the page
-        { wait: 200 },                 // last resort; settle usually beats this
-        { note: 'A human note, shown in reports.' },
-      ],
-
-      // Or code, when the steps need a decision (JS config only):
-      // async do(page) { await page.goto('/billing'); await page.click('#tab'); },
-
-      masks: ['.invoice-date'],        // extra masks for this screen only
-      tolerance: { pixels: 0.001 },    // override tolerance for this screen only
-      viewport: { width: 720 },        // override the size for this screen only
-      freeze: { settle: { timeoutMs: 20000 } },     // per-screen freeze overrides
-      clip: '[data-plan="pro"]',       // photograph only this element
-      fullPage: false,                 // photograph the whole scrollable page
-      skip: false,                     // leave it out for now, without deleting it
-    },
-  ],
-
-  // --- Guards: one check per bug already fixed once ------------------------
-  guards: '.staysfixed/guards',        // folder of plain JavaScript files
-
-  // --- The pre-release walk -----------------------------------------------
-  walk: {
-    describe: 'What a reviewer clicks through before a release',
-    steps: [ /* same shape as screens; defaults to `screens` */ ],
-  },
-
-  // --- What an AI agent may do through the MCP server ----------------------
-  mcp: {
-    allowApprove: false,               // let an agent approve pictures. FALSE on purpose.
-    allowMark: false,                  // let an agent write known-good markers
-  },
-
-  // --- Housekeeping --------------------------------------------------------
-  dir: '.staysfixed',                  // where approved pictures, guards and markers live
-  flakeLimit: 2,                       // flakes before a check is condemned
-  retries: 1,                          // re-captures before calling a difference real
-  concurrency: 1,                      // screens at once. One, on purpose: determinism first.
 };
 ```
 
-A `staysfixed.config.json` file works too, with the declarative `steps` form and
-no `do(page)` functions — so a Rust, Python or Go project can use the tool
-without anybody writing JavaScript.
+The name is not decoration. It is what prints when the guard fails and what an
+agent reads before deciding whether it broke something. So names are enforced:
+`sidebar_collapse_test` and `#4412` are refused, with an explanation and, where
+one can honestly be built, a rewrite. See [docs/guards.md](docs/guards.md).
 
-Two fuller examples, heavily commented, are in
-[`examples/`](examples/): [a web app](examples/staysfixed.config.web.js),
+Guards are the third net, for the case both engines are blind to: **the old build
+was already wrong.** A difference against a guard is sealed — it goes to a person.
+
+### Walk — the last look before a release
+
+```
+staysfixed walk --open
+```
+
+Opens the real built app, visits each screen, photographs every step onto one
+page you can scroll in thirty seconds. Nothing is compared and nothing can fail
+on a pixel. This net answers the question a comparison cannot: *does the thing I
+am about to ship actually open?*
+
+### Markers — pin a known-good moment
+
+```
+staysfixed mark v0.15.0 --note "before the store work"
+staysfixed trace billing-empty
+```
+
+A marker defines what "old" means. Comparison runs over stored build artifacts,
+so tracing a regression to a commit does not need every commit rebuilt.
+
+### Picture checks — version 1, unchanged
+
+```
+staysfixed check --pictures
+staysfixed approve --all
+```
+
+Pixels dropped from the accusation to the evidence, but the version 1 picture
+check is still here, still works, and still requires a person to approve. Nobody
+who was using it has to stop.
+
+### The freeze layer, which everything rests on
+
+Frozen clock, killed motion, seeded randomness, pinned fonts and text rendering,
+blocked or replayed network, and capture-until-two-frames-agree. Paired running
+does not make this redundant: paired running removes differences between the two
+builds, and this removes the product's own internal nondeterminism, which is what
+keeps the measured wobble small enough to be useful. The long version, with what
+each trick cannot fix, is in
+[docs/how-it-stays-stable.md](docs/how-it-stays-stable.md).
+
+The network interceptor has been promoted from a determinism trick to the
+**safety boundary**. It is the answer to "what about a payment": the old build
+replays recorded traffic and never reaches the real world.
+
+---
+
+## Settings
+
+Everything is optional except `app`. A five-line file works, and
+`staysfixed init` writes one you can read. A `staysfixed.config.json` works too,
+with a declarative `steps` form and no functions — so a Rust, Python or Go
+project can use the tool without anybody writing JavaScript.
+
+Two fully commented examples are in [`examples/`](examples/):
+[a web app](examples/staysfixed.config.web.js),
 [an Electron app](examples/staysfixed.config.electron.js), and
 [a guard](examples/guards/the-sidebar-still-collapses.js).
+
+The full reference lives with the code it configures, and the design behind all
+of it is in [docs/how-v2-works.md](docs/how-v2-works.md).
 
 ---
 
 ## Does it actually work?
 
-Two pieces of evidence ship with the repository.
+A tool that reports "nothing changed" looks exactly like a tool that is broken,
+and there is no way to tell the two apart from the outside. So:
+
+**It has to prove it still catches things.** `staysfixed check --selfcheck` runs
+a corpus of deliberately broken builds and requires the engine to catch every
+one. If it misses any, it says so, and until that is fixed a clean check means
+nothing.
 
 **The unstable app.** `fixtures/unstable-app` is a page built to be impossible to
-photograph: a clock ticking ten times a second, a relative timestamp, an endless
-CSS spinner, a Web Animations tween, a shuffled list, a random number, a random
-uuid, a chart of random bars, a blinking caret, an autofocused input, a web font,
-an image that arrives late, and a feed the server answers differently every single
-time it is asked. `npm test` photographs it **twenty times and requires every
-picture to be byte-for-byte identical**. If that ever fails, the tool is broken and
-nothing else in the suite matters.
+observe consistently: a clock ticking ten times a second, an endless spinner, a
+tween, a shuffled list, a random uuid, a blinking caret, a late image, and a feed
+the server answers differently every time. The suite runs it twenty times and
+requires every result to be identical. If that fails, nothing else in the suite
+matters.
 
-**A real desktop app.** It was pointed at a real Electron application — 11 screens
-and 2 guards, about 25 seconds a run, five consecutive runs with not one pixel of
-difference. Then one line was removed from the built app: the `<link>` to its
-stylesheet. Every one of the 11 pictures failed, and so did the guard written for
-exactly that bug:
-
-```
-✗  start              looks different — 171,709 pixels changed
-✗  overview           looks different — 188,813 pixels changed
-✗  files              looks different — 187,242 pixels changed
-   ...
-✗  the app still has its styling
-     expected: the window is not plain white
-     why this guard exists: one release shipped with the whole app unstyled and
-     every one of its ~3,600 tests passed, because none of them could see it.
-```
-
-Putting the line back made it green again on the next run.
-
-Three checks were **deleted** during that run rather than tolerated — they wobbled,
-and the rule in this tool is that a check which wobbles twice gets fixed or deleted.
-That rule applies to the tool's own checks too.
+**A real desktop app.** Pointed at a real Electron application: eleven screens,
+two guards, about twenty-five seconds a run, five consecutive runs with nothing
+different. Then one line was deleted from the built app — the `<link>` to its
+stylesheet. All eleven failed, and so did the guard written for exactly that bug,
+whose reason reads: *one release shipped with the whole app unstyled and every one
+of its ~3,600 tests passed, because none of them could see it.*
 
 ---
 
-## What version 0.1 does not do
+## What it will never do
 
-Honestly, so you know before you invest an afternoon:
+Honestly, so you know before you invest an afternoon.
 
+- **Nothing irreversible, ever.** Anything that spends money, sends a message or
+  destroys data is watched at the moment it is **asked for** — the same charge,
+  the same amount, the same place — and refused at the effect. If a bug only
+  appears after the payment settles or the email lands, this tool is blind to it,
+  by design and permanently. A refusal is reported as a gap in coverage, never as
+  a pass.
+- **A migration that destroys data is refused, not run twice.**
+- **A race that already existed will not show.** Subtracting the wobble floor
+  actively hides intermittent bugs. Running the new build twice recovers half of
+  this by flagging anything newly unstable. Only half. That is the sharpest
+  weakness in the whole architecture and it is not going to be dressed up.
+- **Real phones cannot be paired.** No paired run is possible on a device in your
+  hand. Real iPhones and real Android handsets fall back to comparing against the
+  stored record, and say so out loud on every run.
+- **Native Windows cannot run two builds at once, even in principle,** because
+  Windows shows one desktop at a time.
+- **It is not every possible state.** "Deep" means every door the code exposes and
+  every journey your suite already walks. Nothing can enumerate every state, and
+  any tool claiming otherwise is lying. The coverage ledger names the doors it has
+  never opened, so the hole is visible instead of pretended away.
 - **No hosted service, no dashboard, no accounts, no teams, nothing paid.** It is
-  a command and a folder of files in your repository. There is no server
-  anywhere, and nothing is uploaded.
-- **No history or analytics.** The flake register remembers whether a check has
-  wobbled; it does not chart anything over time and there is no trend view.
-- **No phone or tablet simulators.** You can emulate a narrow viewport and touch,
-  which catches layout, but a real iOS or Android simulator is not supported.
-- **Windows is untested.** The code has no deliberate Unix assumptions and CI runs
-  on Linux and macOS, but nobody has run it on Windows, so treat it as unknown.
-- **Chromium-based rendering only.** Chrome, Chromium, Edge, Brave, or the
-  Chromium inside your Electron app. No Firefox and no WebKit, so this tool will
-  not tell you that something broke in Safari.
-- **Pictures do not travel between operating systems.** See the caveat above.
-- **Not battle-tested.** This is a first version. It works, it is used, and it has
-  not yet met the thousand strange apps that a widely-used tool meets. If it
-  reports something that is not true, that is the most serious kind of bug it can
-  have — please [open an issue](https://github.com/asadev/staysfixed/issues).
+  a command and a folder of files in your repository.
+- **Pictures still do not travel between operating systems.** Text is drawn
+  differently on every system. Pixels are evidence now rather than the accusation,
+  which makes this matter far less than it did — but it has not gone away.
+- **Not battle-tested.** It works, it is used, and it has not yet met the thousand
+  strange apps a widely-used tool meets. If it reports something that is not true,
+  that is the most serious kind of bug it can have — please
+  [open an issue](https://github.com/asadev/staysfixed/issues).
 
 ---
 

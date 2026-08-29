@@ -9,6 +9,7 @@ import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { StaysFixedError, EXIT } from '../core/errors.js';
 import { setLogLevel } from '../core/log.js';
+import { V2_COMMANDS } from '../v2/cli.js';
 
 /** @type {{version?: string}} */
 const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -224,6 +225,17 @@ const COMMANDS = {
     spec: {},
   },
 };
+
+/*
+ * Version 2 takes over `check` and `doctor`.
+ *
+ * It is a takeover rather than a second set of names because the answer to "did I
+ * break anything" should be one command, not two — and because everything version 1
+ * did is still reachable from it: `--pictures`, `--guards` and `--watch` behave
+ * exactly as they always have. Anyone who installed this yesterday types the same
+ * thing tomorrow.
+ */
+Object.assign(COMMANDS, V2_COMMANDS);
 
 /**
  * @param {string[]} argv

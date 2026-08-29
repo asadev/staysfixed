@@ -44,8 +44,9 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\" \"test/v2/*.test.js\"",
     "test:determinism": "node --test test/determinism.test.js",
+    "test:selfcheck": "node src/v2/selfcheck.js",
     "check": "npm run typecheck && npm test",
     "staysfixed": "node bin/staysfixed.js"
   },
