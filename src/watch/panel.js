@@ -304,57 +304,97 @@ export function panelHtml(plan = {}) {
 
 const STYLE = `
 /* --------------------------------------------------------------------------
-   Tokens.
+   Tokens — graphite and signal.
 
-   Four colours carry meaning and nothing else does: accent blue for "this is
-   happening" and "you are needed", green for held, amber for moved, red for
-   broke. Everything structural is the ground, the ink, or a hairline. That is
-   what lets a single amber dot be seen from across a desk.
+   The page is graphite. Ground, cards, glass, the picture's well and every
+   piece of furniture on it are one family of greys, separated only by how much
+   light they carry and by a hairline where two of them meet. Type does the
+   rest: one monospace for names and numbers, one text face for sentences, one
+   scale of five sizes.
 
-   One type scale, five steps, used everywhere. One easing curve, used by every
-   moving thing on the page, so the whole panel moves like one object.
+   Colour is not decoration here and it is not a mood. It is reserved, entirely,
+   for the three things a person has to be told: a screen MOVED, a guard BROKE,
+   or something is WAITING for them to look at it. A check that held is not
+   coloured — it is simply present, in grey. A check that is running is not
+   coloured either; it is only lit. That is why the colours can be this pure:
+   they are the only ones on the page, so one amber dot in a column of graphite
+   is unmissable from across a desk.
 
-   Dark is the design — this window lives beside an editor all day. Light is a
-   warm paper, never the white page with grey cards the brief rules out.
+   The five states are also a ladder of lightness, in even steps of about
+   1.46:1, so they can be told apart with no colour vision at all — and each
+   one carries its own silhouette as well: a hollow ring for a check nobody ran,
+   a plain disc for one that held, a disc inside a crisp ring for one waiting,
+   a disc in a soft halo for one that moved, a diamond for one that broke.
+
+   Dark is the design — this window sits beside an editor all day. Light is
+   quarried from the same rock: a stone ground with cards floating a shade
+   above it, never a white page.
    -------------------------------------------------------------------------- */
 :root {
   color-scheme: dark;
 
-  --ground: #0a0c12;
-  --lift: #12161f;
-  --card: rgba(255, 255, 255, 0.03);
-  --card-hover: rgba(255, 255, 255, 0.055);
-  --well: #070910;
-  --glass: rgba(10, 12, 18, 0.74);
+  /* Borrowed simplicity, not a borrowed skin.
+     The app this sits beside is a flat neutral grey with hairline borders and
+     small radii, and copying that wholesale made this look like a piece of it
+     rather than a thing of its own. So: the same restraint, a different surface.
+     A degree or two cooler and a shade deeper, so the panel reads as the quiet
+     instrument next to the window rather than as more of the window. */
+  --ground: #14161a;
+  --lift: #1b1e23;
+  --card: rgba(200, 220, 255, 0.035);
+  --card-hover: rgba(200, 220, 255, 0.06);
+  --well: #0f1114;
+  --glass: rgba(20, 22, 26, 0.9);
 
-  --ink: #e7eaf2;
-  --soft: #939bad;
-  --faint: #616a7d;
+  --ink: #e8eaee;
+  --soft: #aeb3bb;
+  --faint: #8b9098;
+  --faintest: #6b7079;
 
-  --line: rgba(255, 255, 255, 0.06);
-  --line-firm: rgba(255, 255, 255, 0.13);
-  --sheen: rgba(255, 255, 255, 0.06);
-  --shadow: rgba(0, 0, 0, 0.66);
+  --line: rgba(255, 255, 255, 0.05);
+  --line-firm: rgba(255, 255, 255, 0.17);
+  --sheen: rgba(255, 255, 255, 0.03);
+  --shadow: rgba(0, 0, 0, 0.5);
 
-  --accent: #6f9dff;
-  --held: #55bd8c;
-  --moved: #e2a84f;
-  --broke: #ef6a61;
-  --resting: rgba(255, 255, 255, 0.08);
+  /* Activity, not state. Something is happening — the shutter, a running dot,
+     a live segment of the meter. Deliberately colourless: "happening" is not
+     news, and the moment it has news it has a colour instead. */
+  --accent: #9a9a9a;
 
-  --radius: 20px;
-  --radius-sm: 13px;
-  --radius-xs: 9px;
+  /* Held is a grey. It is the whole idea: nothing to say, so nothing is said. */
+  --held: #6b7079;
 
-  --pad: 18px;
+  /* The three that have something to say. Pure, because they are alone. */
+  --broke: #ff4438;
+  /* Not the blue next door — a teal, so "this one wants you" is unmistakably
+     this panel talking and not the app it is watching. */
+  --wait: #3fb9a6;
+  --moved: #ffc24d;
+
+  /* Nobody ran it. Barely there on purpose. */
+  --resting: rgba(255, 255, 255, 0.09);
+  --skip: var(--faintest);
+  --pending: var(--faintest);
+  --running: var(--accent);
+  --waiting: var(--wait);
+
+  /* Small radii, flat surfaces. The app this sits beside uses 8px and almost no
+     shadow; a panel with 20px corners and floating cards read as a different
+     product bolted on to the side of it. */
+  --radius: 10px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+
+  --pad: 16px;
   --tint: var(--accent);
 
   /* The type scale. Nothing on this page is set at a size that is not here. */
   --t-label: 10px;
   --t-meta: 10.5px;
+  --t-small: 11px;
   --t-body: 11.5px;
   --t-name: 12px;
-  --t-lead: 17px;
+  --t-lead: 18px;
 
   /* One curve. Everything that moves, moves on this. */
   --ease: cubic-bezier(0.22, 0.72, 0.24, 1);
@@ -370,32 +410,41 @@ const STYLE = `
  * panel came up pale on a dark desktop, which is exactly the thing it was asked not to
  * do. The look is therefore stated on the html element rather than sniffed: dark unless
  * somebody asks for light, and 'system' for anyone who does want the browser's opinion.
+ *
+ * The same rock, lit from the other side: a stone ground, cards a shade brighter
+ * than it rather than the other way round, and the three signal colours taken
+ * down until they hold on paper. The ladder inverts with the ground — the
+ * quietest state is now the lightest — and the steps stay wide enough to read
+ * with no colour vision.
  */
 :root[data-theme='light'],
 :root[data-theme='system'] {
   color-scheme: light;
 
-  --ground: #e3ded3;
-  --lift: #fdfbf7;
-  --card: rgba(255, 255, 255, 0.78);
-  --card-hover: rgba(255, 255, 255, 1);
-  --well: #dad4c8;
-  --glass: rgba(231, 226, 217, 0.82);
+  --ground: #d9dade;
+  --lift: #eef0f3;
+  --card: rgba(255, 255, 255, 0.6);
+  --card-hover: #ffffff;
+  --well: #c7c9cf;
+  --glass: rgba(232, 234, 238, 0.9);
 
-  --ink: #1c1a16;
-  --soft: #6b665c;
-  --faint: #8b8578;
+  --ink: #14161a;
+  --soft: #545a62;
+  --faint: #5e646c;
+  --faintest: #6f757d;
 
-  --line: rgba(28, 24, 18, 0.09);
-  --line-firm: rgba(28, 24, 18, 0.19);
-  --sheen: rgba(255, 255, 255, 0.85);
-  --shadow: rgba(58, 47, 30, 0.34);
+  --line: rgba(20, 22, 26, 0.11);
+  --line-firm: rgba(20, 22, 26, 0.24);
+  --sheen: rgba(255, 255, 255, 0.9);
+  --shadow: rgba(26, 30, 38, 0.34);
 
-  --accent: #2f57c9;
-  --held: #1f7a4d;
-  --moved: #94620a;
-  --broke: #b52f23;
-  --resting: rgba(28, 24, 18, 0.1);
+  --accent: #474d56;
+  --held: #757b83;
+  --broke: #7e1105;
+  --wait: #0e5588;
+  --moved: #8a5f06;
+
+  --resting: rgba(20, 22, 26, 0.13);
 }
 
 * { box-sizing: border-box; }
@@ -419,14 +468,17 @@ img { display: block; }
 button { font: inherit; color: inherit; }
 .glyph { width: 16px; height: 16px; flex: 0 0 auto; }
 
-/* A single soft light from above, tinted by how the run is going. It is the
-   only decoration on the page, it has no edge you could point at, and it is
-   the thing that stops the dark reading as a hole in the screen. */
+/* One light from above, one shadow below, and a thin sheen along the very top
+   edge of the window. Three flat washes, no pattern and no edge you could point
+   at — it is what stops a page of greys reading as paint. The light takes the
+   colour of the worst thing that has happened, which on a run where everything
+   held is no colour at all: only a little more light. */
 .aura {
   position: fixed; inset: 0; pointer-events: none; z-index: 0;
   background:
-    radial-gradient(120% 46% at 50% -8%, color-mix(in srgb, var(--tint) 15%, transparent), transparent 70%),
-    radial-gradient(100% 60% at 50% 112%, var(--shadow), transparent 66%);
+    radial-gradient(132% 44% at 50% -12%, color-mix(in srgb, var(--tint) 14%, transparent), transparent 68%),
+    radial-gradient(74% 26% at 50% -4%, var(--sheen), transparent 76%),
+    radial-gradient(120% 62% at 50% 114%, var(--shadow), transparent 64%);
   transition: background 620ms var(--ease);
 }
 
@@ -441,24 +493,29 @@ button { font: inherit; color: inherit; }
   flex: 0 0 auto;
   padding: 16px var(--pad) 15px;
   background: var(--glass);
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
+  /* Separated from the list by a hairline and nothing else. */
+  box-shadow: 0 1px 0 var(--line);
 }
 .brand { display: flex; align-items: center; gap: 9px; }
+/* The mark sits on a milled square of the same graphite, lit along its top
+   edge. It is the product's own face, so it is never one of the three colours
+   that mean something is wrong. */
 .badge {
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: center;
   width: 24px; height: 24px;
   border-radius: 8px;
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 13%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--ink);
+  background: var(--lift);
+  box-shadow: inset 0 0 0 1px var(--line-firm);
 }
 .badge .glyph { width: 15px; height: 15px; }
 .wordmark {
   flex: 1 1 auto; min-width: 0;
   font-size: var(--t-label); font-weight: 600;
-  letter-spacing: 0.2em; text-transform: uppercase;
+  letter-spacing: 0.22em; text-transform: uppercase;
   color: var(--soft);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -471,22 +528,45 @@ button { font: inherit; color: inherit; }
   white-space: nowrap; overflow: hidden;
 }
 .target .mono { color: var(--ink); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
-.target .sep { color: var(--faint); flex: 0 0 auto; }
+.target .sep { color: var(--faintest); flex: 0 0 auto; }
 .target .app { color: var(--faint); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; font-size: var(--t-body); }
 
 /* The sentence. The largest text on the page after the picture, because it is
-   the one thing a person reads from four feet away. */
+   the one thing a person reads from four feet away. It is white while the news
+   is good and takes a colour only when there is news. */
 .state {
-  margin-top: 9px;
-  font-size: var(--t-lead); font-weight: 620; line-height: 1.32;
-  letter-spacing: -0.011em;
+  margin-top: 10px;
+  font-size: var(--t-lead); font-weight: 600; line-height: 1.3;
+  letter-spacing: -0.014em;
   overflow-wrap: anywhere;
   transition: color var(--slow) var(--ease);
 }
-.state.held { color: var(--ink); }
-.state.moved { color: var(--moved); }
-.state.broke { color: var(--broke); }
-.state.wait { color: var(--accent); }
+.state.held, .state.moved, .state.broke, .state.wait { color: var(--ink); }
+/* The sentence stays white; a signal sits in front of it. It is the same mark
+   the row it is about carries — a haloed disc for a screen that moved, a disc
+   in a ring for one waiting on a person, a diamond for a guard that broke — so
+   the top of the window and the list underneath speak one language. The words
+   are what you read from four feet away; the mark is what you see before you
+   have read anything at all. */
+.state.moved::before, .state.wait::before, .state.broke::before {
+  content: ''; display: inline-block;
+  width: 10px; height: 10px; border-radius: 50%;
+  margin-right: 13px; vertical-align: 0.1em;
+}
+.state.moved::before {
+  background: var(--moved);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--moved) 17%, transparent);
+}
+.state.wait::before {
+  background: var(--wait);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--wait) 42%, transparent),
+    0 0 0 5px color-mix(in srgb, var(--wait) 12%, transparent);
+}
+.state.broke::before {
+  background: var(--broke); border-radius: 2px; transform: rotate(45deg);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--broke) 17%, transparent);
+}
 /* The verdict arrives rather than appearing: it is the one sentence the whole
    run was for, and a run that ends by swapping a word looks like a page that
    was not paying attention. */
@@ -496,8 +576,8 @@ button { font: inherit; color: inherit; }
   to { opacity: 1; transform: none; filter: blur(0); }
 }
 .what {
-  margin: 8px 0 0; font-size: var(--t-small); color: var(--faint);
-  line-height: 1.45; overflow-wrap: anywhere;
+  margin: 7px 0 0; font-size: var(--t-small); color: var(--faint);
+  line-height: 1.5; overflow-wrap: anywhere;
 }
 .rverdict {
   flex: 0 0 auto; font-size: var(--t-small); color: var(--faint);
@@ -506,13 +586,15 @@ button { font: inherit; color: inherit; }
 .item.held .rverdict { color: var(--faint); }
 .item.moved .rverdict { color: var(--moved); }
 .item.broke .rverdict { color: var(--broke); }
+.item.wait .rverdict { color: var(--wait); }
 .item.waiting .rverdict { color: var(--waiting); }
-.item.pending .rverdict, .item.skip .rverdict { color: var(--faintest, var(--faint)); }
-.note { margin-top: 5px; font-size: var(--t-body); color: var(--faint); overflow-wrap: anywhere; }
+.item.pending .rverdict, .item.skip .rverdict { color: var(--faintest); }
+.note { margin-top: 6px; font-size: var(--t-body); color: var(--faint); overflow-wrap: anywhere; }
 
 /* One hairline, not a row of blocks. Each finished check adds its own slice of
    colour to a single continuous line, so progress and outcome are the same
-   object and there is one fewer thing on the page. */
+   object and there is one fewer thing on the page. A run where everything held
+   finishes as one unbroken grey rule — which is the point. */
 .meter { display: flex; align-items: center; gap: 10px; margin-top: 15px; }
 .track {
   flex: 1 1 auto; min-width: 0;
@@ -529,8 +611,8 @@ button { font: inherit; color: inherit; }
 .slice.held { background: var(--held); }
 .slice.moved { background: var(--moved); }
 .slice.broke { background: var(--broke); }
-.slice.wait { background: var(--accent); }
-.slice.skip { background: color-mix(in srgb, var(--ink) 16%, transparent); }
+.slice.wait { background: var(--wait); }
+.slice.skip { background: color-mix(in srgb, var(--ink) 13%, transparent); }
 .slice.running {
   background: var(--accent);
   animation: breathe 1.9s var(--ease) infinite;
@@ -538,7 +620,7 @@ button { font: inherit; color: inherit; }
 /* A segment lights as it lands, once, and then it is just a colour. */
 .slice.land { animation: land 520ms var(--ease) 1; }
 @keyframes land { 0% { filter: brightness(2.1); } 100% { filter: none; } }
-@keyframes breathe { 0%, 100% { opacity: 0.42; } 50% { opacity: 1; } }
+@keyframes breathe { 0%, 100% { opacity: 0.34; } 50% { opacity: 1; } }
 .counts {
   flex: 0 1 auto; min-width: 0; max-width: 66%;
   font-size: var(--t-meta); color: var(--faint); letter-spacing: 0.02em;
@@ -569,9 +651,7 @@ button { font: inherit; color: inherit; }
   /* No border. The picture is the hero, so nothing is drawn around it that
      could compete with it — only a soft floor shadow and the faintest rim to
      keep a white screenshot from bleeding into a light ground. */
-  box-shadow:
-    0 0 0 1px var(--line),
-    0 26px 50px -30px var(--shadow);
+  box-shadow: 0 0 0 1px var(--line);
   transition: box-shadow var(--slow) var(--ease);
 }
 .shot.empty { cursor: default; }
@@ -591,29 +671,27 @@ button { font: inherit; color: inherit; }
   text-align: center; padding: 0 30px; max-width: 260px;
 }
 
-/* The shutter, made visible. One pass of soft light across the glass for
+/* The shutter, made visible. One pass of plain light across the glass for
    exactly as long as the app is really being photographed — it starts when the
-   screen starts and it is gone the instant the picture lands, so it is a report
-   of what is happening rather than a decoration that never stops. */
+   screen starts and it is gone the instant the picture lands. It is light, not
+   colour: nothing has been found out yet, so there is nothing to say. */
 .sweep {
   position: absolute; inset: 0;
   pointer-events: none; opacity: 0;
   background:
     linear-gradient(100deg,
       transparent 4%,
-      color-mix(in srgb, var(--accent) 10%, transparent) 30%,
-      color-mix(in srgb, var(--accent) 34%, transparent) 47%,
-      color-mix(in srgb, var(--accent) 82%, transparent) 50%,
-      color-mix(in srgb, var(--accent) 34%, transparent) 53%,
-      color-mix(in srgb, var(--accent) 10%, transparent) 70%,
+      color-mix(in srgb, var(--accent) 8%, transparent) 30%,
+      color-mix(in srgb, var(--accent) 28%, transparent) 47%,
+      color-mix(in srgb, var(--accent) 72%, transparent) 50%,
+      color-mix(in srgb, var(--accent) 28%, transparent) 53%,
+      color-mix(in srgb, var(--accent) 8%, transparent) 70%,
       transparent 96%);
   transform: translateX(-100%);
 }
 .shot.scanning .sweep { opacity: 1; animation: sweep 1.6s var(--ease) infinite; }
 .shot.scanning {
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent),
-    0 26px 50px -30px var(--shadow);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent);
 }
 @keyframes sweep {
   from { transform: translateX(-100%); }
@@ -625,8 +703,9 @@ button { font: inherit; color: inherit; }
   position: absolute; right: 10px; bottom: 10px;
   font-size: var(--t-label); letter-spacing: 0.02em;
   color: var(--ink);
-  background: color-mix(in srgb, var(--ground) 72%, transparent);
+  background: color-mix(in srgb, var(--ground) 76%, transparent);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  box-shadow: inset 0 0 0 1px var(--line-firm);
   border-radius: 999px; padding: 4px 10px;
   opacity: 0; transform: translateY(4px);
   transition: opacity var(--quick) var(--ease), transform var(--quick) var(--ease);
@@ -643,11 +722,12 @@ button { font: inherit; color: inherit; }
 .shotout { flex: 1 1 auto; min-width: 0; font-size: var(--t-body); color: var(--soft); text-align: right; overflow-wrap: anywhere; }
 .shotout.moved { color: var(--moved); }
 .shotout.broke { color: var(--broke); }
-.shotout.wait { color: var(--accent); }
+.shotout.wait { color: var(--wait); }
 
 /* Approved / now / difference. Three quiet words with a line that slides
    between them — no pill, no box, because a screen that moved already has
-   enough asking for the eye. */
+   enough asking for the eye. The line under the chosen word is the one place
+   the screen's own colour appears in the furniture. */
 .switch { display: flex; gap: 2px; margin-top: 10px; }
 .switch button {
   position: relative;
@@ -661,7 +741,7 @@ button { font: inherit; color: inherit; }
 }
 .switch button::after {
   content: ''; position: absolute; left: 50%; right: 50%; bottom: 0; height: 1.5px;
-  border-radius: 2px; background: var(--tone, var(--accent));
+  border-radius: 2px; background: var(--ink);
   transition: left var(--calm) var(--ease), right var(--calm) var(--ease), opacity var(--quick) var(--ease);
   opacity: 0;
 }
@@ -675,7 +755,7 @@ button { font: inherit; color: inherit; }
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--soft) 22%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--soft) 20%, transparent) transparent;
   padding: 18px 5px 14px 0;
   /* The list slides away under the header rather than being cut off by a box. */
   mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 12px), transparent 100%);
@@ -683,38 +763,42 @@ button { font: inherit; color: inherit; }
 }
 .scroll::-webkit-scrollbar { width: 10px; }
 .scroll::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--soft) 22%, transparent);
+  background: color-mix(in srgb, var(--soft) 20%, transparent);
   border-radius: 8px; border: 3px solid transparent; background-clip: padding-box;
 }
 .scroll::-webkit-scrollbar-track { background: transparent; }
 
-.group + .group { margin-top: 20px; }
+.group + .group { margin-top: 22px; }
 .grouplabel {
   display: flex; align-items: baseline; gap: 9px;
   padding: 0 6px 9px 4px;
   font-size: var(--t-label); font-weight: 600;
-  letter-spacing: 0.16em; text-transform: uppercase;
+  letter-spacing: 0.2em; text-transform: uppercase;
   color: var(--faint);
 }
-.grouplabel .mono { font-size: var(--t-label); letter-spacing: 0.04em; color: color-mix(in srgb, var(--faint) 70%, transparent); }
+.grouplabel .mono { font-size: var(--t-label); letter-spacing: 0.06em; color: var(--faintest); }
 
+/* A card, floating: a shade of graphite above the ground, lit along its top
+   edge, one hairline round it and a soft floor under it. Nothing but light
+   separates it from the page. */
 .items {
   border-radius: var(--radius);
   background: var(--card);
   overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 .item + .item { box-shadow: inset 0 1px 0 var(--line); }
 .item {
   transition: background var(--calm) var(--ease);
 }
-.item.attention { background: color-mix(in srgb, var(--tone, var(--accent)) 5%, transparent); }
-.item.running { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.item.attention { background: color-mix(in srgb, var(--tone, var(--accent)) 3.5%, transparent); }
+.item.running { background: color-mix(in srgb, var(--accent) 4%, transparent); }
 /* Something broke. It is said once, with weight, and then it sits still — a
    panel that keeps flashing beside your work is a panel you turn off. */
 .item.alarm { animation: alarm 900ms var(--ease) 1; }
 @keyframes alarm {
-  0% { background: color-mix(in srgb, var(--tone, var(--broke)) 26%, transparent); }
-  100% { background: color-mix(in srgb, var(--tone, var(--broke)) 5%, transparent); }
+  0% { background: color-mix(in srgb, var(--tone, var(--broke)) 22%, transparent); }
+  100% { background: color-mix(in srgb, var(--tone, var(--broke)) 3.5%, transparent); }
 }
 
 /* Big, quiet, touch-sized rows. At rest a check is a dot, a name and a time —
@@ -731,8 +815,12 @@ button { font: inherit; color: inherit; }
 .row:hover { background: var(--card-hover); }
 .row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .item.plain .row { cursor: default; }
-.item.showing .row { box-shadow: inset 2px 0 0 var(--line-firm); }
-.item.showing .rname { color: var(--ink); }
+.item.showing .row, .item.working .row { box-shadow: inset 2px 0 0 var(--line-firm); }
+.item.showing .rname, .item.working .rname { color: var(--ink); }
+/* A check that wants a person is marked with a line down its edge in its own
+   colour, not a wash across it. A wash over graphite is a stain; a line is a
+   flag, and it reads at the same glance as the dot beside the name. */
+.item.attention .row { box-shadow: inset 2px 0 0 var(--tone, var(--accent)); }
 .item.plain .row:hover { background: transparent; }
 /* Rows settle in rather than appearing, and they do it one after another, which
    is what makes a list of eleven screens read as one thing arriving. */
@@ -742,23 +830,36 @@ button { font: inherit; color: inherit; }
   to { opacity: 1; transform: none; }
 }
 
+/* The mark beside a name. Five states, five silhouettes, five rungs of a
+   lightness ladder — so it can be read with no colour vision, in a photocopy,
+   or out of the corner of an eye:
+     nobody ran it   a hollow ring, barely there
+     it held         a plain disc, grey, nothing around it
+     it is waiting   a disc inside a crisp ring
+     it moved        a disc in a soft wide halo
+     it broke        a diamond in a soft wide halo
+*/
 .dot {
   flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
   background: var(--resting);
   transition: background var(--calm) var(--ease), box-shadow var(--calm) var(--ease);
 }
-.item.held .dot { background: color-mix(in srgb, var(--held) 78%, transparent); }
-.item.moved .dot { background: var(--moved); box-shadow: 0 0 0 4px color-mix(in srgb, var(--moved) 15%, transparent); }
-.item.broke .dot { background: var(--broke); box-shadow: 0 0 0 4px color-mix(in srgb, var(--broke) 15%, transparent); }
-.item.wait .dot { background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent); }
-.item.skip .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--resting); }
+.item.held .dot { width: 7px; height: 7px; background: var(--held); box-shadow: none; }
+.item.wait .dot { background: var(--wait); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--wait) 42%, transparent), 0 0 0 4px color-mix(in srgb, var(--wait) 12%, transparent); }
+.item.moved .dot { background: var(--moved); box-shadow: 0 0 0 4px color-mix(in srgb, var(--moved) 17%, transparent); }
+.item.broke .dot {
+  background: var(--broke);
+  border-radius: 2px; transform: rotate(45deg);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--broke) 17%, transparent);
+}
+.item.skip .dot, .item.pending .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--resting); }
 .item.running .dot {
   background: transparent;
   box-shadow: inset 0 0 0 2px var(--accent);
   animation: ping 1.8s var(--ease) infinite;
 }
 @keyframes ping {
-  0% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 0 color-mix(in srgb, var(--accent) 42%, transparent); }
+  0% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 0 color-mix(in srgb, var(--accent) 34%, transparent); }
   70%, 100% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 7px color-mix(in srgb, var(--accent) 0%, transparent); }
 }
 .item.running .rname { color: var(--ink); }
@@ -776,11 +877,11 @@ button { font: inherit; color: inherit; }
   flex: 0 0 auto;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
-  font-size: var(--t-meta); color: var(--faint);
+  font-size: var(--t-meta); color: var(--faintest);
 }
 .row .chev {
   flex: 0 0 auto; width: 14px; height: 14px;
-  color: var(--faint); opacity: 0;
+  color: var(--faintest); opacity: 0;
   transition: transform var(--calm) var(--ease), opacity var(--quick) var(--ease);
 }
 .row:hover .chev, .item.open .chev { opacity: 1; }
@@ -795,16 +896,16 @@ button { font: inherit; color: inherit; }
 }
 .item.open .detail { animation: unfold 240ms var(--ease) both; }
 @keyframes unfold { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-.detail .why { color: var(--soft); }
+.detail .why { color: var(--faint); }
+/* Grey, whatever happened. The row above it has already said so in colour and
+   the working below colours the step that did it — a page that says the same
+   thing three times in the same colour is a page nobody scans. */
 .detail .out { color: var(--soft); margin-top: 3px; }
-.detail .out.moved { color: var(--moved); }
-.detail .out.broke { color: var(--broke); }
-.detail .out.wait { color: var(--accent); }
 .detail .claim {
   margin-top: 9px; padding: 9px 12px;
   border-radius: var(--radius-xs);
   background: var(--well);
-  box-shadow: inset 2px 0 0 var(--broke);
+  box-shadow: inset 2px 0 0 var(--broke), inset 0 0 0 1px var(--line);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--t-body); color: var(--ink);
 }
@@ -822,11 +923,34 @@ button { font: inherit; color: inherit; }
    the top of the window. */
 .work-here { padding: 2px var(--pad) 10px; }
 .work-here .worklabel { margin: 0 0 6px; }
-.detail .worklabel {
-  margin: 11px 0 6px;
+.detail .worklabel { margin: 11px 0 6px; }
+/* The heading of a working list: what it is, and — quietly, on the right —
+   which check it belongs to. The name matters now that the list is live: a
+   guard's claims can be ticking off while the last screen's picture is still
+   on the glass, and a heading with no name would leave a person guessing
+   whose working they are reading. */
+.worklabel {
+  display: flex; align-items: baseline; gap: 8px;
   font-size: var(--t-label); font-weight: 600;
-  letter-spacing: 0.16em; text-transform: uppercase;
+  letter-spacing: 0.2em; text-transform: uppercase;
   color: var(--faint);
+}
+/* The heading never wraps: three words that never change. Anything that has to
+   give is the name beside it, which ellipses. */
+.worklabel .worktitle { flex: 0 0 auto; white-space: nowrap; }
+.worklabel .workwho {
+  flex: 1 1 auto; min-width: 0;
+  font-weight: 500; letter-spacing: 0.02em; text-transform: none;
+  text-align: right;
+  color: var(--faintest);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Said only while a list is empty, so a check that has just started does not
+   look like a check that found nothing to do. */
+.workwait {
+  padding: 4px 0 3px 11px;
+  box-shadow: inset 1px 0 0 var(--line);
+  font-size: var(--t-body); color: var(--faint);
 }
 .work { list-style: none; margin: 0; padding: 0; }
 .step {
@@ -836,18 +960,57 @@ button { font: inherit; color: inherit; }
 }
 .step.warn { box-shadow: inset 1.5px 0 0 var(--moved); }
 .step.bad { box-shadow: inset 1.5px 0 0 var(--broke); }
-.step.skipped { box-shadow: inset 1px 0 0 var(--resting); }
+.step.skipped, .step.ended { box-shadow: inset 1px 0 0 var(--resting); }
+.step.running { box-shadow: inset 1.5px 0 0 color-mix(in srgb, var(--accent) 66%, transparent); }
+/* A line arrives once, quietly, and then never moves again. */
+.step.arrive { animation: stepin 240ms var(--ease) both; }
+@keyframes stepin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* The tick. This is the thing a person actually watches: each line takes its
+   mark the moment it settles, so a screen being checked reads as a list
+   ticking off rather than a table that appears when it is all over. A step
+   still running carries a soft dot that breathes — an honest "this one is
+   happening", with nothing that spins on after the step it belongs to.
+   A tick is grey. Twenty grey ticks and one red cross is a page you can read
+   in a glance; twenty green ticks and one red cross is a Christmas tree. */
+.stepmark {
+  /* Level with the first line of the label, never floating between the label
+     and the number under it. */
+  flex: 0 0 13px; align-self: flex-start;
+  display: flex; align-items: center; justify-content: center;
+  height: 18px; color: var(--faint);
+  transition: color var(--calm) var(--ease);
+}
+.stepmark .glyph { width: 13px; height: 13px; }
+.step.ok .stepmark { color: var(--held); }
+.step.skipped .stepmark, .step.ended .stepmark { color: var(--faintest); }
+.step.running .stepmark { color: var(--accent); }
+.step.running .stepmark .glyph { animation: markpulse 1.6s var(--ease) infinite; }
+@keyframes markpulse { 0%, 100% { opacity: 0.34; } 50% { opacity: 1; } }
+.step.running .stepwhat { color: var(--ink); }
+
+/* Guards: the claims are what a guard is for, so they carry the weight, and
+   the actions that get the app into position sit back a little.
+   Named 'stepclaim' rather than 'claim' on purpose — a bare 'claim' inside a
+   detail is already the boxed expectation that failed, and these lines would
+   have been swept up by it. */
+.step.stepclaim .stepwhat { color: var(--ink); font-weight: 560; }
+.step.stepact .stepwhat { color: var(--soft); }
+.step.stepact .stepno, .step.stepact .stepnum { color: var(--faintest); }
+.step.stepact .stepmark { opacity: 0.8; }
 /* The numeral keeps its own column whatever happens to the right of it — a
    number that has been left behind on a line of its own is not a sequence any
    more, which is what a long label does to it on a panel dragged narrow. */
-.stepno { flex: 0 0 15px; text-align: right; font-size: var(--t-label); color: var(--faint); }
+.stepno { flex: 0 0 15px; text-align: right; font-size: var(--t-label); color: var(--faintest); }
 /* Label on one line, its number under it.
    They used to share a line and wrap to a second, right-aligned one whenever the
    number was long — which at 460px was most of them, and the column came out
    ragged. Stacked, it reads down the page like a receipt: what was done, then
    what it came to. */
 .stepbody { flex: 1 1 auto; min-width: 0; }
-.stepwhat { color: var(--soft); }
+/* One size, whether the working is beside the picture or under a row: the same
+   size the check names are set at, so the two lists read as one thing. */
+.stepwhat { color: var(--soft); font-size: var(--t-name); line-height: 1.5; }
 .stepnum {
   display: block; margin-top: 1px;
   font-size: var(--t-meta); color: var(--faint);
@@ -856,10 +1019,11 @@ button { font: inherit; color: inherit; }
 /* A step that wants a person is the one thing in the list that is allowed to
    be read from across the row: its words go to full strength, its number takes
    the colour of what happened. */
-.step.warn .stepwhat, .step.bad .stepwhat { color: var(--ink); }
-.step.warn .stepno, .step.warn .stepnum { color: var(--moved); }
-.step.bad .stepno, .step.bad .stepnum { color: var(--broke); }
-.step.skipped .stepwhat, .step.skipped .stepno, .step.skipped .stepnum { color: var(--faint); }
+.step.warn .stepwhat, .step.bad .stepwhat { color: var(--ink); font-weight: 560; }
+.step.warn .stepno, .step.warn .stepnum, .step.warn .stepmark { color: var(--moved); }
+.step.bad .stepno, .step.bad .stepnum, .step.bad .stepmark { color: var(--broke); }
+.step.skipped .stepwhat, .step.skipped .stepno, .step.skipped .stepnum,
+.step.ended .stepwhat, .step.ended .stepno, .step.ended .stepnum { color: var(--faintest); }
 
 .nothing { padding: 26px 16px; color: var(--faint); font-size: var(--t-body); line-height: 1.7; text-align: center; }
 .nothing .mono { color: var(--soft); }
@@ -870,8 +1034,8 @@ button { font: inherit; color: inherit; }
   padding: 12px var(--pad) 13px;
   border-top: 1px solid var(--line);
   background: var(--glass);
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
 }
 .tophead {
   display: flex; align-items: center; gap: 8px;
@@ -882,7 +1046,7 @@ button { font: inherit; color: inherit; }
 .tlabel {
   flex: 1 1 auto;
   font-size: var(--t-label); font-weight: 600;
-  letter-spacing: 0.16em; text-transform: uppercase;
+  letter-spacing: 0.2em; text-transform: uppercase;
   color: var(--faint);
 }
 .ttotal {
@@ -895,7 +1059,7 @@ button { font: inherit; color: inherit; }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
-.tophead .chev { color: var(--faint); width: 13px; height: 13px; transition: transform var(--calm) var(--ease); }
+.tophead .chev { color: var(--faintest); width: 13px; height: 13px; transition: transform var(--calm) var(--ease); }
 .tophead[aria-expanded='true'] .chev { transform: rotate(180deg); }
 .tophead:hover .tlabel, .tophead:hover .ttotal, .tophead:hover .chev { color: var(--soft); }
 
@@ -915,32 +1079,34 @@ button { font: inherit; color: inherit; }
 
 /* --- follow ------------------------------------------------------------- */
 .follow {
-  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  /* Clear of the pinned strip at the bottom, not on top of it. At 16px it sat
+     squarely over the timing line and covered the words it floated above. */
+  position: fixed; left: 50%; bottom: 62px; transform: translateX(-50%);
   z-index: 4;
   font-size: var(--t-body);
-  color: var(--ink);
+  color: var(--soft);
   background: var(--lift);
-  border: 1px solid var(--line-firm); border-radius: 999px;
-  padding: 6px 15px; cursor: pointer;
-  box-shadow: 0 12px 24px -14px var(--shadow);
+  border: 0; border-radius: 999px;
+  padding: 7px 15px; cursor: pointer;
+  box-shadow: inset 0 0 0 1px var(--line-firm);
   animation: settle 240ms var(--ease) both;
-  transition: border-color var(--quick) var(--ease), color var(--quick) var(--ease);
+  transition: color var(--quick) var(--ease), background var(--quick) var(--ease);
 }
-.follow:hover { border-color: var(--accent); color: var(--accent); }
+.follow:hover { color: var(--ink); background: var(--card-hover); }
 
 /* --- the one thing left to do ------------------------------------------- */
 .foot {
   flex: 0 0 auto;
   padding: 14px var(--pad) 16px;
   background: var(--glass);
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
   border-top: 1px solid var(--line);
   animation: arrive 340ms var(--ease) both;
 }
 .nextlabel {
   font-size: var(--t-label); font-weight: 600;
-  letter-spacing: 0.16em; text-transform: uppercase;
+  letter-spacing: 0.2em; text-transform: uppercase;
   color: var(--faint);
   margin-bottom: 8px;
 }
@@ -950,22 +1116,26 @@ button { font: inherit; color: inherit; }
   display: flex; align-items: center;
   background: var(--well);
   border-radius: var(--radius-xs);
+  box-shadow: inset 0 0 0 1px var(--line);
   padding: 9px 11px; font-size: var(--t-body);
   color: var(--ink);
   overflow-wrap: anywhere;
   user-select: all;
 }
-.prompt { flex: 0 0 auto; color: var(--held); opacity: 0.75; user-select: none; }
+.prompt { flex: 0 0 auto; color: var(--faint); user-select: none; }
 .copy {
   flex: 0 0 auto; width: 36px;
   display: flex; align-items: center; justify-content: center;
   color: var(--soft); background: var(--well);
   border: 0; border-radius: var(--radius-xs);
+  box-shadow: inset 0 0 0 1px var(--line);
   cursor: pointer;
   transition: color var(--quick) var(--ease), background var(--quick) var(--ease);
 }
 .copy:hover { color: var(--ink); background: var(--card-hover); }
-.copy.done { color: var(--held); }
+/* Copied. Not a colour — colour means something is wrong — but a hard invert,
+   which is louder than any tint and gone again in a second. */
+.copy.done { color: var(--ground); background: var(--ink); }
 
 /* --------------------------------------------------------------------------
    The viewer.
@@ -979,7 +1149,7 @@ button { font: inherit; color: inherit; }
 .viewer {
   position: fixed; inset: 0; z-index: 20;
   display: flex; flex-direction: column;
-  background: color-mix(in srgb, var(--ground) 92%, #000);
+  background: color-mix(in srgb, var(--ground) 88%, #000);
   animation: viewerin 220ms var(--ease) both;
 }
 @keyframes viewerin { from { opacity: 0; } to { opacity: 1; } }
@@ -1013,7 +1183,7 @@ button { font: inherit; color: inherit; }
 }
 .vmodes button::after {
   content: ''; position: absolute; left: 50%; right: 50%; bottom: 1px; height: 1.5px;
-  border-radius: 2px; background: var(--accent); opacity: 0;
+  border-radius: 2px; background: var(--ink); opacity: 0;
   transition: left var(--calm) var(--ease), right var(--calm) var(--ease), opacity var(--quick) var(--ease);
 }
 .vmodes button:hover { color: var(--soft); }
@@ -1089,14 +1259,16 @@ button { font: inherit; color: inherit; }
   padding: 10px var(--pad) 15px;
   text-align: center;
   font-size: var(--t-label); letter-spacing: 0.03em;
-  color: var(--faint);
+  color: var(--faintest);
 }
-.vside { flex: 0 0 auto; font-size: var(--t-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.vside { flex: 0 0 auto; font-size: var(--t-label); letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); }
+/* Grey at the approved end, the screen's own amber at the new one: the slider
+   itself says which way is "what changed". */
 .vblend {
   flex: 1 1 auto; min-width: 0;
   -webkit-appearance: none; appearance: none;
   height: 3px; border-radius: 999px;
-  background: linear-gradient(to right, var(--moved), var(--accent));
+  background: linear-gradient(to right, var(--line-firm), var(--moved));
   outline: none; cursor: pointer;
 }
 .vblend::-webkit-slider-thumb {
@@ -1112,7 +1284,7 @@ button { font: inherit; color: inherit; }
 
 /* Dragged narrow. Everything stays, nothing wraps into a mess. */
 @media (max-width: 330px) {
-  :root { --pad: 12px; --radius: 16px; --t-lead: 15px; }
+  :root { --pad: 12px; --radius: 16px; --t-lead: 16px; }
   .target .app, .target .sep { display: none; }
   .row { gap: 9px; padding: 9px 11px; }
   .detail { padding: 0 11px 12px 28px; }
@@ -1129,7 +1301,7 @@ button { font: inherit; color: inherit; }
 /* Pulled wide. Two columns rather than one very long thin one, so the picture
    gets the room and the list stays beside it instead of below the fold. */
 @media (min-width: 720px) {
-  :root { --pad: 24px; --t-lead: 19px; }
+  :root { --pad: 24px; --t-lead: 20px; }
   .body { flex-direction: row; gap: 28px; padding-bottom: 4px; }
   .stage { flex: 1 1 54%; min-width: 0; align-self: center; padding-top: 0; }
   .scroll { flex: 1 1 46%; min-width: 0; padding-top: 22px; }
@@ -1460,7 +1632,12 @@ const SCRIPT = `
     // what makes the whole run browsable afterwards instead of only the last
     // screen photographed.
     row.addEventListener('click', function () {
-      var forward = entry.pics && !entry.root.classList.contains('showing');
+      // Its picture, or its working, or both — whichever this check has. A
+      // guard has no picture and its claims are the whole point of it, so a
+      // guard row brings its own working back exactly like a screen does.
+      var forward =
+        (entry.pics && !entry.root.classList.contains('showing')) ||
+        ((hasWork(entry) || entry.running) && workOwner !== entry);
       if (forward) {
         recall(entry);
         setOpen(entry, true);
@@ -1508,18 +1685,21 @@ const SCRIPT = `
       out.textContent = entry.outText;
       d.appendChild(out);
     }
-    // The working. Everything that was really done to this screen, in the
-    // order it happened, numbered so it reads as a sequence rather than a bag
-    // of facts. Absent on older runs and on guards, and then simply not drawn.
-    var work = workList(entry.checks);
-    if (work) {
-      var worklabel = document.createElement('p');
-      worklabel.className = 'worklabel';
-      worklabel.textContent = 'What was done';
-      d.appendChild(worklabel);
-      d.appendChild(work);
+    // The working. Everything that was really done to this check, in the order
+    // it happened, numbered so it reads as a sequence rather than a bag of
+    // facts. The heading and the list are the SAME two elements every time —
+    // built once for this row and put back — so a redraw in the middle of a
+    // run never tears down lines that are still ticking.
+    if (hasWork(entry)) {
+      var ol = detailWork(entry);
+      d.appendChild(entry.workLabel);
+      d.appendChild(ol);
+      renderWork(ol, entry.checks, entry.kind);
     }
-    if (entry.failedAt) {
+    // The expectation that failed, boxed — unless the working above already
+    // ends on it, which it does now that a guard shows its claims. Nothing on
+    // this page is said twice.
+    if (entry.failedAt && !inWork(entry, entry.failedAt)) {
       var claim = document.createElement('div');
       claim.className = 'claim';
       var label = document.createElement('em');
@@ -1540,95 +1720,387 @@ const SCRIPT = `
     if (!entry.hasDetail) setOpen(entry, false);
   }
 
-  /**
-   * The working, as a numbered list — or null when there is nothing to show.
-   *
-   * Everything that was really done to a screen, in the order it happened.
-   * Numbered because that is the question people ask: not "did it pass" but
-   * "what did you actually check". Absent on older runs and on guards.
-   *
-   * @param {any} checks
-   * @returns {HTMLOListElement|null}
-   */
-  function workList(checks) {
-    var steps = Array.isArray(checks) ? checks : null;
-    if (!steps || !steps.length) return null;
-    var work = document.createElement('ol');
-    work.className = 'work';
-    var counted = 0;
-    for (var k = 0; k < steps.length; k++) {
-      var step = steps[k];
-      if (!step || typeof step !== 'object') continue;
-      var said = String(step.label == null ? '' : step.label).trim();
-      if (!said) continue;
-      counted++;
+  // -------------------------------------------------------------------------
+  // The working, ticked off live.
+  //
+  // A table that appears once a screen has already finished tells nobody what
+  // is happening — which is exactly what the first person to watch this said.
+  // So the run now announces each thing as it reaches it, and this is the part
+  // of the panel that draws them: the names of what is being checked on the
+  // check that is running right now, each one taking its mark as it settles.
+  //
+  // Two rules hold it up. Every line is found again by its own id rather than
+  // redrawn, so a list that is already right is never torn down and rebuilt —
+  // that is what stops it flickering when the verdict arrives carrying the
+  // whole list again. And a step whose outcome needs a person shows the number
+  // behind it the moment it lands, because that is the moment somebody is
+  // looking.
+  // -------------------------------------------------------------------------
 
-      var line = document.createElement('li');
-      var state = step.state;
-      var carries = state === 'warn' || state === 'bad' || state === 'skipped';
-      line.className = 'step ' + (carries ? state : 'ok');
+  // The marks, drawn here like every other icon on this page. A tick for a
+  // thing that held, a cross for one that broke, a stroke for a thing that was
+  // deliberately not done, and a soft dot for the one happening now.
+  var MARKS = {
+    ok: '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.4 12.6l4.3 4.3 8.9-9.8"></path></svg>',
+    warn: '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5.4v8.4"></path><path d="M12 18.3h.01"></path></svg>',
+    bad: '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6.6 6.6l10.8 10.8M17.4 6.6L6.6 17.4"></path></svg>',
+    skipped: '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6.4 12h11.2"></path></svg>',
+    ended: '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6.4 12h11.2"></path></svg>',
+    running: '<svg class="glyph" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4.1" fill="currentColor"></circle></svg>'
+  };
 
-      var no = document.createElement('span');
-      no.className = 'stepno mono';
-      no.textContent = String(counted);
-      var body = document.createElement('span');
-      body.className = 'stepbody';
-      var what = document.createElement('span');
-      what.className = 'stepwhat';
-      what.textContent = said;
-      body.appendChild(what);
+  var STEP_STATES = { running: 1, ok: 1, warn: 1, bad: 1, skipped: 1, ended: 1 };
 
-      var behind = String(step.detail == null ? '' : step.detail).trim();
-      if (behind) {
-        var num = document.createElement('span');
-        num.className = 'stepnum mono';
-        num.textContent = behind;
-        body.appendChild(num);
-      }
-      line.appendChild(no);
-      line.appendChild(body);
-      work.appendChild(line);
+  function labelOf(step) { return String(step && step.label == null ? '' : step.label).trim(); }
+  function detailOf(step) { return String(step && step.detail == null ? '' : step.detail).trim(); }
+  function stateOf(step) {
+    var s = step && step.state;
+    return STEP_STATES[s] ? s : 'ok';
+  }
+
+  // How a step is found again. The run gives a stable id to anything it will
+  // announce twice — once as it starts, once as it settles — and without one
+  // the words themselves have to do it.
+  function idOf(step) {
+    var key = step && step.key != null ? String(step.key).trim() : '';
+    return key ? 'k:' + key : 'l:' + labelOf(step);
+  }
+
+  // Guards only. A guard is a promise about behaviour, and the promises are
+  // the claims it makes — 'the sidebar column is gone' — with actions in
+  // between to get the app into position. The claims are what the guard is
+  // for, so they are the ones that carry the weight.
+  var CLAIM_KEY = /^(expect|claim|assert|expected)([^a-z0-9]|$)/i;
+  var ACT_KEY = /^(do|did|act|action|step|fresh|run|ran|open|click|type|press|hover|scroll|wait|read|note)([^a-z0-9]|$)/i;
+  // A step that had to be tried twice is the same step, and its id says so.
+  var RETRY = /^try[0-9]+[^a-z0-9]/i;
+  var ACT_WORD = /^(opened|clicked|typed|pressed|hovered|scrolled|waited|went|ran|read|reached|took|started|closed|filled|chose|picked|dragged|reloaded|moved|set|gave)([^a-z0-9]|$)/i;
+
+  function weightOf(kind, step) {
+    if (kind !== 'guard') return '';
+    var key = step && step.key != null ? String(step.key).trim() : '';
+    if (RETRY.test(key)) key = key.replace(RETRY, '');
+    if (CLAIM_KEY.test(key)) return 'stepclaim';
+    if (ACT_KEY.test(key)) return 'stepact';
+    return ACT_WORD.test(labelOf(step)) ? 'stepact' : 'stepclaim';
+  }
+
+  /** One line, built once and then only ever updated in place. */
+  function makeLine() {
+    var li = document.createElement('li');
+    li.className = 'step';
+    var no = document.createElement('span');
+    no.className = 'stepno mono';
+    var mark = document.createElement('span');
+    mark.className = 'stepmark';
+    var body = document.createElement('span');
+    body.className = 'stepbody';
+    var what = document.createElement('span');
+    what.className = 'stepwhat';
+    var num = document.createElement('span');
+    num.className = 'stepnum mono';
+    num.hidden = true;
+    body.appendChild(what);
+    body.appendChild(num);
+    li.appendChild(no);
+    li.appendChild(mark);
+    li.appendChild(body);
+    li.__no = no; li.__mark = mark; li.__what = what; li.__num = num;
+    li.__state = ''; li.__weight = '';
+    return li;
+  }
+
+  function fillLine(li, step, n, kind, fresh) {
+    var state = stateOf(step);
+    var weight = weightOf(kind, step);
+    var said = labelOf(step);
+    var behind = detailOf(step);
+
+    if (li.__no.textContent !== String(n)) li.__no.textContent = String(n);
+    if (li.__state !== state) {
+      li.__state = state;
+      li.__mark.innerHTML = MARKS[state] || MARKS.ok;
     }
-    return counted ? work : null;
+    li.__weight = weight;
+    li.className = 'step ' + state + (weight ? ' ' + weight : '') + (fresh ? ' arrive' : '');
+    if (li.__what.textContent !== said) li.__what.textContent = said;
+    // The number behind a step is shown the instant the step has one — a line
+    // that has just gone amber or red is the one moment somebody needs it.
+    if (li.__num.textContent !== behind) li.__num.textContent = behind;
+    li.__num.hidden = !behind;
   }
 
   /**
-   * The same list, always visible, under the picture on the glass.
+   * Draw a list of steps into a list element, reconciling by id.
    *
-   * Behind a click it may as well not exist — the first person to use this asked
-   * for the checks and never found them, because a passing row is closed by
-   * default. Whichever screen is being shown says what was done to it, right
-   * there, without anybody having to go looking.
+   * Lines already on the page are found and updated; new ones settle in at
+   * their place; anything the authoritative list no longer mentions goes. So
+   * the same function serves a step arriving on its own and the whole array
+   * that comes with the verdict, and the second one changes nothing a watcher
+   * already had right.
    *
+   * @param {any} ol
    * @param {any} checks
+   * @param {string} kind
+   * @returns {number} How many lines are shown.
    */
-  function showWork(checks) {
-    var list = workList(checks);
-    ui.work.textContent = '';
-    if (!list) { ui.work.hidden = true; return; }
+  function renderWork(ol, checks, kind) {
+    var steps = Array.isArray(checks) ? checks : [];
+    var lines = ol.__lines || (ol.__lines = Object.create(null));
+    var seen = Object.create(null);
+    var n = 0;
+    for (var i = 0; i < steps.length; i++) {
+      var step = steps[i];
+      if (!step || typeof step !== 'object') continue;
+      if (!labelOf(step)) continue;
+      n++;
+      var id = idOf(step);
+      // Two steps that answer to the same name in one list still get a line
+      // each, rather than one of them quietly replacing the other.
+      if (seen[id]) id = id + '#' + n;
+      seen[id] = true;
+
+      var li = lines[id];
+      var fresh = false;
+      if (!li) { li = makeLine(); lines[id] = li; fresh = !CALM; }
+      fillLine(li, step, n, kind, fresh);
+      if (fresh) forget(li);
+      var at = ol.children[n - 1];
+      if (at !== li) ol.insertBefore(li, at || null);
+    }
+    for (var gone in lines) {
+      if (seen[gone]) continue;
+      if (lines[gone].parentNode === ol) ol.removeChild(lines[gone]);
+      delete lines[gone];
+    }
+    return n;
+  }
+
+  // The arriving animation is worn once and then taken off, so a line that is
+  // later moved or updated never plays it again.
+  function forget(li) {
+    setTimeout(function () { li.classList.remove('arrive'); }, 420);
+  }
+
+  function hasWork(entry) {
+    return !!(entry && Array.isArray(entry.checks) && entry.checks.length);
+  }
+
+  /** Is this sentence already one of the lines of the working? */
+  function inWork(entry, said) {
+    var want = String(said == null ? '' : said).trim();
+    if (!want || !hasWork(entry)) return false;
+    for (var i = 0; i < entry.checks.length; i++) {
+      if (labelOf(entry.checks[i]) === want) return true;
+    }
+    return false;
+  }
+
+  /** This row's own copy of the list, for under the row. Built once. */
+  function detailWork(entry) {
+    if (!entry.workOl) {
+      var label = document.createElement('p');
+      label.className = 'worklabel';
+      var title = document.createElement('span');
+      title.className = 'worktitle';
+      label.appendChild(title);
+      entry.workLabel = label;
+      entry.workTitle = title;
+      entry.workOl = document.createElement('ol');
+      entry.workOl.className = 'work';
+    }
+    entry.workTitle.textContent = entry.running ? 'What is being checked' : 'What was done';
+    return entry.workOl;
+  }
+
+  // -------------------------------------------------------------------------
+  // The working on the glass: whichever check the panel is showing.
+  // -------------------------------------------------------------------------
+
+  var workOwner = null;
+  // Whether this run says anything as it goes. An older Stays Fixed only ever
+  // hands over the whole list at the end, and a heading promising that things
+  // will appear as they are checked would be a promise nobody kept.
+  var sawSteps = false;
+
+  // Built once, into the section that already sits at the top of the scrolling
+  // column. It has to stay there: put inside the picture's own box it steals
+  // the picture's height and squashes the screenshot to a sliver.
+  var workShell = (function () {
     var label = document.createElement('p');
     label.className = 'worklabel';
-    label.textContent = 'What was done';
+    var title = document.createElement('span');
+    title.className = 'worktitle';
+    var who = document.createElement('span');
+    who.className = 'workwho mono';
+    label.appendChild(title);
+    label.appendChild(who);
+    var waiting = document.createElement('p');
+    waiting.className = 'workwait';
+    waiting.hidden = true;
+    var list = document.createElement('ol');
+    list.className = 'work';
     ui.work.appendChild(label);
+    ui.work.appendChild(waiting);
     ui.work.appendChild(list);
-    ui.work.hidden = false;
+    return { title: title, who: who, waiting: waiting, list: list };
+  })();
+
+  /**
+   * Bring one check's working onto the glass.
+   *
+   * A bring is for a check that has just STARTED: the list is about to tick off
+   * and it is no use doing that below the fold, so the column goes back to the
+   * top where the working lives — unless the person has taken hold of the list,
+   * in which case nothing moves under them, like everywhere else on this page.
+   * A click never brings: somebody who reached for a row is already looking at
+   * it, and the row opening under their finger is the answer.
+   */
+  function openWork(entry, bring) {
+    if (!entry) return;
+    if (workOwner && workOwner !== entry) workOwner.root.classList.remove('working');
+    workOwner = entry;
+    entry.root.classList.add('working');
+    syncWork(entry);
+    if (bring && following && ui.scroll.scrollTop > 0) {
+      ui.scroll.scrollTo({ top: 0, behavior: CALM ? 'auto' : 'smooth' });
+    }
   }
 
-  /** Put a screen's pictures back in the hero, with the words that went with them. */
+  /** Redraw wherever this check's working is on show. */
+  function syncWork(entry) {
+    if (!entry) return;
+    if (workOwner === entry) {
+      var n = renderWork(workShell.list, entry.checks, entry.kind);
+      workShell.title.textContent = entry.running ? 'What is being checked' : 'What was done';
+      workShell.who.textContent = entry.name || '';
+      workShell.waiting.textContent = entry.running
+        ? 'Each thing appears here as it is checked.'
+        : 'Nothing was written down for this one.';
+      workShell.waiting.hidden = n > 0 || !sawSteps;
+      workShell.list.hidden = n === 0;
+      // Nothing to show and nothing promised: the section stays out of the way.
+      ui.work.hidden = n === 0 && !sawSteps;
+    }
+    // Under the row. Cheap once the list is on the page; the first step of a
+    // check has to go the long way round, because that is what turns a row
+    // with nothing under it into one worth opening.
+    if (entry.workOl && entry.workOl.parentNode) {
+      detailWork(entry);
+      renderWork(entry.workOl, entry.checks, entry.kind);
+    } else if (hasWork(entry)) {
+      redraw(entry);
+    }
+  }
+
+  /**
+   * One step, as it happens. Announced as running, found again by its id and
+   * settled when it is done.
+   */
+  function applyStep(entry, step) {
+    if (!entry || !step || typeof step !== 'object') return;
+    if (!labelOf(step)) return;
+    if (!Array.isArray(entry.checks)) entry.checks = [];
+    var id = idOf(step);
+    var kept = {
+      label: labelOf(step),
+      detail: detailOf(step),
+      state: stateOf(step),
+      key: step.key == null ? '' : String(step.key)
+    };
+    var found = -1;
+    for (var i = 0; i < entry.checks.length; i++) {
+      if (idOf(entry.checks[i]) === id) { found = i; break; }
+    }
+    if (found >= 0) entry.checks[found] = kept;
+    else entry.checks.push(kept);
+    syncWork(entry);
+  }
+
+  /**
+   * Take the authoritative list that arrives with a verdict.
+   *
+   * Steps keep the id they were announced with wherever the final list does not
+   * carry one, so a line a watcher has already been ticking is found again and
+   * updated rather than thrown away and drawn a second time. That is what makes
+   * the moment a check finishes look like nothing happened at all.
+   */
+  function adopt(entry, checks) {
+    var live = Array.isArray(entry.checks) ? entry.checks : [];
+    var known = Object.create(null);
+    var i;
+    for (i = 0; i < live.length; i++) {
+      if (live[i] && live[i].key) known[labelOf(live[i])] = String(live[i].key);
+    }
+    var out = [];
+    for (i = 0; i < checks.length; i++) {
+      var step = checks[i];
+      if (!step || typeof step !== 'object') continue;
+      var said = labelOf(step);
+      if (!said) continue;
+      var key = step.key == null ? '' : String(step.key);
+      out.push({
+        label: said,
+        detail: detailOf(step),
+        state: stateOf(step),
+        key: key || known[said] || ''
+      });
+    }
+    entry.checks = out;
+  }
+
+  /**
+   * A check has stopped. Anything still marked as happening is not happening
+   * any more, and a mark that keeps breathing next to a finished result is a
+   * lie — so those lines settle to a plain, colourless end.
+   */
+  function hush(entry) {
+    if (!entry || !Array.isArray(entry.checks)) return;
+    for (var i = 0; i < entry.checks.length; i++) {
+      var step = entry.checks[i];
+      if (stateOf(step) !== 'running') continue;
+      entry.checks[i] = { label: labelOf(step), detail: detailOf(step), state: 'ended', key: step.key || '' };
+    }
+  }
+
+  /**
+   * The claim a guard died on, as the last line of its working.
+   *
+   * A guard that failed has to show every claim that held before the one that
+   * did not, and this makes sure the one that did not is there even when the
+   * run only reported it in the verdict.
+   */
+  function markFailedClaim(entry, claim) {
+    var said = String(claim == null ? '' : claim).trim();
+    if (!said) return;
+    if (!Array.isArray(entry.checks)) entry.checks = [];
+    for (var i = 0; i < entry.checks.length; i++) {
+      if (labelOf(entry.checks[i]) !== said) continue;
+      entry.checks[i] = {
+        label: said, detail: detailOf(entry.checks[i]), state: 'bad', key: entry.checks[i].key || ''
+      };
+      return;
+    }
+    entry.checks.push({ label: said, detail: '', state: 'bad', key: 'claim:failed' });
+  }
+
+  /** Put a check back on the glass: its pictures if it has any, its working always. */
   function recall(entry) {
     var p = entry.pics;
-    if (!p) return;
-    var showed = false;
-    if (p.status === 'changed') showed = comparePictures(p);
-    if (!showed && nowOf(p)) {
-      singlePicture(p, entry.name);
-      showed = true;
+    if (p) {
+      var showed = false;
+      if (p.status === 'changed') showed = comparePictures(p);
+      if (!showed && nowOf(p)) {
+        singlePicture(p, entry.name);
+        showed = true;
+      }
+      if (showed) {
+        nameTheShot(entry.name);
+        sayOutcome(entry.tone, outcomeShort(p));
+        markShowing(entry);
+      }
     }
-    if (!showed) return;
-    nameTheShot(entry.name);
-    sayOutcome(entry.tone, outcomeShort(p));
-    showWork(entry.checks);
-    markShowing(entry);
+    openWork(entry);
   }
 
   function setOpen(entry, open) {
@@ -1773,7 +2245,16 @@ const SCRIPT = `
 
   var runningItem = null;
   function markRunning(entry) {
+    if (runningItem && runningItem !== entry) {
+      runningItem.running = false;
+      hush(runningItem);
+      syncWork(runningItem);
+    }
     runningItem = entry;
+    entry.running = true;
+    // A check that is starting again starts with an empty list, so nothing is
+    // left over from the last time it ran.
+    entry.checks = [];
     setTone(entry, 'running');
     if (following) entry.root.scrollIntoView({ block: 'nearest', behavior: CALM ? 'auto' : 'smooth' });
   }
@@ -2446,8 +2927,23 @@ const SCRIPT = `
       // photographed yet, so renaming the frame now would put this screen's
       // name under the last screen's picture — a caption that lies for a
       // second is worse than one that is a second behind.
-      markRunning(ensureItem('picture', String(ev.name || ''), ev.describe));
+      var starting = ensureItem('picture', String(ev.name || ''), ev.describe);
+      markRunning(starting);
+      // The working area clears and takes this screen's name, so the list that
+      // ticks off from here is unmistakably about the screen being checked now.
+      openWork(starting, true);
       scanning(true);
+      return;
+    }
+
+    // One thing, the moment it happens. This is the whole point of the panel:
+    // the names of what is being checked right now, each taking its mark as it
+    // settles, instead of a table that lands when it is already over.
+    if (type === 'screen:step' || type === 'guard:step') {
+      sawSteps = true;
+      var stepKind = type === 'guard:step' ? 'guard' : 'picture';
+      var stepping = ensureItem(stepKind, String(ev.name || ''), ev.describe);
+      applyStep(stepping, ev.step);
       return;
     }
 
@@ -2488,9 +2984,9 @@ const SCRIPT = `
         // in the list, because the picture is where the person is looking and
         // that line is what tells them there is something to decide.
         sayOutcome(tone, outcomeShort(ev));
-        // And what was actually done to it, right under the picture, while the
-        // person is looking at it.
-        showWork(ev.checks);
+        // And what was actually done to it, in the list beside the picture,
+        // while the person is looking at it.
+        openWork(done);
       }
       tint(worstTone());
       return;
@@ -2503,7 +2999,11 @@ const SCRIPT = `
         var guards = ev.total || expected.guard || countOf(plan.guards);
         setState(guards ? 'running ' + commas(guards) + ' ' + plural(guards, 'guard', 'guards') : 'running the guards');
       }
-      markRunning(ensureItem('guard', String(ev.name || ''), ev.describe));
+      var guarding = ensureItem('guard', String(ev.name || ''), ev.describe);
+      markRunning(guarding);
+      // Guards have working too: the claims this one makes, ticking off as
+      // each is checked. Shown the same way a screen's steps are.
+      openWork(guarding, true);
       return;
     }
 
@@ -2514,6 +3014,12 @@ const SCRIPT = `
     }
 
     if (type === 'run:done') {
+      // Nothing is happening any more, so nothing may still say it is.
+      for (var q = 0; q < order.length; q++) {
+        order[q].running = false;
+        hush(order[q]);
+        syncWork(order[q]);
+      }
       runningItem = null;
       ui.follow.hidden = true;
       scanning(false);
@@ -2561,9 +3067,16 @@ const SCRIPT = `
       // picture that is already decoded and the swap never flashes.
       preloadAll(entry.pics);
     }
-    // What was actually done to this screen. Kept as it arrived — the run is
-    // the one thing that knows, and the panel never invents a step.
-    if (Array.isArray(ev.checks)) entry.checks = ev.checks;
+    // What was actually done to this check. The list that comes with the
+    // verdict is the one that is right — a watcher that opened halfway through,
+    // or missed an event, ends up correct here whatever it saw on the way.
+    entry.running = false;
+    if (Array.isArray(ev.checks)) adopt(entry, ev.checks);
+    // Anything the run left mid-flight stops looking like it is still going.
+    hush(entry);
+    // And a guard that broke shows the claim it broke on, under every claim
+    // that held before it.
+    if (kind === 'guard' && ev.status === 'failed') markFailedClaim(entry, ev.failedAt);
     entry.outText = outcomeText(kind, ev);
     if (entry.verdict) entry.verdict.textContent = shortOutcome(kind, ev);
     entry.failedAt = (kind === 'guard' && ev.status === 'failed' && ev.failedAt) ? ev.failedAt : '';
@@ -2571,6 +3084,7 @@ const SCRIPT = `
     if (typeof ev.durationMs === 'number') tweenTo(entry.time, ev.durationMs, fmt);
     entry.tone = tone;
     redraw(entry);
+    syncWork(entry);
     setTone(entry, tone);
     // Only the checks that want a person open themselves. Everything else stays
     // one line, which is what keeps a clean run quiet. A row that has just
@@ -2633,7 +3147,10 @@ const SCRIPT = `
       handle(ev);
     } catch (err) {
       // A watch window must never be the reason a run looks broken. Whatever
-      // this event was, the next one still has to land.
+      // this event was, the next one still has to land. It is still said out
+      // loud where anyone would look for it — a panel that swallows its own
+      // mistakes in silence is a panel nobody can mend.
+      if (window.console && console.error) console.error('stays fixed: ' + (err && err.message ? err.message : err));
     }
   };
 
@@ -2642,6 +3159,11 @@ const SCRIPT = `
   window.__staysfixed_detach = function () {
     stopClock();
     scanning(false);
+    if (runningItem) {
+      runningItem.running = false;
+      hush(runningItem);
+      syncWork(runningItem);
+    }
     runningItem = null;
   };
 

@@ -247,6 +247,36 @@ export const CHECK_LABELS = Object.freeze({
 });
 
 /**
+ * The name of one line of the list.
+ *
+ * A step is announced twice — once the moment it starts, once when it settles — and
+ * the second announcement has to land on the SAME line rather than adding another.
+ * That only works if both sides agree on what to call it, so the names live here and
+ * neither side is free to invent its own.
+ *
+ * @typedef {'frozen'|'steps'|'settle'|'loaded'|'network'|'masks'|'size'|'pixels'|'console'|'retried'|'platform'|'failed'} CheckKey
+ */
+
+/**
+ * Every line name, as values, so nothing has to spell one out in a string.
+ * @type {Readonly<Record<CheckKey, CheckKey>>}
+ */
+export const CHECK_KEYS = Object.freeze({
+  frozen: 'frozen',
+  steps: 'steps',
+  settle: 'settle',
+  loaded: 'loaded',
+  network: 'network',
+  masks: 'masks',
+  size: 'size',
+  pixels: 'pixels',
+  console: 'console',
+  retried: 'retried',
+  platform: 'platform',
+  failed: 'failed',
+});
+
+/**
  * What was asked of the freeze layer for one screen. Everything here is a
  * setting, not a measurement — it is how the list can say a check was switched
  * off instead of pretending it passed.
@@ -316,42 +346,168 @@ export function buildChecks(input) {
   /** @type {import('../types.js').CheckStep[]} */
   const out = [];
   /**
-   * @param {string} label
-   * @param {string|undefined} detail
-   * @param {import('../types.js').CheckStep['state']} state
+   * Every line is written down under its name. The live half of this — a step
+   * announced the moment it starts, before anything is known about how it went —
+   * settles onto the line with the same name, so the two have to be handed the
+   * same names from the same place.
+   *
+   * @param {CheckKey} key
+   * @returns {Say}
    */
-  const say = (label, detail, state) => {
-    out.push(detail ? { label, detail, state } : { label, state });
+  const at = (key) => (label, detail, state) => {
+    out.push(detail ? { label, detail, state, key } : { label, state, key });
   };
 
   const screen = input.screen ?? /** @type {import('../types.js').ScreenConfig} */ ({ name: '' });
   const errors = input.consoleErrors ?? [];
 
-  frozenStep(say, input.frozen);
-  stepsStep(say, screen, input.failure);
+  frozenStep(at(CHECK_KEYS.frozen), input.frozen);
+  stepsStep(at(CHECK_KEYS.steps), screen, input.failure);
 
   if (input.failure) {
     // Nothing after this happened, so nothing after this is claimed. The one
     // thing still worth saying is whether the page was shouting on its way down.
-    say(CHECK_LABELS.failed, input.failure, 'bad');
-    consoleStep(say, errors);
+    at(CHECK_KEYS.failed)(CHECK_LABELS.failed, input.failure, 'bad');
+    consoleStep(at(CHECK_KEYS.console), errors);
     return out;
   }
 
-  settleStep(say, input.settle, input.frozen);
-  loadedStep(say, input.loaded, input.frozen);
-  networkStep(say, input.freeze, input.frozen);
-  masksStep(say, input.masks, input.masksAsked);
-  sizeStep(say, input);
-  pixelsStep(say, input);
-  consoleStep(say, errors);
-  retryStep(say, input);
-  platformStep(say, input.platform);
+  settleStep(at(CHECK_KEYS.settle), input.settle, input.frozen);
+  loadedStep(at(CHECK_KEYS.loaded), input.loaded, input.frozen);
+  networkStep(at(CHECK_KEYS.network), input.freeze, input.frozen);
+  masksStep(at(CHECK_KEYS.masks), input.masks, input.masksAsked);
+  sizeStep(at(CHECK_KEYS.size), input);
+  pixelsStep(at(CHECK_KEYS.pixels), input);
+  consoleStep(at(CHECK_KEYS.console), errors);
+  retryStep(at(CHECK_KEYS.retried), input);
+  platformStep(at(CHECK_KEYS.platform), input.platform);
 
   return out;
 }
 
 /** @typedef {(label: string, detail: string|undefined, state: import('../types.js').CheckStep['state']) => void} Say */
+
+/**
+ * One line of that same list, on its own, the moment it settles.
+ *
+ * The list above is built when a screen is finished, which is the only time every
+ * number is known — but a person watching wants the line to tick the moment the
+ * thing itself happens, not two seconds later in a table. This builds exactly one
+ * of those lines, from the same code and therefore in the same words: there is no
+ * second set of phrases to drift out of step with the first.
+ *
+ * Hands back nothing when there is nothing honest to say yet — a size step before
+ * anything has been measured, say — so a caller can offer what it knows and let
+ * this decide whether it amounts to a line.
+ *
+ * @param {CheckKey} key
+ * @param {ChecksInput} input   Only the parts this line needs have to be filled in.
+ * @returns {import('../types.js').CheckStep|undefined}
+ */
+export function checkStep(key, input) {
+  /** @type {import('../types.js').CheckStep[]} */
+  const out = [];
+  /** @type {Say} */
+  const say = (label, detail, state) => {
+    out.push(detail ? { label, detail, state, key } : { label, state, key });
+  };
+  const screen = input.screen ?? /** @type {import('../types.js').ScreenConfig} */ ({ name: '' });
+
+  switch (key) {
+    case 'frozen':
+      frozenStep(say, input.frozen);
+      break;
+    case 'steps':
+      stepsStep(say, screen, input.failure);
+      break;
+    case 'settle':
+      settleStep(say, input.settle, input.frozen);
+      break;
+    case 'loaded':
+      loadedStep(say, input.loaded, input.frozen);
+      break;
+    case 'network':
+      networkStep(say, input.freeze, input.frozen);
+      break;
+    case 'masks':
+      masksStep(say, input.masks, input.masksAsked);
+      break;
+    case 'size':
+      sizeStep(say, input);
+      break;
+    case 'pixels':
+      pixelsStep(say, input);
+      break;
+    case 'console':
+      consoleStep(say, input.consoleErrors ?? []);
+      break;
+    case 'retried':
+      retryStep(say, input);
+      break;
+    case 'platform':
+      platformStep(say, input.platform);
+      break;
+    case 'failed':
+      if (input.failure) say(CHECK_LABELS.failed, input.failure, 'bad');
+      break;
+    default:
+      break;
+  }
+  return out[0];
+}
+
+/**
+ * The same line again, said while the thing is still happening.
+ *
+ * A step is announced before it has an outcome, which means the words have to be
+ * chosen from what is already known — and what is already known before a step runs
+ * is the config. So the clock line says "left alone" up front when a project turned
+ * the clock freezing off, rather than claiming a freeze and taking it back.
+ *
+ * Nothing is ever announced early that only exists afterwards: whether a screen was
+ * photographed twice, or approved on another computer, is not a thing anybody can be
+ * told is "happening".
+ *
+ * @param {CheckKey} key
+ * @param {ChecksInput} input
+ * @returns {import('../types.js').CheckStep|undefined}
+ */
+export function runningStep(key, input) {
+  const label = runningLabel(key, input);
+  return label ? { label, state: 'running', key } : undefined;
+}
+
+/**
+ * @param {CheckKey} key
+ * @param {ChecksInput} input
+ * @returns {string|undefined}
+ */
+function runningLabel(key, input) {
+  const frozen = input.frozen;
+  switch (key) {
+    case 'frozen':
+      return frozen && frozen.clock === false ? CHECK_LABELS.frozenOff : CHECK_LABELS.frozen;
+    case 'steps':
+      return CHECK_LABELS.steps;
+    case 'settle':
+      return CHECK_LABELS.settle;
+    case 'loaded':
+      return frozen && frozen.fonts === false ? CHECK_LABELS.loadedOff : CHECK_LABELS.loaded;
+    case 'network':
+      return frozen && frozen.network === 'live' ? CHECK_LABELS.networkLive : CHECK_LABELS.network;
+    case 'masks':
+      return (input.masksAsked ?? 0) > 0 ? CHECK_LABELS.masks : CHECK_LABELS.masksNone;
+    case 'size':
+      return input.hasApproved === false ? CHECK_LABELS.sizeNew : CHECK_LABELS.size;
+    case 'pixels':
+      return input.hasApproved === false ? CHECK_LABELS.pixelsNew : CHECK_LABELS.pixels;
+    case 'console':
+      return CHECK_LABELS.console;
+    default:
+      // Nothing else is a thing that can be watched happening.
+      return undefined;
+  }
+}
 
 /**
  * @param {Say} say

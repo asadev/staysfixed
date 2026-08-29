@@ -13,6 +13,11 @@ import { applyFreeze, prepareForShutter } from '../freeze/index.js';
 import { settle } from '../freeze/settle.js';
 import { resolveMasks, paintMasks } from '../freeze/mask.js';
 import { StaysFixedError, isExpected, messageOf } from '../core/errors.js';
+// The words a step is described by, and the two builders that turn what is known at
+// this instant into one line of the list. Imported rather than written again here so
+// the line a person watches tick is the same line, in the same words, that the
+// finished list hands back a moment later.
+import { CHECK_KEYS, CHECK_LABELS, checkStep, runningStep } from '../core/events.js';
 // store.js reads `pngSize` back out of this file. Two modules about the same pictures
 // leaning on each other is fine here — both sides are plain functions, so neither is
 // half-built when the other asks for it.
@@ -51,10 +56,23 @@ const KNOWN_KEYS = new Set([...ACTION_ORDER, 'text', 'note']);
  *   freeze: import('../types.js').FreezeConfig,
  *   masks: import('../types.js').Mask[],
  * }} settings
- * @param {{fixturesDir: string, record?: boolean, timeoutMs?: number, thumbnail?: boolean}} ctx
+ * @param {{
+ *   fixturesDir: string,
+ *   record?: boolean,
+ *   timeoutMs?: number,
+ *   thumbnail?: boolean,
+ *   onStep?: (step: import('../types.js').CheckStep) => void,
+ * }} ctx
  *   `thumbnail` is asked for only while somebody is watching the run happen; it costs a
  *   decode of the picture that was just taken (skipped when the masks already decoded it)
  *   plus about forty milliseconds of shrinking, so it is off unless it is wanted.
+ *
+ *   `onStep` is the same idea for words instead of pixels: hand one in and this says
+ *   what it is doing as it does it — each phase named the moment it starts and named
+ *   again the moment it settles — so a watcher can tick the list off live instead of
+ *   being shown a finished table. Gated exactly the way `thumbnail` is: the run hands
+ *   one in only while a panel is open, so the ordinary case is one `typeof` check per
+ *   phase and nothing allocated at all.
  * @returns {Promise<import('../types.js').CaptureReport & {
  *   masks: import('../types.js').MaskRect[],
  *   timings: {steps: number, prepare: number, settle: number},
@@ -83,12 +101,88 @@ export async function captureScreen(page, screen, settings, ctx) {
   await page.setViewport(settings.viewport);
   page.clearConsole();
 
+  // What the freeze layer is being ASKED for. Worked out before it is asked, because a
+  // line announced as it starts can only be worded from what is already known — and a
+  // project that switched the clock freezing off has to be told that at the moment it
+  // does not happen, not have a freeze claimed and then taken back.
+  /** @type {import('../core/events.js').FrozenPlan} */
+  const plan = {
+    clock: settings.freeze.clock !== false,
+    motion: settings.freeze.motion !== false,
+    random: settings.freeze.random !== 'off',
+    fonts: settings.freeze.fonts !== false,
+    network: settings.freeze.network ?? 'block-external',
+    frames: settleConfig.frames ?? 2,
+    maxDriftPixels: settleConfig.maxDriftPixels ?? 0,
+  };
+  const masksAsked = (settings.masks ?? []).length;
+
+  // Gated exactly the way `thumbnail` is: the run hands an `onStep` in only while a
+  // panel is open. Nobody watching means this is null, every announcement below is one
+  // `if` that does nothing, and not a single object is made.
+  const onStep = typeof ctx.onStep === 'function' ? ctx.onStep : null;
+  /**
+   * The line announced as started and not yet settled — so a failure can close it
+   * instead of leaving a row spinning forever on somebody's screen.
+   * @type {import('../types.js').CheckStep|null}
+   */
+  let pending = null;
+
+  /**
+   * Name a phase as it begins.
+   * @param {import('../core/events.js').CheckKey} key
+   * @param {import('../core/events.js').ChecksInput} input
+   * @returns {void}
+   */
+  const begins = (key, input) => {
+    if (!onStep) return;
+    const step = runningStep(key, input);
+    pending = step ?? null;
+    if (step) onStep(step);
+  };
+
+  /**
+   * Name the same phase again, settled, under the same key.
+   * @param {import('../core/events.js').CheckKey} key
+   * @param {import('../core/events.js').ChecksInput} input
+   * @param {import('../types.js').CheckStep} [instead]  For a line whose number is not
+   *   knowable yet; the finished list fills that in.
+   * @returns {void}
+   */
+  const settled = (key, input, instead) => {
+    if (!onStep) return;
+    pending = null;
+    const step = instead ?? checkStep(key, input);
+    if (step) onStep(step);
+  };
+
+  /**
+   * Close whatever was in flight when something went wrong.
+   * @param {unknown} error
+   * @returns {void}
+   */
+  const closePending = (error) => {
+    if (!onStep || !pending) return;
+    const why = messageOf(error);
+    // Where a phase has its own wording for going wrong, use it: "could not reach the
+    // screen" is what happened, and leaving "reached the screen" up with a cross beside
+    // it says the opposite of the truth for as long as anybody is reading it.
+    const label = pending.key === CHECK_KEYS.steps ? CHECK_LABELS.stepsFailed : pending.label;
+    onStep({ ...pending, label, state: 'bad', detail: why });
+    pending = null;
+  };
+
+  begins(CHECK_KEYS.frozen, { screen, frozen: plan });
   const frozen = await applyFreeze(page, settings.freeze, {
     fixturesDir: ctx.fixturesDir,
     screenName: screen.name,
     record: ctx.record ?? false,
     deviceScaleFactor,
+  }).catch((error) => {
+    closePending(error);
+    throw error;
   });
+  settled(CHECK_KEYS.frozen, { screen, frozen: plan });
 
   // A frozen clock cannot time anything, so the stopwatch is the host's own, and it is
   // the monotonic one: a machine that adjusts its clock mid-run must not be able to
@@ -99,11 +193,13 @@ export async function captureScreen(page, screen, settings, ctx) {
   const spent = { steps: 0, prepare: 0, settle: 0 };
 
   try {
+    begins(CHECK_KEYS.steps, { screen });
     if (typeof screen.do === 'function') {
       await screen.do(page);
     } else {
       await runSteps(page, screen.steps ?? []);
     }
+    settled(CHECK_KEYS.steps, { screen });
 
     // Scrolling back to the top is the deterministic default, but a screen that
     // deliberately scrolled somewhere must be photographed where it landed.
@@ -113,11 +209,21 @@ export async function captureScreen(page, screen, settings, ctx) {
     const startedPrepare = clock();
     spent.steps = since(startedSteps, startedPrepare);
 
+    // Waiting for the page to be ready. WHAT was still loading can only be read off the
+    // frame that ends up being kept, which does not exist yet, so this line settles on
+    // the one thing that is true here — the shutter waited — and the finished list fills
+    // in the count of faces and pictures a moment later, on the same line.
+    begins(CHECK_KEYS.loaded, { screen, frozen: plan });
     await prepareForShutter(page, {
       fonts: settings.freeze.fonts !== false,
       timeoutMs,
       keepScroll: scrolledOnPurpose,
     });
+    settled(
+      CHECK_KEYS.loaded,
+      { screen, frozen: plan },
+      plan.fonts ? { key: CHECK_KEYS.loaded, label: CHECK_LABELS.loaded, state: 'ok' } : undefined,
+    );
 
     /** @type {import('../types.js').CaptureOptions} */
     const shotOptions = {};
@@ -133,6 +239,10 @@ export async function captureScreen(page, screen, settings, ctx) {
     const startedSettle = clock();
     spent.prepare = since(startedPrepare, startedSettle);
 
+    // Holding still — and the shutter is inside it. The settle loop photographs the
+    // screen over and over until two frames in a row are identical and keeps the last of
+    // them, so this is ONE line rather than two: there is one thing happening.
+    begins(CHECK_KEYS.settle, { screen, frozen: plan });
     const held = await settle(page, {
       frames: settleConfig.frames ?? 2,
       intervalMs: settleConfig.intervalMs ?? 250,
@@ -142,6 +252,7 @@ export async function captureScreen(page, screen, settings, ctx) {
       probe: () => page.shoot(probeOptions),
     });
     spent.settle = since(startedSettle, clock());
+    settled(CHECK_KEYS.settle, { screen, settle: held.report, frozen: plan });
 
     // Asked the moment the picture exists, and never before: this is a statement about
     // the frame that was kept. Reading it is a single round trip that touches nothing —
@@ -151,6 +262,7 @@ export async function captureScreen(page, screen, settings, ctx) {
     // question later; by then the app has moved on.
     const loaded = await readLoaded(page);
 
+    begins(CHECK_KEYS.masks, { screen, masksAsked });
     const rects = await resolveMasks(page, settings.masks ?? [], { deviceScaleFactor });
     // Masks force us to decode the picture; hold on to those pixels. The preview a
     // watcher is shown is made from the very same ones — the picture that gets
@@ -159,6 +271,9 @@ export async function captureScreen(page, screen, settings, ctx) {
     const painted = rects.length > 0 ? paintInto(held.png, rects) : null;
     const png = painted ? painted.png : held.png;
     const size = pngSize(png);
+    // Said after the painting, not after the finding: the line claims the boxes are on
+    // the picture, so it waits until they are.
+    settled(CHECK_KEYS.masks, { screen, masks: rects, masksAsked });
 
     // The picture is taken; now put the app back if this screen asked us to.
     //
@@ -173,6 +288,13 @@ export async function captureScreen(page, screen, settings, ctx) {
       await runSteps(page, screen.after);
     }
 
+    // Requests are not a phase — the outside world is kept out for the whole capture —
+    // so this is one line, said once, at the end. Counted here rather than a few lines
+    // earlier so the number a watcher sees is the same number the finished list carries,
+    // including anything the putting-back steps asked for.
+    const stats = frozen.stats();
+    settled(CHECK_KEYS.network, { screen, freeze: stats, frozen: plan });
+
     /** @type {import('../types.js').CaptureReport & {masks: import('../types.js').MaskRect[], timings: typeof spent, spent: typeof spent, frozen: import('../core/events.js').FrozenPlan, loaded?: import('../core/events.js').LoadedReport, thumbnail?: string}} */
     const report = {
       png,
@@ -180,20 +302,13 @@ export async function captureScreen(page, screen, settings, ctx) {
       height: size.height,
       settle: held.report,
       consoleErrors: page.consoleErrors(),
-      freeze: frozen.stats(),
+      freeze: stats,
       masks: rects,
-      // What was asked of the freeze layer, in the same words the config used. Written
-      // down here rather than worked out later, because by the time anybody reports on
-      // this screen the settings have been merged away.
-      frozen: {
-        clock: settings.freeze.clock !== false,
-        motion: settings.freeze.motion !== false,
-        random: settings.freeze.random !== 'off',
-        fonts: settings.freeze.fonts !== false,
-        network: settings.freeze.network ?? 'block-external',
-        frames: settleConfig.frames ?? 2,
-        maxDriftPixels: settleConfig.maxDriftPixels ?? 0,
-      },
+      // What was asked of the freeze layer, in the same words the config used. Worked
+      // out at the top rather than here, because by the time anybody reports on this
+      // screen the settings have been merged away — and because the live list needs the
+      // same answer before any of this happens, and the two must never disagree.
+      frozen: plan,
       // The same three numbers under both names the rest of the tool asks for them by.
       timings: spent,
       spent,
@@ -204,6 +319,11 @@ export async function captureScreen(page, screen, settings, ctx) {
       if (small) report.thumbnail = small;
     }
     return report;
+  } catch (error) {
+    // A row that stays "running" for the rest of the run is a lie about what happened.
+    // The run reports the failure itself; this only closes the line it fell over on.
+    closePending(error);
+    throw error;
   } finally {
     // Releasing must never be the thing that hides a real failure.
     try {

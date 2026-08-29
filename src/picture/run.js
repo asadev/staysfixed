@@ -21,7 +21,7 @@ import { resetWindow } from '../drive/launch.js';
 import { gitInfo } from '../core/git.js';
 import { messageOf } from '../core/errors.js';
 import { detail } from '../core/log.js';
-import { emitEvent, fileUrl, buildChecks } from '../core/events.js';
+import { emitEvent, fileUrl, buildChecks, checkStep, runningStep, CHECK_KEYS } from '../core/events.js';
 
 /**
  * A picture result plus two things the plain result has no room for: whether it
@@ -231,6 +231,50 @@ async function runOneScreen(project, page, screen, ctx) {
   /** @type {import('../types.js').CompareReport|null} */
   let compare = null;
   let attempts = 0;
+
+  /**
+   * Say one thing about this screen the moment it is true.
+   *
+   * The finished list at the end is still the authority — a watcher that missed every
+   * one of these ends up with exactly the same rows — but a person who is watching
+   * wants to see the working tick past as it happens rather than appear all at once
+   * when the screen is already over.
+   *
+   * Only while somebody is watching, and gated on the very same flag the small pictures
+   * are: the run sets `thumbnail` when a panel is open. Nobody watching means this is
+   * undefined, nothing is built and nothing is sent.
+   *
+   * @type {((step: import('../types.js').CheckStep) => void)|undefined}
+   */
+  const onStep =
+    ctx.thumbnail === true && ctx.events
+      ? (/** @type {import('../types.js').CheckStep} */ step) => {
+          emitEvent(ctx.events, { type: 'screen:step', name: screen.name, step });
+        }
+      : undefined;
+
+  /**
+   * One line of the working, built from what is known at this instant.
+   *
+   * @param {import('../core/events.js').CheckKey} key
+   * @param {boolean} [starting]  True to name it as it begins, false once it has settled.
+   * @returns {void}
+   */
+  function tell(key, starting) {
+    if (!onStep) return;
+    /** @type {import('../core/events.js').ChecksInput} */
+    const known = {
+      screen,
+      size,
+      approvedSize: compare?.approvedSize,
+      compare,
+      hasApproved: Boolean(approved),
+      tolerance: settings.tolerance,
+      consoleErrors,
+    };
+    const step = starting ? runningStep(key, known) : checkStep(key, known);
+    if (step) onStep(step);
+  }
   /** @type {Awaited<ReturnType<typeof captureScreen>>|undefined} */
   let last;
 
@@ -288,6 +332,10 @@ async function runOneScreen(project, page, screen, ctx) {
         record: ctx.record ?? false,
         timeoutMs: settings.freeze.settle?.timeoutMs,
         thumbnail: ctx.thumbnail === true,
+        // The phases inside one photograph — freezing, the recipe, waiting, holding
+        // still, painting over the live areas — can only be announced by the thing
+        // doing them. Everything after the shutter is announced here instead.
+        onStep,
       });
       accountForCapture(ctx.timings, shot);
       last = shot;
@@ -318,6 +366,12 @@ async function runOneScreen(project, page, screen, ctx) {
 
       if (!approved) break;
 
+      // These two lines exist only once there is something to compare against, so they
+      // are said here rather than by the capture: the size match and the pixel count are
+      // both answered by the single call below.
+      tell(CHECK_KEYS.size, true);
+      tell(CHECK_KEYS.pixels, true);
+
       const stopCompare = ctx.timings?.mark('compare');
       // compareFast, not comparePng: identical bytes are answered from the PNG header
       // instead of decoding two retina images pixel by pixel. Nothing changed on most
@@ -325,11 +379,23 @@ async function runOneScreen(project, page, screen, ctx) {
       // comparing stage from about a quarter of a second a screen to nothing at all.
       compare = compareFast(approved.png, shot.png, settings.tolerance, shot.masks);
       stopCompare?.();
+      tell(CHECK_KEYS.size);
+      tell(CHECK_KEYS.pixels);
       if (compare.equal) break;
       if (attempt <= ctx.retries) {
         detail(`${screen.name} looked different on attempt ${attempt} — taking it again.`);
       }
     }
+
+    if (!approved) {
+      // Nothing to measure this against, which is an answer rather than a gap. Said
+      // here because the loop above never reached a comparison to say it.
+      tell(CHECK_KEYS.size);
+      tell(CHECK_KEYS.pixels);
+    }
+    // Whatever the page shouted while nobody was looking. Known from the moment the
+    // picture was taken, and the last line of the working either way.
+    tell(CHECK_KEYS.console);
   } catch (error) {
     return done(
       {

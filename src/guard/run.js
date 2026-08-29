@@ -6,6 +6,14 @@
  * from the same clean state, a guard that needs a second go is recorded as
  * wobbly rather than green, and the failure message carries the story of the
  * original bug so nobody has to go looking for it.
+ *
+ * A guard also has to be watchable while it happens. It is the part of this tool
+ * that checks behaviour rather than looks — it drives the app and asserts what it
+ * still does — and reporting it as a single line hid every one of those
+ * assertions. So each claim and each action is passed straight out as it starts
+ * and again as it settles, and the whole list travels with the result. A guard
+ * that fails on its fifth claim still shows the four that held: "these are fine,
+ * this one is not" is most of the value of running it at all.
  */
 
 import { makeGuardApi, ExpectationFailed } from './api.js';
@@ -14,8 +22,14 @@ import { emitEvent } from '../core/events.js';
 
 const DEFAULT_TIMEOUT = 30_000;
 
+/** How the runner names its own first step — the clean start every guard gets. */
+const FRESH_KEY = 'fresh';
+
 /**
- * @typedef {import('../types.js').GuardResult & {retriedToPass?: boolean}} GuardRunResult
+ * @typedef {import('../types.js').GuardResult & {
+ *   retriedToPass?: boolean,
+ *   checks?: import('../types.js').CheckStep[],
+ * }} GuardRunResult
  */
 
 /**
@@ -24,6 +38,8 @@ const DEFAULT_TIMEOUT = 30_000;
  * @property {string} [message]
  * @property {string} [failedAt]
  */
+
+/** @typedef {(step: import('../types.js').CheckStep) => void} StepSink */
 
 /**
  * Run every guard against an app that is already open.
@@ -91,10 +107,31 @@ export async function runGuards(project, app, guards, opts = {}) {
     /** @type {AttemptOutcome} */
     let outcome = { ok: false, message: 'This guard did not run.' };
     let attempts = 0;
+    /** @type {import('../types.js').CheckStep[]} */
+    let checks = [];
 
     while (attempts < retries + 1) {
       attempts += 1;
-      outcome = await attemptGuard(project, app, guard, baseUrl, timeoutMs);
+      // A second go starts the list again. What a person needs to see is what the
+      // verdict was actually made on, and that is the last attempt — the earlier
+      // one is already recorded, more usefully, as "it only passed on try 2".
+      const attempt = attempts;
+      /** @type {import('../types.js').CheckStep[]} */
+      const collected = [];
+      checks = collected;
+
+      /** @type {StepSink} */
+      const onStep = (step) => {
+        // Keys are unique inside one attempt; a retry re-announces the same
+        // claims, and a watcher must not mistake the second run of a claim for
+        // the settling of the first.
+        const stamped =
+          attempt > 1 && step.key ? { ...step, key: `try${attempt}-${step.key}` } : step;
+        record(collected, stamped);
+        emitEvent(events, { type: 'guard:step', name: guard.name, step: stamped });
+      };
+
+      outcome = await attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep);
       if (outcome.ok) break;
       if (opts.signal?.aborted) break;
     }
@@ -108,6 +145,7 @@ export async function runGuards(project, app, guards, opts = {}) {
       durationMs: Date.now() - startedAt,
       attempts,
     };
+    if (checks.length > 0) result.checks = checks;
 
     if (outcome.ok) {
       // Passing only on the second go is not passing. The flake register picks
@@ -128,6 +166,29 @@ export async function runGuards(project, app, guards, opts = {}) {
 }
 
 /**
+ * Put one step into the list it belongs to.
+ *
+ * A step is said twice — once as it starts, once as it finishes — and the list
+ * should hold one line per thing, not two. The settled version replaces the
+ * running one in place, so the order stays the order it happened in.
+ *
+ * @param {import('../types.js').CheckStep[]} into
+ * @param {import('../types.js').CheckStep} step
+ * @returns {void}
+ */
+function record(into, step) {
+  if (step.key) {
+    for (let i = 0; i < into.length; i++) {
+      if (into[i].key === step.key) {
+        into[i] = step;
+        return;
+      }
+    }
+  }
+  into.push(step);
+}
+
+/**
  * @param {import('../types.js').RunEvents|undefined} events
  * @param {GuardRunResult} result
  * @returns {void}
@@ -141,6 +202,10 @@ function emitGuardDone(events, result) {
     message: result.message,
     failedAt: result.failedAt,
     because: result.because,
+    // Everything this guard actually asserted, in its own words and its own
+    // order — so a listener that arrived late, or one that only keeps the
+    // verdicts, still has the working.
+    checks: result.checks,
   });
 }
 
@@ -152,11 +217,25 @@ function emitGuardDone(events, result) {
  * @param {import('../types.js').Guard} guard
  * @param {string|undefined} baseUrl
  * @param {number} timeoutMs
+ * @param {StepSink} [onStep]
  * @returns {Promise<AttemptOutcome>}
  */
-async function attemptGuard(project, app, guard, baseUrl, timeoutMs) {
+async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
   /** @type {ReturnType<typeof setTimeout>|undefined} */
   let timer;
+
+  /**
+   * @param {import('../types.js').CheckStep} step
+   * @returns {void}
+   */
+  const tell = (step) => {
+    if (!onStep) return;
+    try {
+      onStep(step);
+    } catch {
+      // Watching a guard must never be able to fail one.
+    }
+  };
 
   try {
     await Promise.race([
@@ -171,10 +250,29 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs) {
         // own, which is the single most confusing shape a failure can take. So an
         // Electron window is reloaded instead. Its main process keeps whatever it
         // was holding; only the screen goes back to how it opened.
-        if (baseUrl) await app.page.goto(baseUrl);
-        else await resetWindow(app);
+        const fresh = 'started from a clean screen';
+        tell({ key: FRESH_KEY, label: fresh, state: 'running' });
+        try {
+          if (baseUrl) await app.page.goto(baseUrl);
+          else await resetWindow(app);
+        } catch (error) {
+          tell({
+            key: FRESH_KEY,
+            label: fresh,
+            detail: error instanceof Error ? error.message : String(error),
+            state: 'bad',
+          });
+          throw error;
+        }
+        tell({
+          key: FRESH_KEY,
+          label: fresh,
+          detail: baseUrl ? 'back to the front door' : 'the window was reloaded',
+          state: 'ok',
+        });
+
         clearConsole(app);
-        await guard.run(makeGuardApi(app.page, project));
+        await guard.run(makeGuardApi(app.page, project, onStep ? { onStep } : {}));
       })(),
       new Promise((_resolve, reject) => {
         timer = setTimeout(() => {

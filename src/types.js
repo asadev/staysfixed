@@ -304,6 +304,9 @@
  * @property {string} [failedAt]              The plain-language expectation that failed.
  * @property {string} [file]
  * @property {string} [because]
+ * @property {CheckStep[]} [checks]           Every claim the guard asserted and every action it took,
+ *                                          in order. A guard that failed still shows the claims that
+ *                                          held before it — that is most of the value.
  * @property {number} durationMs
  * @property {number} [attempts]
  */
@@ -482,7 +485,7 @@ export {};
  * run began) so a watcher can draw a timeline without keeping its own clock.
  *
  * @typedef {object} RunEvent
- * @property {'run:start'|'screen:start'|'screen:shot'|'screen:done'|'guard:start'|'guard:done'|'phase'|'note'|'run:done'} type
+ * @property {'run:start'|'screen:start'|'screen:step'|'screen:shot'|'screen:done'|'guard:start'|'guard:step'|'guard:done'|'phase'|'note'|'run:done'} type
  * @property {number} at                      Milliseconds since the run started.
  * @property {string} [name]                  Screen or guard name.
  * @property {string} [describe]              The plain-language description.
@@ -503,6 +506,8 @@ export {};
  *                                          thumbnail is unreadable, which is the whole point of looking.
  * @property {string} [approvedFile]          file:// URL of the approved picture.
  * @property {string} [diffFile]              file:// URL of the difference image.
+ * @property {CheckStep} [step]              One step, reported the moment it happens, so a watcher can
+ *                                          tick the list off live instead of waiting for the verdict.
  * @property {CheckStep[]} [checks]           What was actually done to this screen, in order.
  *                                          A verdict on its own ("matches") does not tell anyone what
  *                                          was verified, and a row showing only a name and a duration
@@ -559,5 +564,7 @@ export {};
  * @typedef {object} CheckStep
  * @property {string} label                   Plain language: "held still", "every pixel compared".
  * @property {string} [detail]                The number behind it: "5,184,000 pixels, none different".
- * @property {'ok'|'warn'|'bad'|'skipped'} state
+ * @property {'running'|'ok'|'warn'|'bad'|'skipped'} state
+ * @property {string} [key]                   Stable id, so a step reported as 'running' can be found
+ *                                          again and settled when it finishes.
  */

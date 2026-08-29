@@ -5,6 +5,14 @@
  * who wrote it has forgotten the bug. That is why assertions are a sentence plus
  * a check, and never a bare comparison: `expect('the sidebar is hidden', ...)`
  * fails with "expected: the sidebar is hidden", which anyone can act on.
+ *
+ * Those sentences are also the answer to the fairest question anyone asks about
+ * this tool: "is it only about how things look?" It is not — a guard drives the
+ * app and asserts what it still does — but that was invisible, because a guard
+ * reported one line however many things it proved. So every claim, and every
+ * action between the claims, now says itself out loud the moment it happens:
+ * announced as it starts, settled as it finishes. The list a person watches tick
+ * off IS the guard's own words, in the guard's own order.
  */
 
 import { exec } from 'node:child_process';
@@ -28,15 +36,79 @@ const DEFAULT_RUN_TIMEOUT = 60_000;
 /** Commands can print a lot; 10MB before we cut them off. */
 const MAX_OUTPUT = 10 * 1024 * 1024;
 
+/** Longest a selector, path or command is shown before it is cut short. */
+const MAX_LABEL = 80;
+
+/**
+ * How a step's id says what kind of step it is.
+ *
+ * An assertion is the point of a guard; opening a page or clicking a button is
+ * the setup that gets there. `CheckStep` has no room for that difference — and
+ * should not grow one for the sake of a colour — so it rides on the id, which
+ * every step needs anyway. Anything watching can draw `claim-` lines loud and
+ * `did-` lines quiet; anything that does not care sees a perfectly ordinary list.
+ */
+const CLAIM = 'claim';
+const ACTION = 'did';
+
+/**
+ * What a guard is told to report to, when anyone is collecting.
+ * @typedef {object} GuardApiOptions
+ * @property {(step: import('../types.js').CheckStep) => void} [onStep]
+ *           Called as each claim and each action starts, and again as it settles.
+ *           The two calls carry the same `key`.
+ */
+
 /**
  * Build the object passed to a guard's `run`.
  *
  * @param {import('../types.js').PageApi} page
  * @param {import('../types.js').Project} project
+ * @param {GuardApiOptions} [opts]
  * @returns {import('../types.js').GuardApi}
  */
-export function makeGuardApi(page, project) {
+export function makeGuardApi(page, project, opts = {}) {
   const root = project.paths.root;
+  const onStep = typeof opts.onStep === 'function' ? opts.onStep : null;
+  let counted = 0;
+
+  /**
+   * Hand one step out, and never let that matter.
+   *
+   * Reporting is a convenience laid over a check; a listener that throws must not
+   * change whether a bug that was fixed is still fixed.
+   *
+   * @param {import('../types.js').CheckStep} step
+   * @returns {void}
+   */
+  function tell(step) {
+    if (!onStep) return;
+    try {
+      onStep(step);
+    } catch {
+      // Watching is never worth a guard.
+    }
+  }
+
+  /**
+   * Say a thing has started, and hand back the way to say how it went.
+   *
+   * When nobody is collecting this allocates nothing and returns a function that
+   * does nothing, so a guard run with no watcher costs exactly what it did before.
+   *
+   * @param {string} kind   CLAIM or ACTION.
+   * @param {string} label  Plain language, already final — the same words settle it.
+   * @returns {(state: import('../types.js').CheckStep['state'], detail?: string) => void}
+   */
+  function announce(kind, label) {
+    if (!onStep) return () => {};
+    counted += 1;
+    const key = `${kind}-${counted}`;
+    tell({ key, label, state: 'running' });
+    return (state, detail) => {
+      tell(detail ? { key, label, detail, state } : { key, label, state });
+    };
+  }
 
   return {
     page,
@@ -46,16 +118,30 @@ export function makeGuardApi(page, project) {
      * @param {string} to
      * @returns {Promise<void>}
      */
-    open(to) {
-      return page.goto(to);
+    async open(to) {
+      const settle = announce(ACTION, `opened ${short(to)}`);
+      try {
+        await page.goto(to);
+      } catch (error) {
+        settle('bad', reasonOf(error));
+        throw error;
+      }
+      settle('ok');
     },
 
     /**
      * @param {string} selector
      * @returns {Promise<void>}
      */
-    click(selector) {
-      return page.click(selector);
+    async click(selector) {
+      const settle = announce(ACTION, `clicked ${short(selector)}`);
+      try {
+        await page.click(selector);
+      } catch (error) {
+        settle('bad', reasonOf(error));
+        throw error;
+      }
+      settle('ok');
     },
 
     /**
@@ -75,18 +161,32 @@ export function makeGuardApi(page, project) {
         });
       }
 
+      // The claim goes out before it is checked, not after. A person watching
+      // sees what is being asked while it is being asked — which is the whole
+      // difference between a list that ticks and a table that appears.
+      const settle = announce(CLAIM, claim.trim());
+
       let result;
       try {
         result = await check();
       } catch (cause) {
         // A nested expectation already reads well — do not bury it in another layer.
-        if (cause instanceof ExpectationFailed) throw cause;
-        throw new Error(`while checking '${claim}': ${cause instanceof Error ? cause.message : String(cause)}`, {
+        if (cause instanceof ExpectationFailed) {
+          settle('bad', cause.claim === claim.trim() ? undefined : `inside it: ${cause.claim}`);
+          throw cause;
+        }
+        const why = cause instanceof Error ? cause.message : String(cause);
+        settle('bad', firstLine(why));
+        throw new Error(`while checking '${claim}': ${why}`, {
           cause,
         });
       }
 
-      if (isNegative(result)) throw new ExpectationFailed(claim);
+      if (isNegative(result)) {
+        settle('bad', 'this is not true any more');
+        throw new ExpectationFailed(claim);
+      }
+      settle('ok');
     },
 
     /**
@@ -94,15 +194,17 @@ export function makeGuardApi(page, project) {
      * must still succeed, a file that must still be generated — live here.
      *
      * A non-zero exit is returned, never thrown: whether it means failure is the
-     * guard's decision, not ours.
+     * guard's decision, not ours. The step says so the same way — a command that
+     * came back unhappy is worth noticing, and is still not a verdict.
      *
      * @param {string} cmd
      * @param {{cwd?: string, timeoutMs?: number}} [runOpts]
      * @returns {Promise<{code: number, stdout: string, stderr: string}>}
      */
-    run(cmd, runOpts = {}) {
+    async run(cmd, runOpts = {}) {
       const cwd = runOpts.cwd ? path.resolve(root, runOpts.cwd) : root;
       const timeoutMs = runOpts.timeoutMs ?? DEFAULT_RUN_TIMEOUT;
+      const settle = announce(ACTION, `ran ${short(cmd)}`);
 
       /** @type {Promise<{code: number, stdout: string, stderr: string}>} */
       const finished = new Promise((resolve) => {
@@ -129,7 +231,13 @@ export function makeGuardApi(page, project) {
           },
         );
       });
-      return finished;
+
+      const outcome = await finished;
+      if (outcome.code === 0) settle('ok', 'finished cleanly, code 0');
+      else if (outcome.code === 124) {
+        settle('warn', `stopped after ${humanTime(timeoutMs)}, code 124`);
+      } else settle('warn', `came back with code ${outcome.code}`);
+      return outcome;
     },
 
     /**
@@ -149,20 +257,30 @@ export function makeGuardApi(page, project) {
         });
       }
 
+      const settle = announce(ACTION, `read ${short(relative)}`);
+      /** @type {string} */
+      let text;
       try {
-        return await fsp.readFile(full, 'utf8');
+        text = await fsp.readFile(full, 'utf8');
       } catch (cause) {
         const code = /** @type {any} */ (cause)?.code;
         if (code === 'ENOENT') {
+          settle('bad', 'there is no such file');
           throw new StaysFixedError(`There is no file called "${relative}" in the project.`, { cause });
         }
         if (code === 'EISDIR') {
+          settle('bad', 'that is a folder, not a file');
           throw new StaysFixedError(`"${relative}" is a folder, not a file.`, { cause });
         }
+        settle('bad', reasonOf(cause));
         throw new StaysFixedError(`Could not read "${relative}": ${cause instanceof Error ? cause.message : String(cause)}`, {
           cause,
         });
       }
+
+      const lines = text === '' ? 0 : text.split('\n').length;
+      settle('ok', `${count(lines)} ${lines === 1 ? 'line' : 'lines'}`);
+      return text;
     },
   };
 }
@@ -184,6 +302,44 @@ function isNegative(value) {
   if (typeof value === 'number' && Number.isNaN(value)) return true;
   if (Array.isArray(value) && value.length === 0) return true;
   return false;
+}
+
+/**
+ * A selector, path or command, short enough to read in a list.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function short(text) {
+  const one = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (one === '') return 'nothing';
+  return one.length > MAX_LABEL ? `${one.slice(0, MAX_LABEL - 1)}…` : one;
+}
+
+/**
+ * @param {unknown} error
+ * @returns {string}
+ */
+function reasonOf(error) {
+  return firstLine(error instanceof Error ? error.message : String(error));
+}
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+function firstLine(text) {
+  const line = String(text ?? '').split('\n')[0].trim();
+  if (line === '') return 'it did not say why';
+  return line.length > 120 ? `${line.slice(0, 119)}…` : line;
+}
+
+/**
+ * @param {number} n
+ * @returns {string}
+ */
+function count(n) {
+  return Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : String(n);
 }
 
 /**
