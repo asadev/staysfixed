@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Logs and crash dumps
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+
+# Operating system junk
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------------------------
+# Stays Fixed
+#
+# The one thing people get wrong: only the EVIDENCE is ignored, never the
+# PROMISE. Approved pictures, guards, markers and recorded fixtures are the
+# whole point of the tool and they all belong in git — without them a fresh
+# checkout has nothing to compare against and every screen comes back "new".
+#
+# Ignored (thrown away and rewritten on every run):
+#   .staysfixed/results/    the photos this run took, plus its diff images
+#   .staysfixed/report.html the side-by-side page built from those photos
+#
+# Committed (do NOT add these to this file):
+#   .staysfixed/approved/   the approved pictures a human said yes to
+#   .staysfixed/guards/     one check per bug that was already fixed
+#   .staysfixed/markers/    the known-good points a regression is traced to
+#   .staysfixed/fixtures/   recorded network replies, so runs match
+#   .staysfixed/history.json the flake register
+# ---------------------------------------------------------------------------
+.staysfixed/results/
+.staysfixed/report.html
+
+# The example projects the test suite drives get the same treatment.
+fixtures/**/.staysfixed/results/
+fixtures/**/.staysfixed/report.html

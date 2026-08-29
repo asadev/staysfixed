@@ -1,0 +1,61 @@
+{
+  "name": "staysfixed",
+  "version": "0.1.0",
+  "description": "Prove that what already worked still works after an agent changed the code. Picture checks, guards for fixed bugs, a pre-release walkthrough, and known-good markers — as a CLI and as an MCP server.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Asad Iqbal",
+  "homepage": "https://github.com/asadev/staysfixed",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asadev/staysfixed.git"
+  },
+  "bugs": {
+    "url": "https://github.com/asadev/staysfixed/issues"
+  },
+  "keywords": [
+    "regression",
+    "visual-regression",
+    "screenshot-testing",
+    "snapshot",
+    "mcp",
+    "mcp-server",
+    "ai-agents",
+    "electron",
+    "testing"
+  ],
+  "bin": {
+    "staysfixed": "bin/staysfixed.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
+    "test:determinism": "node --test test/determinism.test.js",
+    "check": "npm run typecheck && npm test",
+    "staysfixed": "node bin/staysfixed.js"
+  },
+  "dependencies": {
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pngjs": "^6.0.5",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The Unstable App</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="dot"></span>
+      <h1>The Unstable App</h1>
+      <p class="sub">Everything on this page moves. That is the point.</p>
+      <nav>
+        <button data-sf="go-home" class="tab">Home</button>
+        <button data-sf="go-details" class="tab">Open details</button>
+      </nav>
+    </header>
+
+    <main id="view-home" class="view">
+      <section class="card" id="time">
+        <h2>The clock</h2>
+        <p class="mono big" data-sf="clock">--:--:--</p>
+        <p class="mono" data-sf="stamp">----</p>
+        <p data-sf="ago">a moment ago</p>
+      </section>
+
+      <section class="card" id="motion">
+        <h2>Things that will not sit still</h2>
+        <div class="row">
+          <div class="spinner" title="css animation, forever"></div>
+          <div class="slider" data-sf="slider">web animations api</div>
+          <button class="grow" data-sf="hover-me">Hover changes me</button>
+        </div>
+        <p class="caret-line">A blinking caret <span class="caret">|</span></p>
+        <input data-sf="typed" autofocus placeholder="autofocused on load" />
+      </section>
+
+      <section class="card" id="random">
+        <h2>Randomness</h2>
+        <p>A number: <b class="mono" data-sf="number">?</b></p>
+        <p>A uuid: <b class="mono" data-sf="uuid">?</b></p>
+        <ul class="shuffled" data-sf="shuffled"></ul>
+      </section>
+
+      <section class="card" id="chart">
+        <h2>A chart of nothing</h2>
+        <div class="bars" data-sf="bars"></div>
+      </section>
+
+      <section class="card" id="feed">
+        <h2>A live feed</h2>
+        <p class="hint">Fresh nonsense from the server on every single load.</p>
+        <div class="rows" id="feed-rows" data-sf="feed"></div>
+      </section>
+
+      <section class="card" id="late">
+        <h2>A picture that arrives late</h2>
+        <div class="frame"><img data-sf="late-image" alt="" /></div>
+        <p class="blocky">BLOCK FONT SAMPLE</p>
+      </section>
+    </main>
+
+    <main id="view-details" class="view" hidden>
+      <section class="card">
+        <h2 data-sf="details-heading">Details</h2>
+        <p>This is the second route. It exists so a check can take more than one step.</p>
+        <dl class="pairs">
+          <dt>Route</dt><dd class="mono">#/details</dd>
+          <dt>Purpose</dt><dd>Proving navigation still works</dd>
+          <dt>Opened at</dt><dd class="mono" data-sf="details-time">--</dd>
+        </dl>
+        <button data-sf="back" class="tab">Back home</button>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>A fixture for Stays Fixed. If this photographs the same twice, anything will.</p>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

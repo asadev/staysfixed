@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  typecheck:
+    name: Types (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install
+        run: npm ci || npm install
+      - name: Typecheck
+        run: npm run typecheck
+
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # macOS runners already ship Google Chrome. Linux runners do not, so we
+      # install Chrome for Testing. The major version is pinned on purpose:
+      # pictures are rendered by this browser, so letting it float would change
+      # them under us. Bump it deliberately and re-approve what moves.
+      - name: Install Chrome
+        if: runner.os == 'Linux'
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: '140'
+          install-dependencies: true
+
+      - name: Install
+        run: npm ci || npm install
+
+      - name: Test
+        run: npm test
+
+      - name: Keep the photos from a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staysfixed-results-${{ matrix.os }}
+          path: |
+            .staysfixed/results
+            fixtures/**/.staysfixed/results
+          if-no-files-found: ignore
+          retention-days: 7
