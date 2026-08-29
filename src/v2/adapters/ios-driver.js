@@ -911,6 +911,7 @@ export const IOS_OWN_BOOKKEEPING = [
  * @param {string} [opts.probeDylib]     Skip to run without the probe: pictures only.
  * @param {Record<string,string>} [opts.env]  Extra environment for the app.
  * @param {string[]} [opts.args]
+ * @param {number} [opts.firstAnswerMs] How long to wait for the app to answer at all.
  * @param {AbortSignal} [opts.signal]
  * @param {(message: string) => void} [opts.log]
  * @returns {Promise<{ok: boolean, app: OpenApp|null, why: string, timings: Record<string, number>}>}
@@ -999,7 +1000,12 @@ export async function openApp(opts) {
   t = Date.now();
   let probeAnswered = false;
   if (opts.probeDylib) {
-    const until = Date.now() + 25_000;
+    // Sixty seconds and not twenty. Measured: on a device that has just been wiped, the
+    // first app to start waits behind everything iOS does on a fresh boot, and a walk that
+    // took eighteen seconds on a warm device took over seven minutes on a cold one. A
+    // window that is too short does not fail loudly - it reports the screen as unreadable,
+    // which is a hole where there was no problem.
+    const until = Date.now() + (opts.firstAnswerMs ?? 60_000);
     while (Date.now() < until && !probeAnswered) {
       const pong = await ask('ping', {}, 4_000);
       probeAnswered = pong?.ok === true;
@@ -1500,7 +1506,7 @@ export async function resetBetweenBuilds(opts) {
       how,
       ms: Date.now() - started,
       why: booted.ok
-        ? `The whole device was wiped and booted again, which took about ${Math.round((Date.now() - started) / 1000)} seconds. Nothing at all is left from the previous build.`
+        ? `The whole device was wiped and booted again, which took about ${Math.round((Date.now() - started) / 1000)} seconds. Nothing at all is left from the previous build. The first walk after this will also be much slower than the ones after it - measured here at over seven minutes against eighteen seconds warm - because everything iOS does on a fresh boot happens while the app is trying to start.`
         : booted.why,
       leftBehind: [],
     };

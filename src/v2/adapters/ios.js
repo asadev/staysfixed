@@ -739,11 +739,25 @@ async function walkObservations(journey, kept, ctx) {
   const app = opened.app;
   const executable = path.basename(app.appPath, '.app');
 
-  out.push(observation({
-    channel: 'counters', journey: name, surface: 'ios',
-    path: joinPath('count', name, 'time to start'),
-    value: timeBucket(opened.timings.launch ?? 0),
-    says: `Starting the app took ${timeBucket(opened.timings.launch ?? 0)}.`,
+  // NO TIMING IS REPORTED HERE, AND THAT IS A DECISION.
+  //
+  // It was tried first and it was measured: across three runs of the SAME app on the same
+  // device, one walk took 16 seconds, one 26 and one 32 - and the coarsest ladder the tool
+  // has puts those in three different buckets, so the tool reported a slowdown on a build
+  // where nothing about the app had changed at all. The reason is that almost all of that
+  // time is OURS: copying the bundle, installing it, waiting for the app to answer, and
+  // whatever else the Mac happens to be doing. Rubbing out our own footprint is exactly
+  // what `undoOurFootprint` exists for, and on a phone the honest amount of timing left
+  // over is none.
+  //
+  // So the hole is declared instead of filled. An agent reading this knows that a
+  // performance regression on iOS will not be caught here, rather than believing a green
+  // run covered it.
+  out.push(notCovered({
+    channel: 'counters',
+    path: joinPath('count', name, 'speed'),
+    reason: 'not supported here',
+    says: `How long this took was not compared. Nearly all of it is the time WE spent installing and starting the app, which changes by ten seconds or more between two runs of the same build, so reporting it would invent a slowdown on every other run. A real performance problem on the phone will not be caught here, and the honest thing is to say so rather than to report a number that means nothing. The walk itself took ${timeBucket(opened.timings.launch ?? 0)} to start.`,
   }));
 
   if (!app.probeAnswered) {
@@ -947,12 +961,6 @@ async function walkObservations(journey, kept, ctx) {
       says: `Of the ${kept.doors.length} named control${kept.doors.length === 1 ? '' : 's'} this app declares, ${doorsReached.size} ${doorsReached.size === 1 ? 'was' : 'were'} actually on screen during this walk. The rest are doors nobody opened, and they are not being checked by anything.`,
     }));
 
-    out.push(observation({
-      channel: 'counters', journey: name, surface: 'ios',
-      path: joinPath('count', name, 'time to walk'),
-      value: timeBucket(Date.now() - startedAt),
-      says: `The whole walk took ${timeBucket(Date.now() - startedAt)}.`,
-    }));
   } finally {
     await app.close();
   }
