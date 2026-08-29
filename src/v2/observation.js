@@ -78,6 +78,17 @@ const MAX_PATH_LENGTH = 512;
 /** Deepest value we will store. Past this something is recursing, not observing. */
 const MAX_VALUE_DEPTH = 64;
 
+/**
+ * The share of its own addresses a build may disagree with itself about before the run stops
+ * counting as a measurement at all. Half is not a tuned number and nothing depends on its
+ * exact value: it is the point past which more of the comparison has been thrown away than
+ * kept, and no answer computed from what is left deserves to be called clean.
+ */
+const STORM_SHARE = 0.5;
+
+/** Below this many addresses the share means nothing — three out of four is not a storm. */
+const STORM_FLOOR = 12;
+
 /** Control characters and newlines, which would break the store and every log line. */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
@@ -788,6 +799,42 @@ export function mergeWobble(wobbles) {
 }
 
 /**
+ * When a wobble measurement stops being a measurement.
+ *
+ * Subtraction is set subtraction: a difference at an address the build cannot answer the same
+ * way twice is dropped. That is right, and it has one failure shape, which is the worst shape
+ * this tool has. If the second run of the new build FALLS OVER — the app crashed half way, a
+ * port was taken, a device went to sleep, a first run wrote a cache the second one read — then
+ * most of the addresses the first run answered are missing from the second, every one of them
+ * is filed as unsteady, every real difference at them is subtracted, and the run ends
+ * "nothing that already worked has changed". Confident, clean, and about nothing.
+ *
+ * So the share is looked at. A product that disagrees with itself about a handful of addresses
+ * is normal — a timestamp, an id, a port. A product that disagrees with itself about MOST of
+ * them did not wobble; something went wrong with the run. This is not a tolerance: no number
+ * here decides whether any difference is real. It decides one thing only — whether this run is
+ * entitled to say the word "clean".
+ *
+ * @param {Wobble} wobble
+ * @returns {{stormy: boolean, share: number, looked: number, vanished: number, why: string}}
+ */
+export function wobbleStorm(wobble) {
+  const unstable = wobble.unstable.length;
+  const looked = unstable + wobble.steady;
+  const vanished = wobble.entries.filter((e) => e.kind === 'vanished').length;
+  const share = looked === 0 ? 0 : unstable / looked;
+  if (!wobble.measured || looked < STORM_FLOOR || share <= STORM_SHARE) {
+    return { stormy: false, share, looked, vanished, why: '' };
+  }
+  const percent = Math.round(share * 100);
+  const why =
+    `The new build was run twice and gave a different answer at ${unstable} of the ${looked} addresses it was asked about — ${percent}% of them` +
+    (vanished > 0 ? `, and ${vanished} address${vanished === 1 ? '' : 'es'} the first run answered were missing from the second altogether` : '') +
+    '. That is not a product wobbling; that is a run that went wrong. Everything it disagreed with itself about is dropped before anything is compared, so on this run the comparison covered almost nothing. This is not a pass and not a failure — there is no answer here. Run it again on a quiet machine, and if it happens twice, something in the product or its setup does not survive being started a second time.';
+  return { stormy: true, share, looked, vanished, why };
+}
+
+/**
  * Subtract the measured noise from the differences.
  *
  * The rule is set subtraction and nothing cleverer: if a path will not sit still between two
@@ -844,13 +891,21 @@ export function subtractWobble(differences, wobble, opts = {}) {
     });
   }
 
-  return {
+  const storm = wobbleStorm(wobble);
+  /** @type {WobbleSubtraction} */
+  const out = {
     real,
     noise,
     newlyUnstable,
     couldTellNewlyUnstable: couldTell,
     note: subtractionNote(wobble, couldTell, real.length, noise.length, newlyUnstable.length),
   };
+  if (storm.stormy) {
+    out.couldNotTell = true;
+    out.couldNotTellWhy = storm.why;
+    out.note = `${storm.why} ${out.note}`;
+  }
+  return out;
 }
 
 /**

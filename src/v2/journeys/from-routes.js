@@ -436,7 +436,9 @@ export function journeysFromDoors(doors, options = {}) {
 export async function journeysFromCode(opts) {
   const started = Date.now();
   const reading = await readContract({ root: opts.root, folders: opts.folders });
-  reading.doors.push(...(await readFileRoutes(opts.root)));
+  const fileRoutes = await readFileRoutes(opts.root);
+  reading.doors.push(...fileRoutes.doors);
+  reading.report.problems.push(...fileRoutes.problems);
   reading.doors.push(...(await readPackageCommands(opts.root)));
 
   const surface =

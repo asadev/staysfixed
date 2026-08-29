@@ -235,6 +235,12 @@
  *                                    False when we had no stability record for the reference,
  *                                    so `newlyUnstable` is empty for lack of evidence rather
  *                                    than because nothing became unstable.
+ * @property {boolean} [couldNotTell] True when the wobble measurement was too big to be a
+ *                                    measurement — the same build answered differently at
+ *                                    most of its own addresses, so subtracting it subtracts
+ *                                    the answer. A run in this state has no verdict, and it
+ *                                    must never be reported as a clean one.
+ * @property {string} [couldNotTellWhy]  Said plainly, with the numbers in it.
  * @property {string} note            One plain sentence stating exactly that.
  */
 

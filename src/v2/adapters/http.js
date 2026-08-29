@@ -306,7 +306,7 @@ export const httpAdapter = defineAdapter({
       .find((name) => name in dependencies);
 
     const reading = await readContract({ root: project.root });
-    const routes = [...reading.doors.filter((d) => d.kind === 'route'), ...await readFileRoutes(project.root)];
+    const routes = [...reading.doors.filter((d) => d.kind === 'route'), ...(await readFileRoutes(project.root)).doors];
 
     if (!config.start) {
       missing.push({
@@ -355,7 +355,7 @@ export const httpAdapter = defineAdapter({
     const config = project.config ?? {};
     const samples = config.samples ?? {};
     const reading = await readContract({ root: project.root });
-    const routes = [...reading.doors.filter((d) => d.kind === 'route'), ...await readFileRoutes(project.root)];
+    const routes = [...reading.doors.filter((d) => d.kind === 'route'), ...(await readFileRoutes(project.root)).doors];
 
     /** @type {Map<string, import('./contract.js').Journey>} */
     const journeys = new Map();

@@ -805,7 +805,7 @@ async function readTheSource(root) {
     const reading = await readContract({ root });
     const fileRoutes = await readFileRoutes(root);
     const commands = await readPackageCommands(root);
-    const doors = [...reading.doors, ...fileRoutes, ...commands];
+    const doors = [...reading.doors, ...fileRoutes.doors, ...commands];
     /** @type {Record<string, number>} */
     const counts = {};
     for (const door of doors) counts[door.kind] = (counts[door.kind] ?? 0) + 1;

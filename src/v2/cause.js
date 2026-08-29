@@ -60,12 +60,17 @@ const run = promisify(execFile);
  * @property {string} [worktree]   Where it ran, when `keep` was asked for.
  */
 
-/**
- * How many of a finding's differences are worth re-checking. A finding can stand
- * for two hundred addresses; if the first handful come back the same way, the
- * two hundredth will too, and walking them all buys nothing.
- */
-const CHECK_AT_MOST = 5;
+// EVERY difference in the finding is re-checked, and there is deliberately no ceiling.
+//
+// Until 2026-08-30 this checked the first five and then said "caused by that change" about
+// the whole finding. A cluster of three hundred addresses where the first five went away and
+// the other two hundred and ninety-five did not came back PROVED — the agent then had a
+// machine-checked reason to wave the whole thing through, and the rest of the break went with
+// it. That is this tool's worst failure shape: a confident sentence covering a silence.
+//
+// The comment that used to sit here said walking them all buys nothing. It buys the claim.
+// And it costs nothing to buy: the journeys were re-walked already, the observations are in
+// the map below, and each extra difference is one lookup in it.
 
 /**
  * Prove, or disprove, that one change caused one finding.
@@ -192,7 +197,7 @@ export async function proveCause(finding, opts) {
       without.set(journey.name, indexByPath(settled.observations));
     }
 
-    const differences = finding.differences.slice(0, CHECK_AT_MOST);
+    const differences = finding.differences;
     let disappeared = 0;
     for (const d of differences) if (gone(d, without)) disappeared += 1;
 
@@ -207,7 +212,9 @@ export async function proveCause(finding, opts) {
           ? 'This finding carries no differences, so there was nothing to re-check.'
           : proved
             ? `Undoing that one change in ${hunk.file} made this go away. It is yours, and it is explained.`
-            : `This is still here with that change undone, so ${hunk.file} is not what caused it. Something else did, and nothing knows what yet.`,
+            : disappeared > 0
+              ? `Undoing that change in ${hunk.file} took away ${disappeared} of the ${differences.length} addresses in this finding and left ${differences.length - disappeared} exactly as ${differences.length - disappeared === 1 ? 'it was' : 'they were'}. So that change explains part of this and not the rest, and the rest has another cause nothing has looked for yet. It is not covered by undoing that one change.`
+              : `This is still here with that change undone, so ${hunk.file} is not what caused it. Something else did, and nothing knows what yet.`,
       hunk: { file: hunk.file, header: hunk.header },
       checked: differences.length,
       disappeared,

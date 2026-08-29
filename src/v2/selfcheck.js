@@ -56,7 +56,7 @@ const run = promisify(execFile);
  * @typedef {object} Case
  * @property {string} name           A sentence, because it is read back as one.
  * @property {string} breaks         What is wrong, in plain English.
- * @property {'a finding'|'nothing'} expect
+ * @property {'a finding'|'nothing'|'no answer'} expect
  * @property {RegExp[]} [mustSay]
  * @property {boolean} [mustBeUnstable]  It has to land in `newlyUnstable`, not in the findings.
  * @property {(broken: boolean) => Record<string, string>} build
@@ -266,6 +266,28 @@ export const CASES = [
       'cli.js': [broken ? 'console.log(`batch id ${Math.floor(Math.random() * 1e9)}`);' : 'console.log(`batch id 4242`);', "console.log('two orders');", ''].join('\n'),
     }),
   },
+
+  {
+    name: 'a run that could not answer says so instead of passing',
+    breaks:
+      'The break is real and it is hidden by the product itself: this build writes a fresh set of randomly named files on every run and stamps a random id on what it prints, so the same build disagrees with itself about nearly every address it has. Everything that wobbles is subtracted before anything is compared — which is right, and which here removes the comparison altogether. The only honest answer is that this run says nothing, and until 2026-08-30 the engine said "nothing that already worked has changed", which is the same sentence it uses when a product is genuinely fine.',
+    expect: 'no answer',
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': [
+        "import fs from 'node:fs';",
+        "fs.mkdirSync('out', { recursive: true });",
+        '// A build tool writing hash-named artefacts. Nothing unusual, and every one of them',
+        '// is a new address that was not there on the last run.',
+        'for (let i = 0; i < 30; i += 1) {',
+        "  fs.writeFileSync(`out/chunk-${Math.random().toString(36).slice(2, 10)}.txt`, 'x');",
+        '}',
+        'console.log(`request ${Math.random().toString(36).slice(2, 10)}`);',
+        broken ? "console.log('orders: could not be loaded');" : "console.log('orders: 2');",
+        '',
+      ].join('\n'),
+    }),
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -277,7 +299,7 @@ export const CASES = [
  * @property {string} name
  * @property {boolean} caught      True when the case behaved: the break was found, or the clean pair stayed silent.
  * @property {string} [why]        Why it did not, in one plain sentence.
- * @property {'caught'|'quiet'|'escaped'|'false alarm'|'could not run'|'could not tell'} verdict
+ * @property {'caught'|'quiet'|'escaped'|'false alarm'|'could not run'|'could not tell'|'said it could not tell'} verdict
  */
 
 /**
@@ -450,6 +472,26 @@ function judge(c, result) {
 
   const findings = Array.isArray(result?.findings) ? result.findings : [];
   const unstable = Array.isArray(result?.newlyUnstable) ? result.newlyUnstable : [];
+
+  // The third expectation, and the one the other two cannot express: a run that is entitled
+  // to no verdict at all. What is demanded here is narrow on purpose — not that it found the
+  // break, which it cannot, but that it refused to call the run clean and said why in words a
+  // person can read.
+  if (c.expect === 'no answer') {
+    const said = String(result?.summary ?? '');
+    if (result?.ok === false && /no answer|not a pass/i.test(said)) {
+      return { name: c.name, caught: true, verdict: 'said it could not tell' };
+    }
+    return {
+      name: c.name,
+      caught: false,
+      verdict: 'escaped',
+      why:
+        result?.ok === false
+          ? `it did not pass, but it never said why in a way anybody could read: ${said.slice(0, 200)}`
+          : `it reported a clean run over a comparison that had been thrown away: ${said.slice(0, 200)}`,
+    };
+  }
 
   if (c.expect === 'nothing') {
     if (findings.length === 0 && unstable.length === 0) return { name: c.name, caught: true, verdict: 'quiet' };

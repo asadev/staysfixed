@@ -205,8 +205,14 @@ const SHORTEST_GUARD_NAME = 6;
 /** How much of one value is read. A whole HTTP body would drown the match in noise. */
 const VALUE_CHARS = 400;
 
-/** How many differences of one finding are read. Clusters can hold hundreds. */
-const MAX_DIFFERENCES_READ = 80;
+// EVERY difference of a finding is read, and there is deliberately no ceiling on that.
+// Until 2026-08-30 this file read the first eighty and stopped, which meant a cluster of
+// three hundred addresses could hold the word `refund` at address two hundred and be
+// classified ordinary — waivable by an agent, never seen by a person. A cap here is not a
+// performance decision, it is a hole in the one gate that cannot have one. The cost is a
+// substring search over text already in memory: the values are trimmed to VALUE_CHARS
+// before they are searched, so reading them all costs a constant multiple of the finding
+// itself, which the caller is already holding.
 
 // ---------------------------------------------------------------------------
 // The answer
@@ -340,7 +346,6 @@ export function sayRefusal(verdict, finding) {
  *
  * @typedef {object} ReadFinding
  * @property {{text: string, where: string}[]} pieces
- * @property {string} all                 Every piece joined, for one fast test.
  * @property {Set<Channel>} channels
  * @property {Difference[]} differences
  */
@@ -370,7 +375,7 @@ function readFinding(finding) {
   for (const file of finding.nearFiles ?? []) add(file, 'a source file this points at');
   for (const p of finding.paths ?? []) add(p, p);
 
-  const differences = (finding.differences ?? []).slice(0, MAX_DIFFERENCES_READ);
+  const differences = finding.differences ?? [];
   for (const d of differences) {
     add(d.path, d.path);
     add(d.describe, d.path);
@@ -386,8 +391,7 @@ function readFinding(finding) {
 
   return {
     pieces,
-    all: pieces.map((p) => p.text).join('\n'),
-    channels: new Set((finding.differences ?? []).map((d) => d.channel)),
+    channels: new Set(differences.map((d) => d.channel)),
     differences,
   };
 }

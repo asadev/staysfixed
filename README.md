@@ -336,6 +336,11 @@ one, and each has a case in the corpus or a test holding it shut.
 | Keep the two ends of a huge output and a **rough** size, so a break in the discarded middle left a byte-identical record | Keeps the exact byte count, and says out loud that only the ends were compared |
 | Drop a whole adapter's journeys when it threw while listing them — a surface disappears and the verdict reads "nothing has changed" | Records it as a hole, by name, in the coverage |
 | Treat a `git diff` too big to read as **no diff**, so a large uncommitted change was fingerprinted as a clean checkout — and if that commit was the reference, the check compared the build against itself and could only ever come back clean | Streams the diff into a hash with no ceiling, and refuses outright rather than guessing. A folder with no git in it is refused for the same reason |
+| Read only the first **80** differences of a cluster when deciding whether it is one of the five things nobody may wave through — so a refund at address 150 of 300 was classified ordinary, and an agent could waive the lot | Reads every difference in the finding. There is no ceiling on the one gate that cannot have one |
+| Re-check the first **five** addresses of a finding when proving whose change caused it, then say "caused by that change" about all three hundred — a machine-checked reason for an agent to close a break it had only half explained | Re-checks every address, and says in words when a change explains part of a finding and not the rest. It costs nothing: the walk already happened |
+| Subtract the new build's own wobble even when the wobble had swallowed the comparison — a second run that fell over makes almost every address unsteady, everything is dropped before it is compared, and the run ends "nothing that already worked has changed" | A build that disagrees with itself about most of its own addresses gets **no verdict**: the run says NO ANSWER FROM THIS RUN, in those words, and is not a pass |
+| Keep the **first** of two facts written at one address and ignore the second, so a door that broke behind a duplicated address could never be compared with anything. The detector for this was written on day one and never called | Every walk is checked for it, and each clash is named in the coverage: which address, and what the ignored answer was |
+| Skip a folder it could not open **while looking for routes**, and every route behind it — the same bug as the one above, in a second place, still silent | Names the folder, and the routes behind it are reported as unread rather than as absent |
 
 ---
 
@@ -618,12 +623,15 @@ A tool that reports "nothing changed" looks exactly like a tool that is broken,
 and there is no way to tell the two apart from the outside. So:
 
 **It has to prove it still catches things.** `staysfixed check --selfcheck`
-builds eleven tiny products — each a real repository with a working commit and an
+builds twelve tiny products — each a real repository with a working commit and an
 uncommitted change on top, which is the shape an agent actually points this tool
 at — and requires the engine to behave on every one. Eight are breaks it must
 catch. Three are the other half of the same promise: pairs that must produce **no
 findings at all**, because a tool that cries wolf gets switched off, and a tool
-that is switched off catches nothing.
+that is switched off catches nothing. The twelfth is the third kind, added on
+2026-08-30: a product so unsteady that the comparison is thrown away before it
+happens, where the only correct answer is that this run says **nothing** — and
+saying "nothing changed" there is the worst thing the tool can do.
 
 **And it has to be honest when it cannot tell.** A case that misbehaves is built
 again from scratch and run again before that becomes an accusation. Fail twice
@@ -637,7 +645,9 @@ nothing on a busy laptop. The cause was found and removed — see
 the next machine-shaped thing to creep in lands as "nobody knows" rather than as
 a false accusation people learn to ignore. Measured on 2026-08-30: eleven of
 eleven, three times running, with the project's own suite running in parallel and
-the machine's load average between 227 and 334.
+the machine's load average between 227 and 334; and after the second sweep of
+silences, twelve of twelve, three times running, with the suite in parallel again
+and the load average between 208 and 343.
 
 **The unstable app.** `fixtures/unstable-app` is a page built to be impossible to
 observe consistently: a clock ticking ten times a second, an endless spinner, a
@@ -680,6 +690,26 @@ Honestly, so you know before you invest an afternoon.
   middle that changed without changing its length is not, the whole text is
   written to the evidence folder either way, and the run says out loud that it
   only compared the ends.
+- **A build that will not answer the same way twice gets no verdict at all.**
+  Differences at addresses the new build cannot hold steady are dropped — that is
+  the whole design, and it has one failure shape. If the second run falls over,
+  or the product writes hash-named files, or stamps a fresh id on every line, then
+  most of its addresses are unsteady, almost everything is dropped before it is
+  compared, and what is left is not an answer. A run in that state now says **NO
+  ANSWER FROM THIS RUN**, in those words, and is not a pass. Fix it by writing a
+  normalisation rule for whatever is moving, not by trusting the clean-looking run
+  underneath it.
+- **What normalisation rubbed out is not itemised on every run.** The rules are in
+  your repository, they are listed by `staysfixed rules`, and the capture is
+  stamped with which set was used — a run comparing against a record tidied by a
+  different set says so. What it does not yet do is print, per run, every value a
+  rule rewrote. Anything a rule covers is not being watched, and that is the point
+  of the rule; just know that adding a broad one is how you go blind on purpose.
+- **Ranking reads your source, and it gives up on very large trees.** Distance
+  from the code you just changed is what sorts the list, and it reads up to 4,000
+  files of up to 400KB each to work it out. Past that a finding is still reported
+  and still counted — it just may not sort where it deserves to. Nothing is
+  dropped for being far away.
 - **A race that already existed will not show.** Subtracting the wobble floor
   actively hides intermittent bugs. Running the new build twice recovers half of
   this by flagging anything newly unstable. Only half. That is the sharpest

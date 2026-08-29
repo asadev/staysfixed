@@ -259,11 +259,23 @@ What one build disagrees with itself about, measured by running it twice.
 ```
 
 `subtractWobble(differences, wobble, { referenceWobble })` returns
-`{ real, noise, newlyUnstable, couldTellNewlyUnstable, note }`. The rule is set
-subtraction and nothing cleverer: if a path will not sit still between two runs
-of the same build, a difference at that path proves nothing, whatever its size.
-Any "but it changed by MORE than the wobble did" rule is a tolerance wearing a
-disguise.
+`{ real, noise, newlyUnstable, couldTellNewlyUnstable, couldNotTell, note }`. The
+rule is set subtraction and nothing cleverer: if a path will not sit still between
+two runs of the same build, a difference at that path proves nothing, whatever its
+size. Any "but it changed by MORE than the wobble did" rule is a tolerance wearing
+a disguise.
+
+`couldNotTell` is the guard on the one way that rule can go catastrophically
+wrong. If the second run of the new build falls over half way, or the product
+writes hash-named files, or stamps a fresh id on every line it prints, then most
+of its addresses are unsteady, nearly every difference is dropped as noise, and
+what is left is not an answer — but it reads exactly like a clean run. So
+`wobbleStorm(wobble)` looks at the share: a build that disagrees with itself about
+more than half of its own addresses did not wobble, something went wrong with the
+run. The verdict is then **not** ok, the summary opens with `NO ANSWER FROM THIS
+RUN`, and the reason is in the coverage as a hole. This is not a tolerance — no
+number here decides whether any single difference is real. It decides one thing:
+whether this run has earned the right to use the word clean.
 
 ### A finding
 
@@ -360,6 +372,12 @@ It carries:
   to it, by design and permanently.
 - **A migration that destroys data is refused, not run twice.** The refusal is
   reported as missing coverage, never as a pass.
+- **A run whose wobble swallowed the comparison has no verdict.** It says so in
+  those words rather than passing. See `couldNotTell` above.
+- **Two facts at one address lose one of them.** Every index keeps the first, so
+  an adapter that gives one name to two things makes the second invisible. Each
+  walk is checked and each clash is named in the coverage — but the check finds
+  it, it does not fix it. The adapter has to give the two things two names.
 - **Subtracting the wobble hides intermittent bugs.** A race that already existed
   and got worse will not show. Running the new build twice recovers half of this
   by flagging anything newly unstable. Only half. This is the sharpest weakness

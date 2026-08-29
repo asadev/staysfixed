@@ -4,6 +4,82 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-08-30
+
+The second sweep for silences, done the same way as the first: read all of
+`src/v2` looking for anything that can drop something and then report nothing
+found. Five more were there, and two of them were in the safety machinery
+itself — the gate that decides what an agent may never wave through, and the
+proof that decides whether a change explains a break.
+
+Every fix below has a test that fails against yesterday's code and passes
+against today's. That was checked by putting the old behaviour back, one line at
+a time, in a copy of the repository, and watching each test go red.
+
+### Fixed — silences, second sweep
+
+- **Only the first 80 differences of a finding were read when deciding whether it
+  was one of the five things nobody may wave through.** A cluster can hold
+  hundreds of addresses; a refund sitting at address 150 of 300 was classified
+  ordinary, which means an agent could waive it and it would never reach a
+  person. Every difference is read now. A cap on the one gate that cannot have
+  one is not a performance decision, it is a hole.
+- **The causal proof re-checked five addresses and then spoke for all of them.**
+  A finding of three hundred where the first five went away came back "caused by
+  that change" — a machine-checked reason for an agent to close a break it had
+  only half explained. It re-checks every address now, and when a change explains
+  part of a finding and not the rest it says exactly that, with both numbers. It
+  costs nothing: the journeys were already re-walked and each extra address is one
+  lookup.
+- **A wobble big enough to swallow the comparison was still subtracted, and the
+  run came back clean.** If the second run of the new build falls over, or the
+  product writes hash-named files, or stamps a fresh id on every line, most of its
+  addresses are unsteady, nearly every difference is dropped before anything is
+  compared, and the verdict reads "nothing that already worked has changed". A
+  build that disagrees with itself about more than half of its own addresses now
+  gets **no verdict**: the summary opens with `NO ANSWER FROM THIS RUN`, the
+  reason is a named hole in the coverage, and `ok` is false. No number here
+  decides whether any difference is real — it decides only whether the run has
+  earned the word clean.
+- **Two facts written at one address lost one of them, silently.** Every index in
+  the engine keeps the first observation at a path, so a second one is never
+  compared with anything and a door that broke behind it is invisible. The
+  detector for this was written on the first day of v2 and nothing ever called it.
+  Every walk is checked now and each clash is named — which address, and what the
+  ignored answer was. Identical repeats are not reported, because they hide
+  nothing.
+- **The route reader skipped a folder it could not open, and every route behind
+  it, without a word.** This is the same bug as the one fixed yesterday in the
+  file walk, in a second function that the first fix did not touch. It names the
+  folder now.
+
+### Added
+
+- A twelfth case in the self-check corpus, and a third kind of expectation with
+  it: a product so unsteady that the comparison is thrown away before it happens,
+  where the only honest answer is that the run says nothing. Confirmed to fail
+  against 0.5.0 and pass against this. Measured after the change: twelve of
+  twelve, three times running, with the project's own suite in parallel and the
+  machine's load average between 208 and 343.
+- Six more tests in `test/v2/silences.test.js`, one per fix above, each confirmed
+  red against the previous code.
+
+### Changed
+
+- `readFileRoutes(root)` returns `{ doors, problems }` rather than an array. The
+  problems are folders it could not open, and they are reported as missing
+  coverage by every caller.
+
+### Known, and written down rather than fixed
+
+- What a normalisation rule rubbed out is not itemised per run. The receipt
+  exists in the code and nothing calls it. The rules are in your repository and
+  the capture is stamped with which set it used, so a comparison across a rule
+  change is announced — but a broad rule is still how you go blind on purpose.
+- Ranking reads up to 4,000 source files of up to 400KB. Past that a finding is
+  still reported and still counted; it may just not sort where it deserves to.
+  Nothing is dropped for being far from the change.
+
 ## [0.5.0] — 2026-08-30
 
 The release about the one way this tool can be catastrophically wrong: reporting

@@ -933,12 +933,18 @@ async function collectFiles(root, folders, maxFileBytes) {
  * Both layouts are handled: an app folder, where a `route` file's exported method names are
  * the verbs, and a pages/api folder, where the file itself is the route.
  *
+ * A folder that cannot be opened takes every route behind it, so it is named rather than
+ * skipped. This is the same bug as the one fixed in the file walk on 2026-08-30 — a hole that
+ * looks exactly like a project with no routes in it — and it was still here in this function.
+ *
  * @param {string} root
- * @returns {Promise<Door[]>}
+ * @returns {Promise<{doors: Door[], problems: string[]}>}
  */
 export async function readFileRoutes(root) {
   /** @type {Door[]} */
   const doors = [];
+  /** @type {string[]} */
+  const problems = [];
 
   /**
    * @param {string} base
@@ -952,7 +958,12 @@ export async function readFileRoutes(root) {
       const dir = /** @type {string} */ (stack.pop());
       /** @type {import('node:fs').Dirent[]} */
       let entries;
-      try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { continue; }
+      try {
+        entries = await fsp.readdir(dir, { withFileTypes: true });
+      } catch (e) {
+        problems.push(`${path.relative(root, dir) || '.'} could not be opened, so any route behind it is invisible to this run (${describeError(e)}).`);
+        continue;
+      }
       for (const entry of entries) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
@@ -1003,7 +1014,7 @@ export async function readFileRoutes(root) {
     });
   }
 
-  return doors;
+  return { doors, problems };
 }
 
 /**
@@ -1248,7 +1259,13 @@ export const sourceAdapter = defineAdapter({
    */
   async run(journey, build) {
     const reading = await readContract({ root: build.root });
-    reading.doors.push(...await readFileRoutes(build.root));
+    const fileRoutes = await readFileRoutes(build.root);
+    reading.doors.push(...fileRoutes.doors);
+    // A folder the route walk could not open is a hole in the door list, and the door list is
+    // the channel that catches doors disappearing. It goes where every other reading problem
+    // goes: into the report, which becomes an observation of its own, so it shows up as a
+    // difference the moment it starts or stops happening.
+    reading.report.problems.push(...fileRoutes.problems);
     reading.doors.push(...await readPackageCommands(build.root));
     reading.report.counts = {};
     for (const found of reading.doors) {

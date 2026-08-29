@@ -729,8 +729,16 @@ export async function ledger(store, product, opts = {}) {
     caveats.push('The doors were handed in by the code reader as this ledger was drawn up, so it knows about doors added since the last run.');
   } else if (opts.root) {
     const reading = await readContract({ root: opts.root });
-    reading.doors.push(...(await readFileRoutes(opts.root)));
+    const fileRoutes = await readFileRoutes(opts.root);
+    reading.doors.push(...fileRoutes.doors);
     reading.doors.push(...(await readPackageCommands(opts.root)));
+    for (const problem of fileRoutes.problems) {
+      holes.push({
+        what: problem,
+        why: 'Doors nobody can see are not counted here, so this ledger is smaller than the product is.',
+        unlockedBy: 'Make that folder readable by whoever runs the check.',
+      });
+    }
     doors = reading.doors.map(doorFact);
     caveats.push(`The code was read as this ledger was drawn up: ${reading.report.filesRead} files, ${reading.doors.length} doors, and nothing was run.`);
   } else {

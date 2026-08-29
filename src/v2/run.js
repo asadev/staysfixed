@@ -24,6 +24,7 @@ import { makeEvents } from '../core/events.js';
 import { StaysFixedError, messageOf } from '../core/errors.js';
 import {
   diffCaptures,
+  findDuplicatePaths,
   measureWobble,
   mergeWobble,
   unmeasuredWobble,
@@ -230,6 +231,11 @@ export async function runCheck(opts) {
     const walked = new Map();
     /** @type {Map<string, Capture>} */
     const before = new Map();
+    // Counted rather than inferred. Both the live build and the stored record carry the SAME
+    // build id — they are two ways of looking at one build — so nothing about a capture in
+    // `before` says which of the two it came from, and the mode has to be recorded as it
+    // happens or not at all.
+    let liveWalks = 0;
     /** @type {Wobble[]} */
     const wobbles = [];
     /** @type {Wobble[]} */
@@ -243,6 +249,7 @@ export async function runCheck(opts) {
       say({ type: 'journey:start', at: events.elapsed(), journey: journey.name, message: `Walking ${journey.describe || journey.name}.` });
 
       const a = await walkOnce(opts, journey, opts.candidate, 'a', 'candidate', undefined, events);
+      gaps.push(...duplicateGaps(a.observations, journey));
       const b = await walkOnce(opts, journey, opts.candidate, 'b', 'candidate', undefined, events);
       const wobble = measureWobble(a, b);
       walked.set(journey.name, { a, b, wobble });
@@ -267,9 +274,34 @@ export async function runCheck(opts) {
         // switched off, and nothing in the output would say so.
         const wasA = await walkOnce(opts, journey, live.build, 'a', 'reference', live, events);
         const wasB = await walkOnce(opts, journey, live.build, 'b', 'reference', live, events);
-        before.set(journey.name, wasA);
-        referenceWobbles.push(measureWobble(wasA, wasB));
-        continue;
+        // The old build being ON this machine is not the same as the old build having been
+        // WALKED. When every observation it came back with is a hole, it was not walked, and
+        // treating that as the reference makes the whole product look newly invented: every
+        // address in the new build has nothing opposite it, so every one of them 'appeared'.
+        //
+        // Measured on Terminal Deck's Android app on 2026-08-30. `--paired` exports the old
+        // commit with `git archive`; an APK is a build output and is gitignored, so the export
+        // has no app in it; the adapter honestly reported one hole per journey; and the run
+        // came back with seventeen sealed escalations claiming the sign-in screen and every
+        // permission had appeared out of nowhere, with nothing anywhere saying the old build
+        // had never run. Falling back to the stored record here is weaker and says so, which
+        // is the whole difference between a weaker answer and a wrong one.
+        if (wasA.observations.some((o) => o.meta?.refused !== true)) {
+          before.set(journey.name, wasA);
+          referenceWobbles.push(measureWobble(wasA, wasB));
+          liveWalks += 1;
+          continue;
+        }
+        gaps.push({
+          what: `The old build could not be walked for "${journey.describe || journey.name}", so this was not a paired comparison after all.`,
+          why:
+            `${nameOf(reference)} was put back on this machine, and then there was nothing there to run: ${
+              wasA.observations[0]?.meta?.describe ?? 'the adapter could not open it'
+            }. This usually means the product is BUILT rather than committed — an APK, a .app, a packaged desktop app — and a checkout of the old commit does not contain one.`,
+          unlockedBy:
+            'Build the old commit before the run, or point the settings at a kept copy of the old build\'s artifact. Until then this journey falls back to the record the old build left last time.',
+          surface: journey.surface,
+        });
       }
       const stored = await storedReference(opts.store, reference.id, journey.name);
       if (!stored.capture) {
@@ -355,14 +387,30 @@ export async function runCheck(opts) {
       count: subtraction.real.length,
       message: subtraction.note,
     });
+    // A wobble big enough to swallow the comparison is not a result. It is recorded as a hole
+    // here and it takes the verdict down at the bottom of this function, because the one thing
+    // that must never come out of it is a clean sentence resting on a subtraction that removed
+    // most of what was looked at.
+    if (subtraction.couldNotTell === true) {
+      gaps.push({
+        what: 'This run could not tell you anything, because the new build did not answer the same way twice.',
+        why: subtraction.couldNotTellWhy ?? 'Most of the addresses it was asked about were unsteady, so almost everything was dropped before it was compared.',
+        unlockedBy: 'Run it again when the machine is quiet. If it happens twice, look at what the product does differently on a second start.',
+      });
+    }
     stop();
 
     // 5 — expensive proof, only where it is owed. Everything the live old build
     // does too is dropped silently and counted. That silence is the point: it is
     // what keeps this list short enough to read every word of.
     let survivors = subtraction.real;
-    const mode = /** @type {'paired'|'stored-record'} */ (live ? 'paired' : 'stored-record');
-    let provedLive = Boolean(live);
+    // Booting the old build is not the same as having walked it. When every live walk came
+    // back holes-only — a built artifact that no checkout of the old commit contains — the
+    // run fell back to the stored record above, and calling that a paired run would be the
+    // report's single most misleading sentence. See the gap pushed in the walk loop.
+    const walkedLive = liveWalks > 0;
+    const mode = /** @type {'paired'|'stored-record'} */ (walkedLive ? 'paired' : 'stored-record');
+    let provedLive = walkedLive;
     // How many suspicions the old build turned out to have as well. Naming this
     // number is what makes the short list believable: it says how much work the
     // expensive half did rather than leaving the reader to assume it did none.
@@ -421,7 +469,7 @@ export async function runCheck(opts) {
     if (warning) gaps.push(...warningGaps(mode, provedLive));
 
     return finish(opts, {
-      ok: ranked.findings.length === 0 && subtraction.newlyUnstable.length === 0,
+      ok: ranked.findings.length === 0 && subtraction.newlyUnstable.length === 0 && subtraction.couldNotTell !== true,
       mode,
       modeWarning: warning,
       reference,
@@ -430,7 +478,9 @@ export async function runCheck(opts) {
       noise: subtraction.noise.length,
       newlyUnstable: subtraction.newlyUnstable,
       coverage: foldCoverage(walked, journeys, gaps),
-      summary: summarise(ranked.findings, subtraction, wobble, warning, ranked.notes, reference, provedLive, dropped),
+      summary:
+        (subtraction.couldNotTell === true ? `NO ANSWER FROM THIS RUN. ${subtraction.couldNotTellWhy} ` : '') +
+        summarise(ranked.findings, subtraction, wobble, warning, ranked.notes, reference, provedLive, dropped),
       startedAt,
       started,
       events,
@@ -522,6 +572,33 @@ async function storedReference(store, buildId, journey) {
     // would be worse.
     return { capture: a, wobble: null };
   }
+}
+
+/**
+ * Two facts written down at one address, with two different answers.
+ *
+ * Every index in this engine keeps the FIRST observation at a path and ignores the rest, so
+ * the second fact has no address of its own: it is never compared with anything, and a door
+ * that broke behind it is invisible while the run still says "nothing that already worked has
+ * changed". The detector for this existed from the first day of v2 and until 2026-08-30
+ * nothing ever called it, which is why it is a named hole now rather than a comment.
+ *
+ * Identical repeats are not reported. Two log lines that tidy down to the same address AND the
+ * same value hide nothing, and reporting those would bury the ones that do.
+ *
+ * @param {Observation[]} observations
+ * @param {Journey} journey
+ * @returns {CoverageGap[]}
+ */
+export function duplicateGaps(observations, journey) {
+  return findDuplicatePaths(observations).map((clash) => ({
+    what: `Two different answers were written down at the same address, ${clash.path}, while walking "${journey.describe || journey.name}".`,
+    why:
+      `Only the first is kept, so ${clash.values.slice(1).map((v) => JSON.stringify(v)).join(' and ')} ` +
+      `${clash.values.length > 2 ? 'were' : 'was'} never compared against anything at all. Whatever produced that address is giving one name to more than one thing.`,
+    unlockedBy: 'The adapter that made that address has to give those two things two different names.',
+    surface: journey.surface,
+  }));
 }
 
 /**
