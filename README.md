@@ -66,6 +66,32 @@ and the exact command that would fix each gap — and it never suggests setting 
 something that already works, because everything it lists as missing failed a
 real check first.
 
+Every kind of product comes back in one of four states, and the last two are the
+ones that matter:
+
+| State | What it means for you |
+| --- | --- |
+| **ready** | It works here now. Nothing to say. |
+| **the agent can fix this** | Everything in the way installs with a command. The agent runs it and never mentions it to you. |
+| **only a person can do this** | A licence, a device, a password, a pair of hands. You get *what to do, why it is needed, and what it unlocks* — one sentence each, so being asked for half an hour of your time comes with what you get for it. |
+| **not possible here** | No command on this machine changes the answer. It says so, says the nearest honest alternative, and **stops offering it**. |
+
+Two separate questions are answered separately, because folding them together is
+how a surface gets called ready while nothing is ever walked on it:
+
+- **can this machine run it** — is there a simulator, an emulator, a browser, a
+  Java runtime, another machine it can already reach over SSH;
+- **can this copy drive it** — is the adapter for that kind of product actually
+  in this build of the tool.
+
+A Mac with Xcode on it can run an iPhone app. That says nothing about whether
+there is anything here that knows how to open one, and `doctor --json` answers
+both under `surfaces` and `drivers`.
+
+And it never sends you shopping for nothing. A project with no phone app in it is
+never told to install Java or thirty gigabytes of Xcode — it is told there is no
+phone app here to check.
+
 ### What a fresh install downloads, and what it does not
 
 `npm install staysfixed` pulls **two small packages and nothing else** —
@@ -120,9 +146,11 @@ pretend otherwise.
 | Websites, through a browser of the tool's own | **Works.** |
 | Electron desktop apps, over their own debugging port | **Works.** |
 | The reference cut when you ship, sealed intents, the waiver budget, and escalations in your closing summary | **Works.** This page describes what it actually does. |
-| Android APKs on an emulator | Not yet. Needs Java, `adb` and Appium, none of which are here. |
-| The iOS simulator | Not yet. |
-| Native Windows GUI (a real Win32 app, not an Electron one) | Not yet, and possibly never — see the honest limits at the bottom. |
+| The coverage ledger — every door counted, the unopened ones named, and the sentence saying so on every reply | **Works.** See [what it did not check](#what-it-did-not-check). |
+| Aiming a check at one kind of product, and refusing by name rather than checking something else | **Works.** |
+| Android APKs on an emulator | **The adapter is here.** It reads everything the APK declares with nothing installed and no Java, and where there is an emulator it installs one build at a time and walks it. Whether *this* machine can run one is a separate question, and `doctor` asks the adapter itself rather than keeping a second opinion — most of what it wants installs with a command; accepting Google's licence, once, needs a person. Two emulator snapshots restoring byte-identically is unproven, so Android compares against the stored record and says which mode it used. |
+| The iOS simulator | Not yet. `doctor` says so rather than reporting a green run that never touched the phone. |
+| Native Windows GUI (a real Win32 app, not an Electron one) | **The probe is here**, driven over ssh to any machine that reaches a Windows desktop — a WSL shell on one counts, and nothing is installed on it. Windows shows one desktop, so two builds can never run at once: the comparison is genuinely weaker here than anywhere else. |
 
 `staysfixed check` is the front door for both. Version 1's flags still mean
 exactly what they meant yesterday — `--pictures`, `--guards`, `--watch` and
@@ -222,6 +250,103 @@ covers up. `explain()` answers for any value it changed — what was replaced,
 where, by which rule, and what that rule admits it might be hiding. The test
 suite fails if a rule ships without one. See
 [docs/how-v2-works.md](docs/how-v2-works.md).
+
+---
+
+## What it did **not** check
+
+This is the most important thing the tool says, and the reason is arithmetic
+rather than modesty. A tool that reports "nothing changed" is indistinguishable,
+from the outside, from a tool that looked at nothing — and the more useful it
+becomes, the less anybody reads past the headline.
+
+So every reply carries what was left out, **in the same breath as the good
+news**, on clean runs as loudly as on dirty ones. There is no version of the
+answer that omits it.
+
+```
+ok Nothing that worked has changed. 601 addresses checked against 0.13.0, run
+   live. … NOT EVERYTHING WAS CHECKED: 391 of the 452 ways into this product
+   have never been walked through, so nothing here says anything about them,
+   and 2 other things were not looked at. A clean result only covers what was
+   walked.
+
+What this run did not check
+
+  391 of the 452 ways into this product have never been walked through.
+      A break behind any of them is invisible to this tool. Point a journey at
+      them, or run the project's own test suite as journeys.
+```
+
+A **door** is any way into your product the source declares: an HTTP route, an
+exported function, a message channel between a desktop app's two halves, a
+command in your `package.json`. They are read straight out of the code without
+running anything — 5,785 of them out of one desktop app in 1.4 seconds, 452 of
+those message channels.
+
+Three rules hold the count honest:
+
+- **A door read out of the source is not a door that was walked.** Knowing a
+  door exists is not evidence that anything opened it, and getting that backwards
+  would report perfect coverage on a product nobody ever ran.
+- **Never a percentage.** A percentage invites a target, a target invites gaming,
+  and a gamed coverage number is worse than no number because somebody believes
+  it. Counts, and the names of what is missing.
+- **Undercount rather than overcount.** Where the evidence is ambiguous the door
+  is recorded as unopened, and the reason is written down beside it.
+
+Even a run that walked every door it knows about refuses to claim it checked
+everything, because it did not: it checked every way in *this tool knows about*.
+
+```
+staysfixed check --json            # coverage.doorsKnown, coverage.doorsWalked, coverage.gaps
+```
+
+Over MCP it is `staysfixed_coverage`. Every `staysfixed_check` reply says it in
+words directly under the headline, and the JSON form carries `notChecked` and
+`doorsNeverOpened` as fields of their own rather than only as prose — a number an
+agent has to go looking for is a number it skips.
+
+And on a clean run only, the reply also says what a clean result **on this
+machine** actually means: *"this covers your website; your iPhone app is not
+being checked at all, and here is why."* Nothing inside a run can know that — a
+run only knows what it walked — so it comes from the machine survey and lands
+beside the good news, which is the one place it cannot be missed.
+
+### A run that compared nothing is not a pass
+
+There is one shape of clean result that would be a lie: every journey walked on
+the new build, nothing on record from the old one, zero differences found, and a
+verdict reading *nothing that worked has changed*. It is arithmetically true and
+it would let a real regression through. That run comes back as **`NOTHING WAS
+ACTUALLY COMPARED`**, it is not a pass, and it exits non-zero.
+
+---
+
+## Aiming a check at one thing
+
+By default a check walks everything your settings describe. To aim it at one kind
+of product:
+
+```
+staysfixed check --surface web --at http://localhost:3000
+staysfixed check --surface electron --at ./release/mac-arm64/YourApp.app
+staysfixed check --surface android --at ./app/build/outputs/apk/release/app.apk
+staysfixed check --surface ios --at ./build/YourApp.app
+```
+
+The important half is what happens when it cannot go there. A tool that quietly
+ignored an option it did not understand would check whatever it was going to
+check anyway and hand back a **perfectly clean result about the wrong thing** —
+the most dangerous shape a reply can have. So:
+
+- aimed at a kind of product this project does not contain → it refuses, by name,
+  and nothing is checked;
+- aimed at a kind of product this copy of the tool has no adapter for → it
+  refuses, and names the adapter that is missing;
+- given an address no adapter would ever read → it refuses rather than dropping it;
+- and a run that *did* go where it was aimed says so, so a clean result can be
+  trusted to be about the thing you named.
 
 ---
 
@@ -355,11 +480,11 @@ cwd = "/absolute/path/to/your/project"
 | --- | --- |
 | `staysfixed_capabilities` | **Call this first, once per session.** What it can check on this machine right now, what it cannot and why, what is missing that would unlock more, and the exact shape of every reply. It runs nothing. After this call an agent should not need to read any documentation about this tool. |
 | `staysfixed_intent` | Seal what you **meant** to change, before you run a check. This is what makes a later "that one was me" claim checkable instead of a story. |
-| `staysfixed_check` | Run it. Returns only the differences you did not account for, ranked with the ones furthest from your edit at the top. Unchanged paths never reach you; the reply says how many were skipped. |
+| `staysfixed_check` | Run it. Returns only the differences you did not account for, ranked with the ones furthest from your edit at the top. Unchanged paths never reach you; the reply says how many were skipped, and what was never looked at. Takes `surface` and `at` to aim it at a web page, a desktop app, an APK or a simulator build — and refuses by name rather than checking something else. |
 | `staysfixed_explain` | One finding, in depth — both values in full, the journey that reached it, the code around it, the evidence. Never pushed into a check reply, so ask for it on the two or three you intend to act on. |
 | `staysfixed_prove` | Test a causal claim by undoing a change and running again. If the difference survives the revert, your edit did not cause it and you were about to fix the wrong thing. |
 | `staysfixed_waive` | Record that a difference was intended. Not approval, and it makes nothing the new normal — only shipping does that. Four gates, and a refusal is final. |
-| `staysfixed_coverage` | What was **not** checked. Read it before telling anyone a change is safe. |
+| `staysfixed_coverage` | What was **not** checked: the doors no journey has ever opened, the surfaces this machine cannot reach, the surfaces this *copy* has no adapter for, anything refused for being irreversible, and what it can never see on any machine. Read it before telling anyone a change is safe. |
 
 **An agent can check; only a person can approve.** `staysfixed_approve` is not
 merely refused — it is not on the tool list at all unless the project explicitly
@@ -532,15 +657,19 @@ Honestly, so you know before you invest an afternoon.
 - **Pictures still do not travel between operating systems.** Text is drawn
   differently on every system. Pixels are evidence now rather than the accusation,
   which makes this matter far less than it did — but it has not gone away.
-- **Phones are not covered yet.** Android APKs and the iOS simulator are designed
-  and not built. Android needs a Java runtime, `adb` and Appium, none of which
-  this tool installs for you today. If you ship a phone app, this covers
-  everything around it and not the app itself, and it will say so rather than
-  report a green run that quietly means less than it looks like.
-- **Native Windows GUI is not covered, and may never be.** If your Windows
-  product is Electron — most are — it is already covered, driven from any
-  machine. A real Win32 application needs a Windows desktop and cannot run two
-  builds at once even in principle.
+- **Phones cannot be paired, and the iPhone is not covered yet.** Android runs on
+  an emulator against the stored record, which is weaker than a paired run and
+  says so every time. The iOS simulator is designed and not built. If you ship a
+  phone app, ask `doctor` what it is actually covering before you trust a clean
+  result — it will tell you plainly rather than let a green run mean less than it
+  looks like.
+- **Native Windows shows one desktop, so two builds cannot run at once even in
+  principle.** Runs are one after the other and the same-minute guarantee is
+  weaker there than on any platform. If your Windows product is Electron — most
+  are — it is covered properly instead, over the debug port, from any machine.
+  Nothing irreversible can be refused on Windows either: there is no way to block
+  a compiled program's network call without administrator rights, so a journey
+  marked irreversible is refused outright rather than walked.
 - **Not battle-tested.** It works, it is used, and it has not yet met the thousand
   strange apps a widely-used tool meets. If it reports something that is not true,
   that is the most serious kind of bug it can have — please

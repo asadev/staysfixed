@@ -1,0 +1,111 @@
+# Prove that nothing which already worked has changed — on every pull request.
+#
+# WHY A BUILD SERVER IS A GOOD PLACE FOR THIS, and not a compromise. Everything Stays Fixed
+# concludes rests on one claim: the difference was caused by the change and nothing else. A
+# fresh runner has the same fonts every time, the same operating system, nothing else
+# competing for a port, and no half-finished experiment left over from yesterday. It is a
+# better machine for this job than anybody's laptop.
+#
+# WHAT IT COMPARES AGAINST. On a pull request: the commit your branch forked from — put back
+# on this same runner with `git archive` and walked again, minutes apart. That is a full
+# paired run, and it needs nothing stored from a previous job. On a push it works down to the
+# last release, the last tag, or the commit before. Whichever it lands on is named in the job
+# summary, because they are not equally strong.
+#
+# THE ONE LINE YOU MUST NOT DELETE is `fetch-depth: 0`. A shallow checkout answers "what did
+# this branch fork from" with "this commit" — so the check would compare the build against
+# itself, find nothing, and go green. Stays Fixed catches that and refuses, but the run is
+# then worth nothing. Full history is what makes this work.
+
+name: Stays Fixed
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+# Nothing is published, released or tagged here, and no token is used for anything.
+permissions:
+  contents: read
+
+# Two runs of the same branch would be two builds on one machine fighting over ports and
+# user data directories. Sequential, never simultaneous, is a rule of the whole tool.
+concurrency:
+  group: staysfixed-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Has anything that worked changed?
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Read the paragraph above before changing this.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        run: npm ci || npm install
+
+      # Only needed if anything you check is a web page. Delete these three lines for a
+      # command line tool or a library — the check will say what it could not look at either way.
+      - name: A browser to look at web pages with
+        run: npx playwright install chromium
+
+      - name: Is Stays Fixed set up in this project?
+        id: setup
+        run: |
+          # Two separate looks on purpose. One `ls` over both patterns fails whenever
+          # either of them matches nothing, which would report a configured project as
+          # unconfigured and quietly skip the whole check.
+          if ls staysfixed.config.* >/dev/null 2>&1 || ls .staysfixed/config.* >/dev/null 2>&1; then
+            echo "configured=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=no" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Stays Fixed"
+              echo
+              echo "This project has no Stays Fixed settings file, so **nothing was checked**."
+              echo "This job is green because nothing was claimed — not because anything was proved."
+              echo
+              echo 'Run `npx staysfixed init` in your project to set it up.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Works out what to compare against, runs the check, writes the plain-English report
+      # into the job summary, and exits with the code that decides this job:
+      #
+      #   0  nothing that already worked has changed
+      #   1  something changed that nobody accounted for
+      #   2  the check could not run, or there was nothing to compare against — which is
+      #      NOT a pass, and is why this step has no `continue-on-error`
+      - name: Check
+        if: steps.setup.outputs.configured == 'yes'
+        run: |
+          # In your own project Stays Fixed is a dependency. In the Stays Fixed repository
+          # itself it is the source you are looking at. Both paths are tried so this file
+          # can be copied straight out of one into the other.
+          if [ -f node_modules/staysfixed/src/v2/ci.js ]; then
+            node node_modules/staysfixed/src/v2/ci.js
+          else
+            node src/v2/ci.js
+          fi
+
+      # Every observation both builds produced, the verdict, and what it compared against.
+      # Kept even when the job fails — especially then.
+      - name: Keep the evidence
+        if: always() && steps.setup.outputs.configured == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: staysfixed-${{ github.run_id }}
+          path: |
+            .staysfixed/ci
+            .staysfixed/v2
+          if-no-files-found: ignore
+          retention-days: 14

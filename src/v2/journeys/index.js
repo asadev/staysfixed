@@ -43,6 +43,7 @@ import { loadJourneyFolder, whatWillNotReplay } from './record.js';
 /** @typedef {import('../types.js').CoverageGap} CoverageGap */
 /** @typedef {import('../types.js').Channel} Channel */
 /** @typedef {import('../adapters/contract.js').Missing} Missing */
+/** @typedef {import('../adapters/source.js').Door} Door */
 
 export { journeysFromCode, journeysFromDoors, irreversibility } from './from-routes.js';
 export { detectRunner, harvestJourneys, listTestFiles } from './from-suite.js';
@@ -398,8 +399,14 @@ export async function checkReproducible(journeys, opts = {}) {
 /**
  * Gather journeys from every source that is available, and report where each one came from.
  *
+ * The doors come back alongside the journeys, and that is not a convenience. The coverage
+ * ledger is a join between the doors the code reader found and the journeys anything
+ * actually walked, and reading the source a second time to get the other half of that join
+ * would let the two halves drift: a door added between the two reads would show up as a door
+ * nothing covers, when the truth is that nothing had a chance to. One read, both halves.
+ *
  * @param {GatherOptions} opts
- * @returns {Promise<{journeys: GatheredJourney[], report: GatherReport}>}
+ * @returns {Promise<{journeys: GatheredJourney[], report: GatherReport, doors: Door[]}>}
  */
 export async function gather(opts) {
   const started = Date.now();
@@ -414,6 +421,8 @@ export async function gather(opts) {
   const missing = [];
   /** @type {string[]} */
   const notes = [];
+  /** @type {Door[]} */
+  let doors = [];
   /** @type {(() => Promise<Journey[]>)|undefined} */
   let regenerate;
 
@@ -422,6 +431,7 @@ export async function gather(opts) {
     log('Reading the doors out of the source.');
     const read = await journeysFromCode({ root, journeys: { surface: opts.surface, ...(opts.code || {}) } });
     collected.push(...read.journeys);
+    doors = read.doors;
     for (const left of read.report.left) {
       gaps.push({
         what: left.what,
@@ -438,6 +448,13 @@ export async function gather(opts) {
       const again = await journeysFromCode({ root, journeys: { surface: opts.surface, ...(opts.code || {}) } });
       return again.journeys;
     };
+  } else {
+    gaps.push({
+      what: 'The doors this product opens were never counted.',
+      why: 'Reading the code was switched off, so there is no list of routes, exported names, commands and IPC channels to measure coverage against — and without a denominator a clean run means only that nothing anybody walked changed.',
+      unlockedBy: 'Leave the code reader on. It reads files, runs nothing, and on Terminal Deck it finishes in under two seconds.',
+      channel: 'contract',
+    });
   }
 
   // ---- run the suite -------------------------------------------------------
@@ -559,7 +576,7 @@ export async function gather(opts) {
     notes,
     durationMs: Date.now() - started,
   };
-  return { journeys: verified.kept, report };
+  return { journeys: verified.kept, report, doors };
 }
 
 /**

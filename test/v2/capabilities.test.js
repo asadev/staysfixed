@@ -26,6 +26,7 @@ import path from 'node:path';
 import { capabilities, describeCapabilities } from '../../src/v2/doctor.js';
 import { surveyBrowsers, INSTALL_COMMAND } from '../../src/v2/browsers.js';
 import { toolDefinitions, callTool, aimingNote } from '../../src/v2/mcp/tools.js';
+import { ADAPTER_FOR_SURFACE } from '../../src/v2/check.js';
 
 /** Every probe doctor makes, on a laptop that may be busy. */
 const SURVEY_MS = 60_000;
@@ -177,9 +178,29 @@ describe('aiming a check at a web page or a desktop app', () => {
     assert.ok(check);
     const surface = check.inputSchema.properties.surface;
     assert.ok(surface, 'there has to be a way to say which kind of product to look at');
-    assert.deepEqual(surface.enum, ['auto', 'cli', 'server', 'web', 'electron']);
+    assert.deepEqual(surface.enum, ['auto', 'cli', 'library', 'server', 'web', 'electron', 'android', 'ios']);
     assert.match(surface.description, /never yours/, 'an agent should learn from the schema that this does not borrow the person’s browser');
     assert.ok(check.inputSchema.properties.at, 'and a way to say where: a URL, or the built app');
+  });
+
+  test('every kind of product the engine can walk is one an agent is allowed to ask for', () => {
+    // A surface the engine knows how to walk and the schema does not offer is a surface
+    // no agent will ever aim at, which makes building the adapter pointless. This is the
+    // seam where a new platform quietly fails to arrive.
+    const check = toolDefinitions().find((t) => t.name === 'staysfixed_check');
+    assert.ok(check);
+    /** @type {string[]} */
+    const offered = check.inputSchema.properties.surface.enum;
+    for (const surface of Object.keys(ADAPTER_FOR_SURFACE)) {
+      // Windows is deliberately left off: it is driven over ssh to another machine and
+      // aimed at from the settings rather than from a tool call.
+      if (surface === 'windows') continue;
+      assert.ok(offered.includes(surface), `the engine can walk a ${surface} journey and no agent can ask for one`);
+    }
+    for (const surface of offered) {
+      if (surface === 'auto') continue;
+      assert.ok(surface in ADAPTER_FOR_SURFACE, `an agent is being offered "${surface}" and nothing knows which adapter would walk it`);
+    }
   });
 
   test('capabilities explains both new surfaces without being asked twice', { timeout: SURVEY_MS }, async () => {

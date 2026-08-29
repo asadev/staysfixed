@@ -145,6 +145,11 @@ const ENGINE_PARTS = {
   explain: ['explain'],
   capabilities: ['capabilities'],
   describe: ['describeCapabilities'],
+  // What a run did NOT look at, in one sentence. Taken from the engine rather than
+  // written again here, because two differently-worded statements of the same coverage
+  // is how one of them quietly starts being wrong — and this is the sentence that stands
+  // between a clean result and somebody believing more of it than it says.
+  notChecked: ['whatWasNotChecked'],
 };
 
 /**
@@ -347,13 +352,14 @@ export function toolDefinitions() {
           journeys: { type: 'string', description: "Where the steps come from: 'suite', 'code', 'recorded', or a path to a journeys file." },
           surface: {
             type: 'string',
-            enum: ['auto', 'cli', 'server', 'web', 'electron'],
+            enum: ['auto', 'cli', 'library', 'server', 'web', 'electron', 'android', 'ios'],
             description:
-              "What kind of product to aim at. Default 'auto', which uses the settings. 'web' opens the page in a browser of the tool's own — never yours — and reads what the screen says each control is and does. 'electron' opens the desktop app with its own scratch data folder and drives it over its own debugging port.",
+              "What kind of product to aim at. Default 'auto', which uses the settings. 'web' opens the page in a browser of the tool's own — never yours — and reads what the screen says each control is and does. 'electron' opens the desktop app with its own scratch data folder and drives it over its own debugging port. 'android' installs the APK on a virtual device; 'ios' boots the built app on a simulator. Aim it at something this copy or this machine cannot drive and it refuses by name rather than checking something else and reporting that.",
           },
           at: {
             type: 'string',
-            description: "What to aim at: a URL for 'web' (http://localhost:3000), or the path to the built app for 'electron'. Leave it out to use whatever the settings name.",
+            description:
+              "Where that product is: a URL for 'web' (http://localhost:3000), the path to the built app for 'electron', the APK for 'android', the built .app for 'ios'. Leave it out to use whatever the settings name.",
           },
           limit: { type: 'number', description: `How many findings to return in full. Default ${DEFAULT_LIMIT}; the rest are counted and named.` },
           offset: { type: 'number', description: 'Skip this many findings. Pages through the last run without running anything again.' },
@@ -596,7 +602,10 @@ async function toolCapabilities(ctx, input) {
 const AIMING = [
   "staysfixed_check { surface: 'web', at: 'http://localhost:3000' } — opens the page in a browser of the tool's own, never yours, and reads what the screen says each control is and does. Start your dev server yourself first; the tool will not guess at a command that might build over what you have running.",
   "staysfixed_check { surface: 'electron', at: '/path/to/YourApp.app' } — opens the built desktop app with its own scratch data folder and its own debugging port, so it can never fight your own copy of it over a lock, a data folder or a relay slot.",
+  "staysfixed_check { surface: 'android', at: '/path/to/app-release.apk' } — installs the APK on a virtual device of its own, walks it, and reads what each control on the screen is and does. A real handset cannot be compared against a second build and never will be; the emulator is the honest answer.",
+  "staysfixed_check { surface: 'ios', at: '/path/to/YourApp.app' } — boots the built app on a simulator of its own. Real iPhones are out of reach for the same reason.",
   "staysfixed_check { surface: 'cli' } or { surface: 'server' } — the same engine on a command-line tool or an HTTP server.",
+  'Aiming at something this copy has no adapter for, or something this project does not contain, is REFUSED by name. It never falls back to checking whatever else was lying around and reporting that as your answer.',
   'Leave both out and it uses the settings. If you aim it and the result does not confirm it went there, the reply says so at the top and nothing below it is about what you asked for.',
   'Both builds are opened one after the other, never at once. Two copies of one app fight over ports, single-instance locks and data folders, and a tool that caused that would be causing the bug it exists to catch.',
 ];
@@ -754,6 +763,21 @@ async function toolCheck(ctx, input) {
   const page = unaccounted.slice(offset, offset + limit);
   const clean = unaccounted.length === 0 && newlyUnstable.length === 0 && result?.blocked !== true;
 
+  // What this run did not look at, in the engine's own words. It rides in every reply,
+  // clean ones included: a green result on a product with three hundred unopened doors is
+  // true, and it is not what it looks like, and an agent that reads only the headline is
+  // about to tell somebody their change is safe.
+  const notChecked = coverageSentence(engine, result);
+  const doors = result?.coverage?.doorsKnown ?? 0;
+  const unopened = Math.max(0, doors - (result?.coverage?.doorsWalked ?? 0));
+
+  // On a clean run, and only then, the machine's own statement of what a clean run here
+  // would MEAN. This is the sentence the design asks for in so many words: "this covers
+  // your website; your iPhone app is not being checked, and here is why". An agent about
+  // to tell somebody a change is safe needs it, and a run with findings in it does not —
+  // that agent has work to do and no reason to over-read anything.
+  const covers = clean ? await whatAGreenRunMeansHere(engine, ctx) : null;
+
   if (input.format === 'json') {
     const payload = {
       ok: clean,
@@ -763,6 +787,11 @@ async function toolCheck(ctx, input) {
       noiseRemoved: result?.differencesNoise ?? null,
       newlyUnstable,
       coverage: result?.coverage ?? null,
+      // Never only inside `coverage`. A field an agent has to know to go and look at is a
+      // field that gets skipped, and this is the one that must not be.
+      notChecked,
+      doorsNeverOpened: unopened,
+      covers,
       unaccounted: unaccounted.length,
       // Never a bare number. An agent has to be able to see that fifty things were waived
       // rather than merely that nothing was reported, or "silent" and "switched off" look
@@ -796,6 +825,8 @@ async function toolCheck(ctx, input) {
     intent,
     clean,
     missedTheTarget,
+    notChecked,
+    covers,
   });
 
   // The handful of things a person has to rule on, written for the person rather than for
@@ -834,9 +865,11 @@ async function toolCheck(ctx, input) {
  * @param {Intent|null} a.intent
  * @param {boolean} a.clean
  * @param {string|null} a.missedTheTarget
+ * @param {string} a.notChecked
+ * @param {string|null} a.covers
  * @returns {string}
  */
-function renderCheck({ result, unaccounted, page, offset, limit, waived, expired, waiversLeft, newlyUnstable, intent, clean, missedTheTarget }) {
+function renderCheck({ result, unaccounted, page, offset, limit, waived, expired, waiversLeft, newlyUnstable, intent, clean, missedTheTarget, notChecked, covers }) {
   /** @type {string[]} */
   const out = [];
 
@@ -864,9 +897,11 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
   if (typeof result?.differencesNoise === 'number' && result.differencesNoise > 0) arithmetic.push(`${result.differencesNoise} differences subtracted as this product's own wobble`);
   if (waived) arithmetic.push(`${waived} already recorded as intended and not shown again`);
   if (arithmetic.length) out.push(arithmetic.join(', ') + '.');
-  if (!result?.coverage) {
-    out.push('This run did not report what it covered, so how thorough it was is unknown. Treat a clean result with suspicion until it does, and call staysfixed_coverage.');
-  }
+
+  // Immediately under the headline, never at the bottom. On a clean run this is the only
+  // line that stops "nothing unaccounted for" being read as "your product is fine".
+  out.push(notChecked);
+  if (covers) out.push(covers);
 
   if (missedTheTarget) out.push(missedTheTarget);
 
@@ -921,6 +956,70 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
   }
 
   return out.join('\n');
+}
+
+/**
+ * What a clean run on THIS machine actually means, in the machine survey's own words.
+ *
+ * A product with a website and an iPhone app, checked on a machine that can only open the
+ * website, produces a perfectly clean result that says nothing whatever about the phone.
+ * Nothing inside the run can know that — the run only knows what it walked. This is the
+ * other half, and it is the difference between "your change is safe" and "your change is
+ * safe as far as your website goes".
+ *
+ * @param {Engine} engine
+ * @param {ToolContext} ctx
+ * @returns {Promise<string|null>}
+ */
+async function whatAGreenRunMeansHere(engine, ctx) {
+  const survey = engine.parts.capabilities;
+  if (typeof survey !== 'function') return null;
+  try {
+    // Offline: no other machine is dialled for this. A check is not the moment to spend
+    // eight seconds finding out whether somebody's server is awake.
+    const caps = await survey({ cwd: ctx.root, offline: true });
+    const said = caps?.covers?.short;
+    return typeof said === 'string' && said.trim() !== '' ? `WHAT A CLEAN RESULT HERE MEANS: ${said}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What this run did not look at, in one sentence, guaranteed.
+ *
+ * The words come from the engine, so an agent and a person are never told two different
+ * things about the same run. The fallback exists because this sentence may never be
+ * absent: a reply that silently omits it on the one run where it mattered is exactly the
+ * failure the whole coverage ledger is built to prevent. There is deliberately no path
+ * through here that returns an empty string.
+ *
+ * @param {Engine} engine
+ * @param {CheckResult} result
+ * @returns {string}
+ */
+function coverageSentence(engine, result) {
+  const say = engine.parts.notChecked;
+  if (typeof say === 'function') {
+    try {
+      const said = say(result?.coverage);
+      if (typeof said === 'string' && said.trim() !== '') return said;
+    } catch {
+      // An engine that threw while describing its own coverage has told us the most
+      // important thing it could: do not trust the silence. Fall through and say so.
+    }
+  }
+
+  const coverage = result?.coverage;
+  if (!coverage) {
+    return 'NOT EVERYTHING WAS CHECKED, and this run did not say how much — so how thorough it was is unknown. Treat a clean result with suspicion, and call staysfixed_coverage before you tell anybody a change is safe.';
+  }
+  const unopened = Math.max(0, (coverage.doorsKnown ?? 0) - (coverage.doorsWalked ?? 0));
+  const gaps = (coverage.gaps ?? []).filter((g) => typeof g.doors !== 'number').length;
+  if (unopened === 0 && gaps === 0) {
+    return `Everything this run knows how to walk was walked — ${coverage.paths} addresses across ${coverage.journeys} journeys. That is not every possible state of your product; nothing can enumerate that.`;
+  }
+  return `NOT EVERYTHING WAS CHECKED: ${unopened} ways into this product have never been walked through, and ${gaps} other things were not looked at. A clean result only covers what was walked — staysfixed_coverage has the list.`;
 }
 
 /**
@@ -1254,7 +1353,14 @@ async function toolCoverage(ctx, input) {
       lastCheckAt: last?.at ?? null,
       covers: caps?.covers ?? null,
       walked: coverage?.journeys ?? null,
-      unopened: (coverage?.gaps ?? []).map((/** @type {{what: string}} */ g) => g.what),
+      doorsKnown: coverage?.doorsKnown ?? null,
+      doorsWalked: coverage?.doorsWalked ?? null,
+      doorsNeverOpened: coverage ? Math.max(0, (coverage.doorsKnown ?? 0) - (coverage.doorsWalked ?? 0)) : null,
+      // What this COPY of the tool can drive, which is not the same question as what this
+      // machine could run. A Mac with Xcode on it can run an iPhone app; that says nothing
+      // about whether there is an adapter here that knows how to open one.
+      cannotBeDriven: (caps?.drivers ?? []).filter((/** @type {any} */ d) => !d.present).map((/** @type {any} */ d) => ({ surface: d.surface, why: d.why })),
+      unopened: (coverage?.gaps ?? []).filter((/** @type {{doors?: number}} */ g) => typeof g.doors !== 'number').map((/** @type {{what: string}} */ g) => g.what),
       surfacesOutOfReach: unreachable.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary, needs: s.needs })),
       surfacesPartial: partial.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary })),
       neverVisible: caps?.limits ?? null,
@@ -1278,17 +1384,37 @@ async function toolCoverage(ctx, input) {
   } else if (!coverage) {
     out.push('The last run did not report what it covered, so how deep it went is unknown. That is itself the answer: treat its clean result with suspicion.');
   } else {
-    // A gap IS a way in that was never opened, said in plain English by whoever
-    // could not open it. Printing the sentence keeps the reason attached to the hole.
-    const unopened = (coverage.gaps ?? []).map((/** @type {{what: string}} */ g) => g.what);
+    // A gap IS something that was not looked at, said in plain English by whoever could
+    // not look at it. Printing the sentence keeps the reason attached to the hole. The
+    // doors gap is left out here because it is already counted, in its own words, just
+    // above — and a number a reader can catch out twice is a number they stop believing.
+    const unopened = (coverage.gaps ?? [])
+      .filter((/** @type {{doors?: number}} */ g) => typeof g.doors !== 'number')
+      .map((/** @type {{what: string}} */ g) => g.what);
     out.push(`The last run walked ${coverage.journeys} ${coverage.journeys === 1 ? 'way in' : 'ways in'}.`);
-    if (unopened.length === 0) {
+    const doorsKnown = coverage.doorsKnown ?? 0;
+    const never = Math.max(0, doorsKnown - (coverage.doorsWalked ?? 0));
+    if (never > 0) {
+      out.push(
+        doorsKnown === 1
+          ? 'The one door the code opens — a route, an exported function, an IPC channel — has never been walked through by any journey. It is known to EXIST and is not known to WORK, and no check has ever said anything about it.'
+          : `${never} of the ${doorsKnown} doors the code opens — routes, exported functions, IPC channels — ${never === 1 ? 'has' : 'have'} never been walked through by any journey. They are known to EXIST and are not known to WORK, and no check has ever said anything about them.`
+      );
+    }
+    if (unopened.length === 0 && never === 0) {
       out.push('It opened every way in that it knows about. That is not the same as every possible state - nothing can enumerate that - but there is no known door it has never been through.');
-    } else {
-      out.push(`${unopened.length} ${unopened.length === 1 ? 'way in has' : 'ways in have'} never been opened, so nothing in any check says anything about ${unopened.length === 1 ? 'it' : 'them'}:`);
+    } else if (unopened.length > 0) {
+      out.push(`${unopened.length} other ${unopened.length === 1 ? 'thing was' : 'things were'} not looked at, so nothing in any check says anything about ${unopened.length === 1 ? 'it' : 'them'}:`);
       for (const d of unopened.slice(0, 30)) out.push(`- ${trim(String(d), 160)}`);
       if (unopened.length > 30) out.push(`- and ${unopened.length - 30} more.`);
     }
+  }
+
+  const noAdapter = (caps?.drivers ?? []).filter((/** @type {any} */ d) => !d.present);
+  if (noAdapter.length) {
+    out.push('');
+    out.push('This copy of Stays Fixed has no adapter for these, so nothing aimed at them would be walked at all:');
+    for (const d of noAdapter) out.push(`- ${d.surface}: ${d.why}`);
   }
 
   if (unreachable.length) {

@@ -88,8 +88,28 @@ export const CHANNELS = [
  * @typedef {object} Need
  * @property {string} what
  * @property {string} why
- * @property {string} fix
+ * @property {string} fix           The exact command, or the exact thing a person has to do.
  * @property {boolean} automatic    True when Stays Fixed could do it itself.
+ * @property {string} [unlocks]     What becomes checkable once it is there, in plain English.
+ *                                  A person asked to spend half an hour on a download deserves
+ *                                  to be told what they get for it, in a sentence, before they
+ *                                  start — and an agent relaying the ask needs the same sentence.
+ */
+
+/**
+ * What THIS COPY of the tool can drive, which is a different question from what this
+ * machine could run.
+ *
+ * A Mac with Xcode, a simulator and Appium on it can run an iPhone app. That says nothing
+ * about whether Stays Fixed has an adapter that knows how to drive one. Answering the
+ * first question and reporting it as the second is how a surface gets called ready while
+ * every journey aimed at it walks nothing — and a journey nothing walked, reported as
+ * covered, is the worst thing this tool can produce.
+ *
+ * @typedef {object} DriverReport
+ * @property {string} surface
+ * @property {boolean} present
+ * @property {string} why           Plain English, filled in either way.
  */
 
 /**
@@ -129,6 +149,7 @@ export const CHANNELS = [
  * @property {{platform: string, arch: string, release: string, node: string, cpus: number, memoryGb: number, tag: string}} machine
  * @property {{root: string, configFile: string|null, isGitRepo: boolean, hasReference: boolean, referenceNote: string}} project
  * @property {SurfaceReport[]} surfaces
+ * @property {DriverReport[]} drivers
  * @property {Covers} covers
  * @property {{willOpen: import('./browsers.js').BrowserFound|null, borrowingYourOwn: boolean, note: string, install: string|null, found: import('./browsers.js').BrowserFound[], neverTouches: string[], leftovers: string}} browsers
  * @property {{id: string, name: string, what: string, availableOn: string[]}[]} channels
@@ -161,14 +182,17 @@ export async function capabilities(opts = {}) {
   const browsers = await surveyBrowsers().catch(() => /** @type {import('./browsers.js').BrowserSurvey} */ ({ found: [], chosen: null, borrowingHis: false, note: 'The browsers on this machine could not be checked, so nothing here says whether a web page can be opened.', install: INSTALL_COMMAND }));
   const desktopApp = findDesktopApp(cwd);
 
-  const [tools, hosts, repo, reference] = await Promise.all([
+  const [tools, hosts, repo, reference, drivers, phones, asked] = await Promise.all([
     findTools(cwd, browsers),
     offline ? Promise.resolve(/** @type {HostReport[]} */ ([])) : reachableHosts(),
     isRepo(root).catch(() => false),
     findReference(root),
+    whatThisCopyCanDrive(),
+    phoneApps(root, configFile),
+    askTheAdapters(root),
   ]);
 
-  const surfaces = describeSurfaces(tools, hosts, configFile !== null, browsers, desktopApp);
+  const surfaces = describeSurfaces(tools, hosts, configFile !== null, browsers, desktopApp, drivers, phones, asked);
 
   /** @type {Capabilities} */
   const caps = {
@@ -190,6 +214,7 @@ export async function capabilities(opts = {}) {
       referenceNote: reference.note,
     },
     surfaces,
+    drivers,
     covers: whatThisRunActuallyCovers(surfaces),
     browsers: {
       willOpen: browsers.chosen,
@@ -451,21 +476,6 @@ async function findTools(cwd, browsers) {
     })(),
 
     (async () => {
-      const where = onPath('java');
-      const answer = where ? await ask(where, ['-version']) : null;
-      add({
-        id: 'java',
-        name: 'Java',
-        found: where !== null && answer?.ok === true,
-        where: where ?? undefined,
-        version: answer?.ok ? versionIn(answer.out) : undefined,
-        why: 'Android tooling is written in it. Nothing about Android works without it.',
-        fix: where ? undefined : 'brew install --cask temurin  (macOS), or install any JDK 17 or newer.',
-        automatic: true,
-      });
-    })(),
-
-    (async () => {
       const where = onPath('adb') ?? androidSdkTool('platform-tools', 'adb');
       add({
         id: 'adb',
@@ -489,17 +499,20 @@ async function findTools(cwd, browsers) {
         fix: where ? undefined : 'Install the Android SDK emulator and one system image.',
         automatic: true,
       });
-    })(),
 
-    (async () => {
-      const where = onPath('appium');
+      // An emulator with no virtual device on it is a program that cannot start
+      // anything, and reporting it as a runner would send a check off to boot a phone
+      // that does not exist. Two separate facts, so they get two separate answers.
+      const avds = where ? await ask(where, ['-list-avds'], PROBE_MS) : null;
+      const names = (avds?.out ?? '').split('\n').map((line) => line.trim()).filter((line) => line !== '' && !line.includes(' '));
       add({
-        id: 'appium',
-        name: 'Appium',
-        found: where !== null,
+        id: 'avd',
+        name: 'an Android phone to run it on',
+        found: names.length > 0,
         where: where ?? undefined,
-        why: 'Reads the meaning tree of a phone app on Android, and on the iOS simulator.',
-        fix: where ? undefined : 'npm install -g appium && appium driver install uiautomator2',
+        version: names[0],
+        why: 'The emulator is the program; a virtual device is the phone it runs. Without one there is nothing to install the app onto.',
+        fix: names.length > 0 ? undefined : 'sdkmanager "system-images;android-35;google_apis;arm64-v8a" && avdmanager create avd -n staysfixed -k "system-images;android-35;google_apis;arm64-v8a"',
         automatic: true,
       });
     })(),
@@ -511,19 +524,6 @@ async function findTools(cwd, browsers) {
       }
       const sim = await simulatorReport();
       add(sim);
-    })(),
-
-    (async () => {
-      const where = onPath('dotnet');
-      add({
-        id: 'dotnet',
-        name: '.NET',
-        found: where !== null,
-        where: where ?? undefined,
-        why: 'Builds the small probe that reads a native Windows window. Not needed for an Electron app on Windows.',
-        fix: where ? undefined : 'Only needed if you ship a native Windows product that is not Electron.',
-        automatic: false,
-      });
     })(),
 
     (async () => {
@@ -686,6 +686,242 @@ function findDesktopApp(cwd) {
     return { where: root, how: 'this project depends on Electron, so it makes one — but nothing says where the built app is' };
   }
   return null;
+}
+
+/**
+ * A built thing this tool could be pointed at, and how we know it is there.
+ * @typedef {{where: string, how: string}} FoundApp
+ */
+
+/**
+ * Is there a phone app in this project to check?
+ *
+ * The same three answers as the desktop app, in the same order of how sure they make us:
+ * settings that name one, a built artifact sitting where the toolchain puts it, and a
+ * project layout that says one gets made. Settings are READ as text and never loaded — a
+ * settings file may be JavaScript, and doctor must never run somebody's code to answer a
+ * question about their machine.
+ *
+ * Asking this at all is the point. A Mac with Xcode on it can run an iPhone app; that says
+ * nothing about whether THIS project has one. Telling somebody with a website to go and
+ * install thirty gigabytes of Xcode is asking for work that changes nothing, and the whole
+ * design turns on never doing that.
+ *
+ * @param {string} root
+ * @param {string|null} configFile
+ * @returns {Promise<{android: FoundApp|null, ios: FoundApp|null}>}
+ */
+async function phoneApps(root, configFile) {
+  /** @type {string} */
+  let settings = '';
+  if (configFile) {
+    try {
+      settings = readFileSync(configFile, 'utf8');
+    } catch {
+      settings = '';
+    }
+  }
+
+  /**
+   * @param {string} key
+   * @returns {FoundApp|null}
+   */
+  const named = (key) => {
+    const found = new RegExp(`["']?${key}["']?\\s*:\\s*["'\`]([^"'\`]+)["'\`]`).exec(settings);
+    return found ? { where: found[1], how: `your settings name it under ${key}` } : null;
+  };
+
+  /**
+   * @param {string[]} folders
+   * @param {(name: string) => boolean} wanted
+   * @returns {FoundApp|null}
+   */
+  const built = (folders, wanted) => {
+    for (const folder of folders) {
+      const dir = path.join(root, folder);
+      /** @type {string[]} */
+      let entries = [];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (wanted(entry)) return { where: path.join(dir, entry), how: `it is built and sitting in ${folder}/` };
+      }
+    }
+    return null;
+  };
+
+  /** @param {string} rel */
+  const there = (rel) => existsSync(path.join(root, rel));
+
+  const android =
+    named('apk') ??
+    built(['dist', 'out', 'build', 'release', path.join('android', 'app', 'build', 'outputs', 'apk', 'release')], (name) => name.endsWith('.apk')) ??
+    (there(path.join('android', 'build.gradle')) || there(path.join('android', 'build.gradle.kts')) || there('build.gradle') || there('build.gradle.kts')
+      ? { where: path.join(root, 'android'), how: 'this project builds one, but nothing says where the built APK is' }
+      : null);
+
+  const ios =
+    named('xcworkspace') ??
+    built(['dist', 'out', 'build', 'release'], (name) => name.endsWith('.app')) ??
+    (there(path.join('ios', 'Podfile')) || readdirSafe(path.join(root, 'ios')).some((n) => n.endsWith('.xcodeproj') || n.endsWith('.xcworkspace'))
+      ? { where: path.join(root, 'ios'), how: 'this project builds one, but nothing says where the built app is' }
+      : readdirSafe(root).some((n) => n.endsWith('.xcodeproj') || n.endsWith('.xcworkspace'))
+        ? { where: root, how: 'there is an Xcode project here, but nothing says where the built app is' }
+        : null);
+
+  return { android, ios };
+}
+
+/**
+ * "an electron journey", not "a electron journey". A small thing, and the sort of small
+ * thing that makes a reader trust the rest of the sentence less.
+ * @param {string} word
+ * @returns {string}
+ */
+function an(word) {
+  return `${/^[aeiou]/i.test(word) ? 'an' : 'a'} ${word}`;
+}
+
+/**
+ * @param {string} dir
+ * @returns {string[]}
+ */
+function readdirSafe(dir) {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Does this stop everything, or only narrow it? Read out of the sentence written for it in
+ * {@link askTheAdapters}, which is the only place that sentence comes from.
+ * @param {Need} need
+ * @returns {boolean}
+ */
+function blocks(need) {
+  return need.why.startsWith('Nothing on this platform');
+}
+
+/**
+ * The platforms that arrive as an adapter of their own, and know their own requirements.
+ * The built-in five are described by hand above, because they are older than this
+ * mechanism and their wording is tested; these three answer for themselves.
+ */
+const ADAPTERS_THAT_ANSWER_FOR_THEMSELVES = ['android', 'ios', 'windows'];
+
+/**
+ * Ask each separate adapter what IT is missing, in its own words.
+ *
+ * This is "detect rather than ask" carried all the way through. An adapter knows what it
+ * needs; this file does not, and a list of program names kept here is a second opinion
+ * about the same question — the shape of bug this whole tool exists to catch. It was
+ * already wrong once: this file asked for Appium on behalf of an Android adapter that does
+ * not use Appium, and somebody would have spent twenty minutes installing it for nothing.
+ *
+ * Every call is raced against a timeout and every failure becomes silence. Doctor is what
+ * somebody runs when they are already stuck, and an adapter that will not answer must not
+ * take the rest of the answer with it.
+ *
+ * @param {string} root
+ * @returns {Promise<Map<string, Need[]>>}
+ */
+async function askTheAdapters(root) {
+  /** @type {Map<string, Need[]>} */
+  const out = new Map();
+  /** @type {{adapters: {name: string, detect: (p: any) => Promise<any>}[]}} */
+  let engine;
+  try {
+    engine = /** @type {any} */ (await import('./check.js')).loadAdapters ? await (await import('./check.js')).loadAdapters() : { adapters: [] };
+  } catch {
+    return out;
+  }
+
+  /** @type {Record<string, any>} */
+  let config = {};
+  try {
+    const file = findConfigFile(root);
+    // Read as text and parsed only when it is JSON. Doctor never runs a person's code to
+    // answer a question about their machine, and a settings file may be JavaScript.
+    if (file && file.endsWith('.json')) config = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    config = {};
+  }
+
+  await Promise.all(
+    ADAPTERS_THAT_ANSWER_FOR_THEMSELVES.map(async (name) => {
+      const adapter = engine.adapters.find((a) => a.name === name);
+      if (!adapter) return;
+      try {
+        /** @type {{missing?: {what?: string, unlocks?: string, howToGet?: string, blocking?: boolean}[]}} */
+        const detection = await Promise.race([
+          adapter.detect({ root, config: config[name] ?? {} }),
+          new Promise((resolve) => setTimeout(() => resolve({ missing: [] }), REACH_MS * 2)),
+        ]);
+        const needs = (detection?.missing ?? [])
+          .filter((m) => typeof m.what === 'string' && m.what !== '')
+          .map((m) => /** @type {Need} */ ({
+            what: String(m.what),
+            why: m.blocking === true ? 'Nothing on this platform can be checked at all without it.' : 'It widens what can be watched here.',
+            fix: String(m.howToGet ?? ''),
+            // Whether a person is needed is read out of the words, because the adapter
+            // contract has no field for it. A licence, an account, a pair of hands or a
+            // device is a person; everything else is a command the agent just runs. Being
+            // wrong in this direction only ever means telling somebody about a step they
+            // did not have to take, which is far cheaper than the other way round.
+            automatic: !/licen[cs]e|apple id|app store|plug|pair of hands|somebody has to|a person|sign in|log in/i.test(String(m.howToGet ?? '')),
+            unlocks: String(m.unlocks ?? ''),
+          }))
+          .filter((need) => need.fix !== '');
+        out.set(name, needs);
+      } catch {
+        // An adapter that cannot answer contributes nothing, and the machine survey stands.
+      }
+    }),
+  );
+  return out;
+}
+
+/**
+ * What THIS COPY of Stays Fixed knows how to drive.
+ *
+ * Asked of the engine rather than assumed, and asked in a try/catch, because doctor is the
+ * call somebody makes when everything else is broken and it must answer even then. A
+ * surface with no adapter behind it can never be reported as ready, whatever this machine
+ * has installed on it: the machine could run the app, and nothing here would open it.
+ *
+ * @returns {Promise<DriverReport[]>}
+ */
+async function whatThisCopyCanDrive() {
+  /** @type {DriverReport[]} */
+  const out = [];
+  try {
+    const engine = await import('./check.js');
+    const { adapters, missing } = await engine.loadAdapters();
+    for (const [surface, name] of Object.entries(engine.ADAPTER_FOR_SURFACE)) {
+      const present = adapters.some((a) => a.name === name);
+      out.push({
+        surface,
+        present,
+        why: present
+          ? `The ${name} adapter is in this copy, so ${an(surface)} journey has something to walk it.`
+          : missing.get(surface) ?? `There is no ${name} adapter in this copy, so nothing would walk ${an(surface)} journey.`,
+      });
+    }
+  } catch (e) {
+    // The engine would not load. The surfaces that arrive as a separate adapter are the
+    // ones that must not be guessed at, so they are reported as absent with the real
+    // reason rather than left to default to a yes. The built-in five live in the very
+    // file that would not load, so a check on this copy is not running at all — and both
+    // the command line and the MCP surface say that in their own words already.
+    const why = `This copy could not be asked what it can drive: ${messageOf(e)}`;
+    for (const surface of ['android', 'ios', 'windows']) out.push({ surface, present: false, why });
+  }
+  return out;
 }
 
 /**
@@ -858,9 +1094,16 @@ async function findReference(root) {
  * @param {boolean} configured
  * @param {import('./browsers.js').BrowserSurvey} browsers
  * @param {{where: string, how: string}|null} desktopApp
+ * @param {DriverReport[]} drivers      What this copy of the tool can drive at all.
+ * @param {{android: FoundApp|null, ios: FoundApp|null}} phones
+ * @param {Map<string, Need[]>} asked   What each separate adapter says IT is missing.
  * @returns {SurfaceReport[]}
  */
-function describeSurfaces(tools, hosts, configured, browsers, desktopApp) {
+function describeSurfaces(tools, hosts, configured, browsers, desktopApp, drivers, phones, asked) {
+  /** @param {string} surface */
+  const canDrive = (surface) => drivers.find((d) => d.surface === surface)?.present !== false;
+  /** @param {string} surface */
+  const noDriver = (surface) => drivers.find((d) => d.surface === surface)?.why ?? '';
   /** @param {string} id */
   const have = (id) => tools.some((t) => t.id === id && t.found);
   const browser = browsers.chosen !== null;
@@ -898,7 +1141,15 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp) {
     cannotCheck: ['meaning', 'pixels'],
     needs: have('docker')
       ? []
-      : [{ what: 'a database snapshot that can be restored twice', why: 'Both builds have to see identical data or every difference is really a data difference.', fix: 'Install Docker, or point the settings at a dump file the tool may restore.', automatic: false }],
+      : [
+          {
+            what: 'a database snapshot that can be restored twice',
+            why: 'Both builds have to see identical data or every difference is really a data difference.',
+            fix: 'Install Docker, or point the settings at a dump file the tool may restore.',
+            automatic: false,
+            unlocks: 'Anything on your server that depends on stored data — totals, lists, permissions — gets compared fairly instead of being left out.',
+          },
+        ],
   });
 
   surfaces.push({
@@ -926,6 +1177,9 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp) {
               : 'A page has to actually open before anything can be read off it.',
             fix: INSTALL_COMMAND,
             automatic: true,
+            unlocks: browser
+              ? 'Checks stop borrowing the browser you use, so a run in the background can never answer when you click your own browser icon.'
+              : 'Your website gets checked: every page, what each control says it is and does, what calls go out, and what the console complains about.',
           },
         ],
   });
@@ -956,6 +1210,7 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp) {
               why: 'Two builds of one desktop app fight over its single-instance lock and its data folder, so the tool has to know exactly which file to open and give each run its own folder.',
               fix: `Run \`staysfixed init\`, or set app.binary to ${desktopApp.where}.`,
               automatic: true,
+              unlocks: 'Your desktop app gets checked end to end, including every IPC channel the code registers — the doors no screenshot has ever seen.',
             },
           ],
   });
@@ -963,72 +1218,142 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp) {
     impossible.set('electron', 'This project has no desktop app in it. If yours is built somewhere else, name the built app in your settings under app.binary and this becomes available — nothing else is needed, and no browser is needed for it at all.');
   }
 
-  const androidMissing = ['java', 'adb', 'emulator', 'appium'].filter((id) => !have(id));
+  // Three separate questions, and folding any two of them together is how a surface gets
+  // called ready while nothing is ever walked on it: is there an Android app here to
+  // check, does this copy of the tool know how to drive one, and does this machine have
+  // what it takes to run it.
+  // What Android needs is asked of the Android adapter, never guessed at from a list of
+  // program names kept here. A second opinion about the same question is how a tool ends
+  // up telling somebody to install Appium for an adapter that does not use Appium — and
+  // being sent shopping for something that changes nothing is the fastest way to make a
+  // person stop reading this page.
+  const androidWants = asked.get('android') ?? [];
+  const androidMissing = androidWants.map((need) => need.what);
+  const androidBlocked = androidWants.some(blocks);
+  const androidReady = androidWants.length === 0 && canDrive('android');
+  // Missing something that stops everything and missing something that only narrows what
+  // is watched are different answers, and rolling the second into the first tells somebody
+  // their Android app cannot be checked when most of it can.
+  const androidPartly = !androidReady && !androidBlocked && canDrive('android') && phones.android !== null;
   surfaces.push({
     id: 'android',
     name: 'Android apps',
-    status: androidMissing.length === 0 ? 'ready' : 'unavailable',
+    status: phones.android === null || !canDrive('android') ? 'unavailable' : androidReady ? 'ready' : androidPartly ? 'partial' : 'unavailable',
     summary:
-      androidMissing.length === 0
-        ? 'Covered against the stored record. Whether two emulator snapshots restore identically is still unproven, and the run says which mode it used.'
-        : `Cannot run here yet. Missing: ${androidMissing.map((id) => tools.find((t) => t.id === id)?.name ?? id).join(', ')}. ${androidMissing.length === 1 ? 'It installs' : 'They all install'} without anybody clicking anything.`,
-    canCheck: androidMissing.length === 0 ? [...withoutADriver, 'meaning', 'pixels'] : [],
-    cannotCheck: androidMissing.length === 0 ? [] : CHANNELS.map((c) => c.id),
-    needs: androidMissing.map((id) => {
-      const tool = tools.find((t) => t.id === id);
-      return { what: tool?.name ?? id, why: tool?.why ?? '', fix: tool?.fix ?? '', automatic: tool?.automatic === true };
-    }),
+      phones.android === null
+        ? 'Nothing to check: no Android app was found in this project, and the settings do not name one.'
+        : !canDrive('android')
+          ? `An Android app is here (${phones.android.how}), and this copy of Stays Fixed cannot drive one. ${noDriver('android')}`
+          : androidReady
+            ? `Covered against the stored record. It installs ${phones.android.where} on a virtual device, walks it, and reads what each control on the screen is and does. Whether two emulator snapshots restore identically is still unproven, so a paired run is not offered — and the run says which mode it used.`
+            : androidPartly
+              ? `Most of your Android app can be checked: every screen another app can reach is opened and read. What is missing is ${plainList(androidMissing)}, and without ${androidMissing.length === 1 ? 'it' : 'them'} nothing is typed, pressed or saved — so a clean result covers the screens and not what the app DOES.`
+              : `An Android app is here (${phones.android.how}), and ${plainList(androidMissing)} ${androidMissing.length === 1 ? 'is' : 'are'} still missing. ${androidWants.every((n) => n.automatic) ? `${androidMissing.length === 1 ? 'It installs' : 'They all install'} without anybody clicking anything, so nobody needs to be asked.` : 'Some of it needs a person, and each one says what it is and what it unlocks.'}`,
+    canCheck: androidReady || androidPartly ? [...withoutADriver, 'meaning', 'pixels'] : [],
+    cannotCheck: androidReady || androidPartly ? [] : CHANNELS.map((c) => c.id),
+    needs: phones.android === null || !canDrive('android') ? [] : androidWants,
   });
+  if (phones.android === null) {
+    impossible.set(
+      'android',
+      'This project has no Android app in it, so there is nothing here for an emulator to run. If yours is built somewhere else, name the built APK in your settings under android.apk and this becomes available — nothing else is needed.'
+    );
+  } else if (!canDrive('android')) {
+    impossible.set(
+      'android',
+      `${noDriver('android')} Nothing you install on this machine changes that. Update Stays Fixed to a copy that has it; until then your Android app is not being checked by anything, and everything else on this list still is.`
+    );
+  }
 
-  const iosReady = process.platform === 'darwin' && have('simulator');
-  if (process.platform !== 'darwin') {
+  const onAMac = process.platform === 'darwin';
+  const iosMachine = onAMac && have('simulator');
+  // Whatever the iPhone adapter says it is missing, in its own words — the same as Android
+  // and Windows. Nothing here keeps a list of program names on its behalf: this file asked
+  // for Appium on Android's behalf once, for an adapter that does not use Appium, and it
+  // would have cost somebody twenty minutes for nothing.
+  const iosWants = asked.get('ios') ?? [];
+  const iosBlocked = iosWants.some(blocks);
+  const iosReady = iosMachine && canDrive('ios') && phones.ios !== null && iosWants.length === 0;
+  const iosPartly = iosMachine && canDrive('ios') && phones.ios !== null && !iosReady && !iosBlocked;
+  if (!onAMac) {
     impossible.set('ios', 'An iPhone build can only be run on a Mac. Everything else on this list is unaffected — check the iPhone app from a Mac, and let this machine cover the rest.');
+  } else if (phones.ios === null) {
+    impossible.set(
+      'ios',
+      'This project has no iPhone app in it, so there is nothing for the simulator to run. If yours is built somewhere else, name the built .app in your settings under ios.app and this becomes available.'
+    );
+  } else if (!canDrive('ios')) {
+    impossible.set(
+      'ios',
+      `${noDriver('ios')} Nothing you install on this machine changes that. Update Stays Fixed to a copy that has it; until then your iPhone app is not being checked by anything, and everything else on this list still is.`
+    );
   }
   surfaces.push({
     id: 'ios',
     name: 'iPhone apps, on the simulator',
-    status: iosReady ? (have('appium') ? 'ready' : 'partial') : 'unavailable',
-    summary: iosReady
-      ? have('appium')
-        ? 'Covered on the simulator. Real iPhones cannot be compared side by side and never will be.'
-        : 'The simulator is here, but nothing can read what is on its screen yet.'
-      : process.platform === 'darwin'
-        ? 'Cannot run here: no usable iOS runtime was found.'
-        : 'Cannot run here: iOS needs a Mac.',
-    canCheck: iosReady ? [...withoutADriver, ...(have('appium') ? ['meaning'] : []), 'pixels'] : [],
-    cannotCheck: iosReady ? (have('appium') ? [] : ['meaning']) : CHANNELS.map((c) => c.id),
-    needs: [
-      ...(iosReady && !have('appium')
-        ? [{ what: 'Appium with the XCUITest driver', why: 'It is what reads the meaning tree off a simulator screen.', fix: 'npm install -g appium && appium driver install xcuitest', automatic: true }]
-        : []),
-      // Xcode and its runtimes are a download nobody can do for you: it needs an
-      // Apple ID, a licence agreement and about thirty gigabytes.
-      ...(process.platform === 'darwin' && !have('simulator')
-        ? [
-            {
-              what: 'Xcode with at least one iOS runtime',
-              why: 'The simulator is the only place two builds of an iPhone app can be run one after the other.',
-              fix: 'Install Xcode from the App Store, open it once to accept the licence, then add an iOS runtime under Settings, Platforms.',
-              automatic: false,
-            },
-          ]
-        : []),
-    ],
+    status: iosReady ? 'ready' : iosPartly ? 'partial' : 'unavailable',
+    summary: !onAMac
+      ? 'Cannot run here: iOS needs a Mac.'
+      : phones.ios === null
+        ? 'Nothing to check: no iPhone app was found in this project, and the settings do not name one.'
+        : !canDrive('ios')
+          ? `An iPhone app is here (${phones.ios.how}), and this copy of Stays Fixed cannot drive one. ${noDriver('ios')}`
+          : !iosMachine
+            ? 'Cannot run here: no usable iOS runtime was found, so there is no simulator to boot the app on.'
+            : iosReady
+              ? `Covered on the simulator, against the stored record. It boots ${phones.ios.where} on a simulator of its own and reads what each control on the screen is and does. A real iPhone in your hand cannot be compared side by side and never will be — two builds cannot exist on it at once.`
+              : `The simulator is here and the app is here. What is missing is ${plainList(iosWants.map((n) => n.what))}, so a clean result would cover less than it looks like.`,
+    canCheck: iosReady || iosPartly ? [...withoutADriver, 'meaning', 'pixels'] : [],
+    cannotCheck: iosReady || iosPartly ? [] : CHANNELS.map((c) => c.id),
+    needs:
+      !onAMac || phones.ios === null || !canDrive('ios')
+        ? []
+        : [
+            // Xcode and its runtimes are a download nobody can do for you: it needs an
+            // Apple ID, a licence agreement and about thirty gigabytes.
+            ...(!have('simulator')
+              ? [
+                  {
+                    what: 'Xcode with at least one iOS runtime',
+                    why: 'The simulator is the only place two builds of an iPhone app can be run one after the other.',
+                    fix: 'Install Xcode from the App Store, open it once to accept the licence, then add an iOS runtime under Settings, Platforms. It is about thirty gigabytes and it needs an Apple ID, which is why nobody can do it for you.',
+                    automatic: false,
+                    unlocks: 'Your iPhone app gets checked before every release, on a simulator, without you opening anything.',
+                  },
+                ]
+              : []),
+            ...iosWants,
+          ],
   });
 
+  // A native Windows window can only be read from Windows. The tool does not need a
+  // Windows machine of its own: any ssh host that reaches one — including a WSL shell on
+  // it — is a runner, and one of those is usually already in somebody's ssh config. That
+  // is "detect rather than ask" at its sharpest: a runner that already answers must never
+  // be presented as something to go and set up.
+  const windowsDriver = canDrive('windows');
   surfaces.push({
     id: 'windows',
     name: 'native Windows apps',
-    status: windowsHost ? 'partial' : 'unavailable',
-    summary: windowsHost
-      ? `A real Windows desktop is already reachable through ${windowsHost.name}. Two builds still cannot run at once — Windows only shows one desktop — so runs are one after the other.`
-      : 'No Windows desktop is reachable from here. This is usually fine: an Electron product on Windows is watched over the debug port instead.',
-    canCheck: windowsHost ? withoutADriver : [],
-    cannotCheck: windowsHost ? ['meaning', 'pixels'] : CHANNELS.map((c) => c.id),
-    needs: windowsHost
-      ? [{ what: 'the native Windows probe', why: 'Reading a native window needs a small program running on Windows itself.', fix: 'Not built yet. Only needed if you ship a Windows product that is not Electron.', automatic: false }]
-      : [],
+    status: windowsHost && windowsDriver ? 'partial' : 'unavailable',
+    summary: !windowsHost
+      ? 'No Windows desktop is reachable from here. This is usually fine: an Electron product on Windows is watched over the debug port instead, from any machine.'
+      : !windowsDriver
+        ? `A real Windows desktop is reachable through ${windowsHost.name}, and this copy of Stays Fixed cannot drive one. ${noDriver('windows')}`
+        : `A real Windows desktop is already reachable through ${windowsHost.name}, and nothing has to be installed on it — the program that reads the screen is sent down the ssh connection each run and disappears when it closes. Two builds still cannot run at once, because Windows shows one desktop, so runs are one after the other and the comparison is weaker here than anywhere else.`,
+    canCheck: windowsHost && windowsDriver ? withoutADriver : [],
+    cannotCheck: windowsHost && windowsDriver ? ['meaning', 'pixels'] : CHANNELS.map((c) => c.id),
+    // Asked of the Windows adapter, which knows what it needs — the name of a machine and
+    // the built program — rather than kept as a second opinion here. The one thing added
+    // is the host name, because doctor found it by dialling and the adapter cannot.
+    needs:
+      windowsHost && windowsDriver
+        ? (asked.get('windows') ?? []).map((need) => ({ ...need, fix: need.fix.replace(/"the-ssh-host-name"/g, `"${windowsHost.name}"`) }))
+        : [],
   });
+  if (windowsHost && !windowsDriver) {
+    impossible.set('windows', `${noDriver('windows')} Nothing you install on that machine changes it. Update Stays Fixed to a copy that has it.`);
+  }
   if (!windowsHost) {
     impossible.set(
       'windows',
@@ -1159,6 +1484,7 @@ function nextSteps(surfaces, reference, repo) {
       why: 'Until one build has been recorded there is nothing to compare a new one against, and a clean result would mean nothing.',
       fix: 'staysfixed check --paired',
       automatic: true,
+      unlocks: 'Every check after this one has something to compare against, so "nothing changed" starts meaning something.',
     });
   }
   if (!repo) {
@@ -1167,6 +1493,7 @@ function nextSteps(surfaces, reference, repo) {
       why: 'Without it, a difference cannot be ranked by how far it sits from the code you changed — which is the whole way side effects rise to the top.',
       fix: 'git init',
       automatic: false,
+      unlocks: 'Differences get sorted by how far they sit from your edit, so a side effect lands at the top instead of somewhere in the middle.',
     });
   }
   for (const surface of surfaces) {
@@ -1238,6 +1565,17 @@ export function describeCapabilities(caps) {
   }
   if (byAgent.length > 0 || byPerson.length > 0 || never.length > 0) lines.push('');
 
+  // What this COPY can drive, said separately from what this machine can run. They are
+  // two different questions and folding them together is how somebody ends up aiming a
+  // check at a phone on a machine that could run one, and getting a clean answer about
+  // nothing at all.
+  const noAdapter = (caps.drivers ?? []).filter((d) => !d.present);
+  if (noAdapter.length > 0) {
+    lines.push('This copy of Stays Fixed has no adapter for these, so a check aimed at one would walk nothing whatever. It refuses by name rather than checking something else:');
+    for (const driver of noAdapter) lines.push(`  ${driver.surface} — ${driver.why}`);
+    lines.push('');
+  }
+
   if (!caps.project.hasReference) {
     lines.push(caps.project.referenceNote);
     lines.push('');
@@ -1254,6 +1592,9 @@ export function describeCapabilities(caps) {
     for (const step of caps.nextSteps) {
       lines.push(`  ${step.what} — ${step.why}`);
       lines.push(`    ${step.automatic ? 'the tool can do this itself: ' : 'somebody has to: '}${step.fix}`);
+      // What they get for it. A person asked to spend half an hour on a download and not
+      // told what it buys them has been given a chore rather than a choice.
+      if (step.unlocks) lines.push(`    what that gets you: ${step.unlocks}`);
     }
     lines.push('');
   }
@@ -1320,6 +1661,12 @@ export async function run(ctx) {
     say(paint.grey(`  machines it can already reach: ${runners.map((h) => h.name).join(', ')}`));
   }
 
+  const noAdapter = (caps.drivers ?? []).filter((d) => !d.present);
+  if (noAdapter.length > 0) {
+    blank();
+    say(paint.grey(`  no adapter in this copy for: ${noAdapter.map((d) => d.surface).join(', ')} — a check aimed at one refuses by name rather than checking something else`));
+  }
+
   blank();
   if (!caps.project.hasReference) warn(caps.project.referenceNote);
   else ok(caps.project.referenceNote);
@@ -1331,6 +1678,7 @@ export async function run(ctx) {
       say(`  ${step.what}`);
       say(paint.grey(`    ${step.why}`));
       say(paint.grey(`    ${step.automatic ? 'the tool can do this itself: ' : 'somebody has to: '}${step.fix}`));
+      if (step.unlocks) say(paint.grey(`    what that gets you: ${step.unlocks}`));
     }
   }
 

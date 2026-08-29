@@ -62,6 +62,13 @@ import { spawn } from 'node:child_process';
  * @property {string[]} functions   Named functions that ran, as `file:name`.
  * @property {boolean} measured     False when nothing could be measured — see `why`.
  * @property {string} why           Plain English, always filled in.
+ * @property {number} [ranButNotListed]
+ *                                  Functions that ran and were cut from `functions` to keep
+ *                                  the list readable. It has to be a number rather than a
+ *                                  silent slice, because the coverage ledger reads this list
+ *                                  to decide which doors were opened — and a truncated list
+ *                                  read as a complete one reports work as still to do when
+ *                                  it is already done.
  */
 
 // ---------------------------------------------------------------------------
@@ -603,12 +610,33 @@ export async function readNodeCoverage(dir, root) {
       why: 'Coverage came back with none of the project\'s own files in it, so what the tests touched is not known.',
     };
   }
-  return {
-    files: [...files].sort(),
-    functions: [...functions].sort().slice(0, TOUCHED_FUNCTION_LIMIT),
-    measured: true,
-    why: `Node reported ${files.size} of the project's own files executing.`,
-  };
+  return keptFunctions(files, functions, `Node reported ${files.size} of the project's own files executing.`);
+}
+
+/**
+ * The function list, cut to something readable, saying out loud how much was cut.
+ *
+ * The cut itself is old: a journey listing nine hundred function names is a wall and nobody
+ * reads a wall. Announcing it is not. The coverage ledger matches this list against the
+ * doors the code reader found, so a list quietly missing three hundred entries makes the
+ * ledger ask for work that has already been done — which is the same failure as a green run
+ * that means less than it looks like, pointed the other way.
+ *
+ * @param {Set<string>} files
+ * @param {Set<string>} functions
+ * @param {string} why
+ * @returns {Touched}
+ */
+function keptFunctions(files, functions, why) {
+  const all = [...functions].sort();
+  const kept = all.slice(0, TOUCHED_FUNCTION_LIMIT);
+  /** @type {Touched} */
+  const touched = { files: [...files].sort(), functions: kept, measured: true, why };
+  if (all.length > kept.length) {
+    touched.ranButNotListed = all.length - kept.length;
+    touched.why = `${why} ${all.length} named functions ran and the ${kept.length} listed here are the first of them in alphabetical order, so ${touched.ranButNotListed} that really did run are not named. Anything reading this list to work out what was covered will undercount by that much.`;
+  }
+  return touched;
 }
 
 /**
@@ -647,12 +675,7 @@ export async function readVitestCoverage(file, root) {
   if (files.size === 0) {
     return { files: [], functions: [], measured: false, why: 'The coverage report named none of the project\'s own files.' };
   }
-  return {
-    files: [...files].sort(),
-    functions: [...functions].sort().slice(0, TOUCHED_FUNCTION_LIMIT),
-    measured: true,
-    why: `Vitest reported ${files.size} of the project's own files executing.`,
-  };
+  return keptFunctions(files, functions, `Vitest reported ${files.size} of the project's own files executing.`);
 }
 
 /**

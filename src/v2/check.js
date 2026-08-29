@@ -24,6 +24,7 @@
  */
 
 import fsp from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
@@ -57,6 +58,8 @@ const exec = promisify(execFile);
 /** @typedef {import('./types.js').Coverage} Coverage */
 /** @typedef {import('./types.js').Channel} Channel */
 /** @typedef {import('./types.js').NormaliseRule} NormaliseRule */
+/** @typedef {import('./types.js').Surface} Surface */
+/** @typedef {import('./types.js').CoverageGap} CoverageGap */
 /** @typedef {import('./adapters/contract.js').Adapter} Adapter */
 /** @typedef {import('./run.js').LiveBuild} LiveBuild */
 /** @typedef {import('./run.js').WalkRequest} WalkRequest */
@@ -75,7 +78,12 @@ const exec = promisify(execFile);
  * that quietly dropped fifty waived findings and a verdict that genuinely found nothing read
  * identically without this, and one of those is a safety net that has been switched off.
  *
- * @typedef {Verdict & {blocked?: boolean, accounted?: import('./escalate.js').Accounting}} CheckOutcome
+ * AIMED AT: what the run says it went for. A caller that aimed the check at a web page or
+ * a phone app has to be able to tell "it went there and found nothing" apart from "it
+ * quietly checked something else and found nothing", and those two read identically
+ * without this. It is only ever set when the run really did reach that surface.
+ *
+ * @typedef {Verdict & {blocked?: boolean, accounted?: import('./escalate.js').Accounting, target?: {surface: string, at: string|null}}} CheckOutcome
  */
 
 /**
@@ -90,6 +98,9 @@ const exec = promisify(execFile);
  * @property {boolean} [paired]     Boot the old build live from the start.
  * @property {boolean} [storedOnly] Never boot the old build, not even to prove a suspicion.
  * @property {string} [journeys]    A path to a journeys file, or 'code' / 'config'.
+ * @property {Surface|'auto'} [surface]  Aim the whole run at one kind of product.
+ * @property {string} [at]          Where that product is: a URL for the web, the built app
+ *                                  for a desktop, an APK or an .app bundle for a phone.
  * @property {string[]} [only]      Just these journeys, by name.
  * @property {boolean} [remember]
  * @property {string} [product]
@@ -97,24 +108,146 @@ const exec = promisify(execFile);
  * @property {AbortSignal} [signal]
  */
 
-/** The adapters, in the order the engine trusts them. Reading the code is free, so it is first. */
-const ADAPTERS = [sourceAdapter, processAdapter, httpAdapter, webAdapter, electronAdapter];
+/** The adapters compiled into every copy, in the order the engine trusts them. Reading the code is free, so it is first. */
+const BUILT_IN = [sourceAdapter, processAdapter, httpAdapter, webAdapter, electronAdapter];
 
-/** Which adapter owns a journey, by the surface it says it walks. */
-const ADAPTER_FOR_SURFACE = {
+/**
+ * The platforms that arrive as a file of their own.
+ *
+ * They are looked for at run time rather than imported, for one reason: a copy of Stays
+ * Fixed without the Android adapter in it must still run every other check, and must say
+ * "there is nothing here that can drive an Android app" rather than dying on an import.
+ * The alternative — handing an Android journey to whichever adapter happened to be in the
+ * table — is the exact bug that bit web and Electron last phase, and it is the worst
+ * failure this tool has: a journey nothing walked, reported as covered.
+ *
+ * @type {{surface: Surface, file: string, exports: string[], missing: string}[]}
+ */
+const SEPARATE_ADAPTERS = [
+  {
+    surface: 'android',
+    file: './adapters/android.js',
+    exports: ['androidAdapter', 'adapter', 'default'],
+    missing: 'This copy has no Android adapter in it, so nothing here can install an APK on an emulator and read what is on its screen.',
+  },
+  {
+    surface: 'ios',
+    file: './adapters/ios.js',
+    exports: ['iosAdapter', 'adapter', 'default'],
+    missing: 'This copy has no iPhone adapter in it, so nothing here can boot the simulator and read what is on its screen.',
+  },
+  {
+    surface: 'windows',
+    file: './adapters/windows.js',
+    exports: ['windowsAdapter', 'adapter', 'default'],
+    missing:
+      'This copy has no native-Windows adapter in it. That is usually fine: a Windows product built with Electron is driven over its own debugging port by the Electron adapter and needs nothing else.',
+  },
+];
+
+/**
+ * Every adapter this copy can actually use. Seeded with the built-in five and widened
+ * once, on the first check, by whatever separate adapters are present.
+ * @type {Adapter[]}
+ */
+const ADAPTERS = [...BUILT_IN];
+
+/**
+ * Surfaces there is no adapter for, and the plain sentence saying so. Read when a journey
+ * cannot be walked, so the gap names what is missing instead of shrugging.
+ * @type {Map<string, string>}
+ */
+const NO_ADAPTER_FOR = new Map();
+
+let adaptersLoaded = false;
+
+/**
+ * Which adapter owns a journey, by the surface it says it walks.
+ *
+ * Every surface in the vocabulary appears here, and every one of them names an adapter
+ * built for that surface — never a stand-in. A surface whose adapter is not in this copy
+ * resolves to nothing, and nothing is walked and it is reported as a hole. A surface
+ * pointed at the wrong adapter walks nothing and is reported as COVERED, which is the one
+ * outcome this tool must never produce.
+ *
+ * @type {Record<Surface, string>}
+ */
+export const ADAPTER_FOR_SURFACE = {
   cli: 'process',
   library: 'process',
   server: 'http',
-  // These two were pointed at the wrong adapters while the real ones were being
-  // built. A web journey handed to the http adapter never opens a browser, and an
-  // Electron journey handed to the process adapter never opens the app — both
-  // would have walked nothing and reported it as covered.
   web: 'web',
   electron: 'electron',
-  android: 'process',
-  ios: 'process',
-  windows: 'process',
+  android: 'android',
+  ios: 'ios',
+  windows: 'windows',
 };
+
+/**
+ * Load the separate adapters, once per process.
+ *
+ * Exported so `doctor` and the tests can ask what this copy can actually drive without
+ * running a check. A refresh is only useful while Stays Fixed itself is being built and an
+ * adapter appears mid-session.
+ *
+ * @param {boolean} [refresh]
+ * @returns {Promise<{adapters: Adapter[], missing: Map<string, string>}>}
+ */
+export async function loadAdapters(refresh = false) {
+  if (adaptersLoaded && !refresh) return { adapters: ADAPTERS, missing: NO_ADAPTER_FOR };
+  if (refresh) {
+    ADAPTERS.length = 0;
+    ADAPTERS.push(...BUILT_IN);
+    NO_ADAPTER_FOR.clear();
+  }
+
+  for (const spec of SEPARATE_ADAPTERS) {
+    const wanted = ADAPTER_FOR_SURFACE[spec.surface];
+    if (ADAPTERS.some((a) => a.name === wanted)) continue;
+    /** @type {Record<string, unknown>} */
+    let module;
+    try {
+      // The specifier is built from a variable on purpose. A literal would be resolved
+      // when this file is type-checked and fail there, in a copy where the file simply
+      // has not been written yet — which is a fact about this build, not an error.
+      const where = spec.file;
+      module = await import(where);
+    } catch (e) {
+      // "It is not here" and "it is here and it is broken" are two different facts and
+      // only one of them is fixed by installing a newer copy. Saying the first when the
+      // second is true sends somebody to reinstall a tool that is already installed.
+      NO_ADAPTER_FOR.set(
+        spec.surface,
+        existsSync(new URL(spec.file, import.meta.url))
+          ? `The ${spec.surface} adapter is in this copy and it will not load: ${messageOf(e)}. Nothing ${spec.surface} can be walked until that is fixed.`
+          : spec.missing,
+      );
+      continue;
+    }
+    const found = spec.exports.map((name) => module[name]).find((a) => a && typeof a === 'object' && typeof (/** @type {any} */ (a).run) === 'function');
+    if (!found) {
+      NO_ADAPTER_FOR.set(
+        spec.surface,
+        `${spec.missing} The file ${spec.file} is there, but it does not export ${spec.exports.join(' or ')}.`,
+      );
+      continue;
+    }
+    const adapter = /** @type {Adapter} */ (found);
+    if (adapter.name !== wanted) {
+      // A mismatch here would leave the adapter loaded and unreachable, which looks
+      // exactly like coverage and is not.
+      NO_ADAPTER_FOR.set(
+        spec.surface,
+        `${spec.file} exports an adapter called "${adapter.name}", and a ${spec.surface} journey looks for one called "${wanted}". Nothing will drive it until those agree.`,
+      );
+      continue;
+    }
+    ADAPTERS.push(adapter);
+  }
+
+  adaptersLoaded = true;
+  return { adapters: ADAPTERS, missing: NO_ADAPTER_FOR };
+}
 
 // ---------------------------------------------------------------------------
 // check
@@ -148,7 +281,20 @@ export async function check(options = {}) {
       events,
       signal: options.signal,
     });
-    return await settle(verdict, project.store, project.product);
+    // The real ledger, door by door, before anything says how much was covered. The loop
+    // only knows how many doors it read out of the source and that no journey named one;
+    // this reads what every capture of this build actually touched and works out which
+    // doors were opened. Without it the coverage sentence is built on a count that says
+    // "nothing was walked" on a run that walked plenty.
+    await countTheDoors(verdict, project);
+
+    /** @type {CheckOutcome} */
+    const outcome = await settle(verdict, project.store, project.product);
+    // Only a run that really did reach the surface it was aimed at may say so. The
+    // confirmation is what lets a caller tell "it went there and found nothing" from
+    // "it checked something else and found nothing", and those are not the same answer.
+    if (project.target) outcome.target = project.target;
+    return outcome;
   } catch (e) {
     const outcome = blocked(options, e);
     // A run that never happened still has to reach a person, because "no answer" looks
@@ -207,6 +353,22 @@ async function settle(verdict, store, product, guards) {
     if (decided.accounting.waived > 0 || decided.accounting.expiredWaivers > 0) {
       verdict.summary = `${verdict.summary} ${decided.accounting.note}`;
     }
+    // The worst shape a reply can have: every journey walked, not one of them with
+    // anything on the other side to compare against, and a verdict that reads "nothing
+    // that worked has changed". It is arithmetically true — nothing was compared, so
+    // nothing came back different — and it is the exact sentence that would let a real
+    // regression through. It is not a pass. It is no answer at all.
+    if (comparedNothing(verdict.coverage)) {
+      verdict.ok = false;
+      verdict.summary = `NOTHING WAS ACTUALLY COMPARED. Every journey was walked on the build you have, and not one of them had anything on record from the build you were happy with, so there was nothing to hold them against. This is not a pass and not a failure — it is no answer. ${verdict.summary}`;
+    }
+
+    // And what was NOT looked at, in the same breath as the good news, on every run
+    // including the clean ones. A green verdict on a product with three hundred doors
+    // nobody has ever opened is true and it is not what it looks like, and the only place
+    // that difference can be made impossible to miss is inside the sentence everybody
+    // already reads. It goes last so it is the thing left in the reader's head.
+    verdict.summary = `${verdict.summary} ${whatWasNotChecked(verdict.coverage)}`;
   }
 
   try {
@@ -215,6 +377,169 @@ async function settle(verdict, store, product, guards) {
     // Nothing here is worth failing a finished check over.
   }
   return verdict;
+}
+
+/**
+ * Replace this run's rough coverage count with the real one.
+ *
+ * `coverage.js` owns the arithmetic and one rule that makes it worth having: a door READ
+ * out of the source is not a door that was WALKED, so every contract observation is
+ * ignored when it works out what was opened. Getting that backwards would report perfect
+ * coverage on a product nobody ever ran.
+ *
+ * It is loaded at run time and every failure is swallowed. This runs after the answer is
+ * already in hand, and no bookkeeping is worth losing a finished check over — but the
+ * count it replaces is the honest-if-crude one the loop produced, so failing here leaves
+ * the reader with less detail and never with a rosier picture.
+ *
+ * @param {CheckOutcome} verdict
+ * @param {Project} project
+ * @returns {Promise<void>}
+ */
+async function countTheDoors(verdict, project) {
+  try {
+    const { ledger, toCoverage } = await import('./coverage.js');
+    const led = await ledger(project.store, project.product, {
+      root: project.root,
+      journeys: project.journeys,
+      builds: [project.candidate.id],
+    });
+    // No stored captures means the ledger saw none of this run's walking, and every door
+    // would read as never opened. That is a worse answer than the one already in hand,
+    // not a better one, so it is refused.
+    if (led.captures === 0) return;
+
+    const better = toCoverage(led);
+    const run = verdict.coverage;
+    /** @type {Coverage} */
+    const merged = {
+      // What THIS run walked stays this run's own number. The ledger counts every capture
+      // of this build, including the second run of each journey, and doubling the address
+      // count would make the run look twice as thorough as it was.
+      paths: run?.paths ?? better.paths,
+      journeys: run?.journeys ?? better.journeys,
+      byChannel: run?.byChannel ?? better.byChannel,
+      gaps: dedupe([...(run?.gaps ?? []).filter((g) => typeof g.doors !== 'number'), ...better.gaps]),
+    };
+    if (better.doorsKnown !== undefined) {
+      merged.doorsKnown = better.doorsKnown;
+      merged.doorsWalked = better.doorsWalked ?? 0;
+    }
+    verdict.coverage = merged;
+  } catch {
+    // The ledger could not be drawn up. The run's own count stands, and it errs towards
+    // saying less was covered rather than more.
+  }
+}
+
+/**
+ * @param {CoverageGap[]} gaps
+ * @returns {CoverageGap[]}
+ */
+function dedupe(gaps) {
+  /** @type {CoverageGap[]} */
+  const out = [];
+  const seen = new Set();
+  for (const gap of gaps) {
+    const key = `${gap.what}|${gap.why}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(gap);
+  }
+  return out;
+}
+
+/**
+ * What this run did NOT look at, in words, always.
+ *
+ * THIS IS THE MOST IMPORTANT SENTENCE THE TOOL PRODUCES, and the reason is arithmetic
+ * rather than rhetoric: a tool that says "nothing changed" is indistinguishable from a
+ * tool that looked at nothing, and the more useful this becomes the more a clean result
+ * will be trusted without being read. So the sentence is never optional, never omitted on
+ * a good run, and never phrased as "fully checked" — because nothing ever is. Even a run
+ * that walked every door it knows about has only walked the doors it knows about.
+ *
+ * It returns a sentence in every case. There is deliberately no path through this function
+ * that returns nothing, because a caller that could get an empty string back would sooner
+ * or later drop the whole line on the runs where it matters most.
+ *
+ * @param {Coverage|undefined} coverage
+ * @returns {string}
+ */
+export function whatWasNotChecked(coverage) {
+  if (!coverage) {
+    return 'This run did not say what it covered, so how much of your product was actually looked at is unknown — treat a clean result as unproven until it does.';
+  }
+  if ((coverage.paths ?? 0) === 0) {
+    return 'Nothing was walked at all, so none of this says anything about your product either way.';
+  }
+
+  const known = coverage.doorsKnown ?? 0;
+  const walked = coverage.doorsWalked ?? 0;
+  const unopened = Math.max(0, known - walked);
+  const gaps = coverage.gaps ?? [];
+
+  /** @type {string[]} */
+  const parts = [];
+  if (unopened > 0) {
+    parts.push(
+      known === 1
+        ? 'the only way into this product has never been walked through, so nothing here says anything about it'
+        : `${unopened} of the ${known} ways into this product ${unopened === 1 ? 'has' : 'have'} never been walked through, so nothing here says anything about ${unopened === 1 ? 'it' : 'them'}`,
+    );
+  }
+  // The doors gap is already counted above, in its own words. Counting it twice would
+  // make the list look longer than it is, and a number a reader can catch out is a number
+  // they stop believing. Several gaps can also share one sentence — the coverage count's
+  // own caveats all do — and three identical lines read as three separate holes.
+  const others = [...new Set(gaps.filter((g) => typeof g.doors !== 'number').map((g) => g.what))];
+  if (others.length > 0) {
+    // The example is the most concrete one there is. A caveat about how exact the count
+    // is, chosen as the illustration, teaches a reader nothing about what was missed.
+    const example = others.find((what) => !/less exact than it looks/i.test(what)) ?? others[0];
+    parts.push(
+      `${others.length} other ${others.length === 1 ? 'thing was' : 'things were'} not looked at (${plainly(example)}${others.length > 1 ? ', and more' : ''})`,
+    );
+  }
+
+  if (parts.length === 0) {
+    return `Everything this run knows how to walk was walked — ${coverage.paths} ${coverage.paths === 1 ? 'address' : 'addresses'} across ${coverage.journeys} ${coverage.journeys === 1 ? 'journey' : 'journeys'}. That is not every possible state of your product; nothing can enumerate that, and a clean result only covers what was walked.`;
+  }
+  return `NOT EVERYTHING WAS CHECKED: ${parts.join(', and ')}. A clean result only covers what was walked — the whole list is in coverage.gaps.`;
+}
+
+/**
+ * Was there anything on the other side to compare against at all?
+ *
+ * The engine records one gap per journey it had no stored record for. When that count
+ * reaches every journey that was walked, the run compared nothing whatever — and a run
+ * that compared nothing produces zero differences, which is indistinguishable from a
+ * product that did not change.
+ *
+ * The gaps are recognised by the words the engine writes into them. A test walks a real
+ * project into exactly this state and requires the verdict not to read as a pass, so if
+ * those words are ever reworded the guard fails loudly instead of quietly switching off.
+ *
+ * @param {Coverage|undefined} coverage
+ * @returns {boolean}
+ */
+function comparedNothing(coverage) {
+  const walked = coverage?.journeys ?? 0;
+  if (walked === 0) return false;
+  const nothingToCompare = (coverage?.gaps ?? []).filter((gap) =>
+    /never been walked against|no stored record of the old build/i.test(`${gap.what} ${gap.why}`),
+  ).length;
+  return nothingToCompare >= walked;
+}
+
+/**
+ * One gap's sentence, trimmed to something that fits inside another sentence.
+ * @param {string} what
+ * @returns {string}
+ */
+function plainly(what) {
+  const one = String(what ?? '').replace(/\s+/g, ' ').trim().replace(/\.$/, '');
+  return one.length > 120 ? `${one.slice(0, 117)}...` : one;
 }
 
 /**
@@ -373,6 +698,8 @@ function short(value) {
  * @property {import('./run.js').Walker} walk
  * @property {(reference: BuildFingerprint, ctx: {events?: CheckEvents, signal?: AbortSignal}) => Promise<LiveBuild|null>} bootReference
  * @property {(capture: Capture) => Capture} normalise
+ * @property {{surface: string, at: string|null}} [target]  Set only when the run was aimed
+ *   at one kind of product AND something here can actually drive it.
  * @property {() => Promise<void>} close
  */
 
@@ -391,9 +718,11 @@ function projectRootFor(options) {
  * @returns {Promise<Project>}
  */
 async function openProject(options) {
+  await loadAdapters();
   const root = projectRootFor(options);
   const configFile = options.configFile ?? findConfigFile(root) ?? null;
-  const config = await readConfig(configFile);
+  const aim = aimOf(options);
+  const config = aimAt(await readConfig(configFile), aim);
   const product = options.product ?? String(config.product ?? (await packageName(root)) ?? path.basename(root));
 
   const store = openStore({ root });
@@ -413,7 +742,7 @@ async function openProject(options) {
   const reference = options.against ? await fingerprintCommit(root, product, options.against) : null;
   if (reference) await saveBuild(store, reference);
 
-  const journeys = await gatherJourneys({ root, config, options });
+  const journeys = narrowToTarget(await gatherJourneys({ root, config, options }), aim);
   if (journeys.length === 0) {
     await fsp.rm(scratch, { recursive: true, force: true });
     // Two different situations wear the same symptom, and the difference is the
@@ -456,7 +785,8 @@ async function openProject(options) {
     return live;
   };
 
-  return {
+  /** @type {Project} */
+  const project = {
     root,
     product,
     store,
@@ -484,6 +814,105 @@ async function openProject(options) {
       }
     },
   };
+  if (aim.surface) project.target = { surface: aim.surface, at: aim.at };
+  return project;
+}
+
+// ---------------------------------------------------------------------------
+// Aiming a run at one kind of product
+// ---------------------------------------------------------------------------
+
+/**
+ * What the caller aimed this run at, if anything.
+ *
+ * @param {CheckOptions} options
+ * @returns {{surface: Surface|null, at: string|null}}
+ */
+function aimOf(options) {
+  const asked = options.surface && options.surface !== 'auto' ? String(options.surface) : null;
+  const at = typeof options.at === 'string' && options.at.trim() !== '' ? options.at.trim() : null;
+  if (asked !== null && !(asked in ADAPTER_FOR_SURFACE)) {
+    throw new StaysFixedError(`There is no kind of product called "${asked}".`, {
+      hint: `The kinds are: ${Object.keys(ADAPTER_FOR_SURFACE).join(', ')}.`,
+    });
+  }
+  return { surface: /** @type {Surface|null} */ (asked), at };
+}
+
+/**
+ * Which settings key each adapter reads for "where the product is".
+ *
+ * An `at` that reached no adapter would be quietly ignored, and the run would come back
+ * clean about somewhere else entirely — the most dangerous shape a reply can have. So an
+ * `at` with nowhere to put it is refused rather than dropped.
+ *
+ * @type {Record<string, string[]>}
+ */
+const WHERE_KEY = {
+  web: ['url', 'baseUrl'],
+  server: ['baseUrl', 'url'],
+  electron: ['binary'],
+  android: ['apk'],
+  ios: ['app'],
+};
+
+/**
+ * Put "where the product is" into the settings the aimed adapter will read.
+ *
+ * @param {Record<string, any>} config
+ * @param {{surface: Surface|null, at: string|null}} aim
+ * @returns {Record<string, any>}
+ */
+function aimAt(config, aim) {
+  if (aim.at === null) return config;
+  if (aim.surface === null) {
+    throw new StaysFixedError(`You said where to look ("${aim.at}") without saying what kind of product is there.`, {
+      hint: 'Name the surface too, e.g. surface: "web" with a URL, or surface: "electron" with the path to the built app.',
+    });
+  }
+  const keys = WHERE_KEY[ADAPTER_FOR_SURFACE[aim.surface]] ?? WHERE_KEY[aim.surface];
+  if (!keys) {
+    throw new StaysFixedError(`A ${aim.surface} check has nowhere to put "${aim.at}", so it would have been ignored.`, {
+      hint: 'Leave "at" out for this kind of product, and let the settings say what to run.',
+    });
+  }
+  const name = ADAPTER_FOR_SURFACE[aim.surface];
+  /** @type {Record<string, any>} */
+  const slice = { ...(config[name] ?? {}) };
+  for (const key of keys) slice[key] = aim.at;
+  return { ...config, [name]: slice };
+}
+
+/**
+ * Keep only the journeys that walk the surface this run was aimed at.
+ *
+ * Refusing loudly is the whole point. A run aimed at a phone app in a project with no
+ * phone journeys, and no adapter that could drive one, must not come back green about the
+ * command-line tool that happened to be sitting next to it.
+ *
+ * @param {Journey[]} journeys
+ * @param {{surface: Surface|null, at: string|null}} aim
+ * @returns {Journey[]}
+ */
+function narrowToTarget(journeys, aim) {
+  if (aim.surface === null) return journeys;
+  const wanted = ADAPTER_FOR_SURFACE[aim.surface];
+  const driver = ADAPTERS.find((a) => a.name === wanted);
+  if (!driver) {
+    throw new StaysFixedError(
+      `This run was aimed at ${aim.surface}, and nothing in this copy can drive ${aim.surface}. ${NO_ADAPTER_FOR.get(aim.surface) ?? ''}`.trim(),
+      { hint: 'Run `staysfixed doctor` to see what this copy and this machine can drive, and what would unlock the rest.' },
+    );
+  }
+  const kept = journeys.filter((j) => j.surface === aim.surface);
+  if (kept.length === 0) {
+    throw new StaysFixedError(`This run was aimed at ${aim.surface}, and this project has no ${aim.surface} journey to walk.`, {
+      hint:
+        `Nothing was checked rather than something else being checked and reported as though it were the ${aim.surface} one. ` +
+        `Add ${/^[aeiou]/i.test(wanted) ? 'an' : 'a'} "${wanted}" section to your Stays Fixed settings naming where the product is, or leave the surface out to check everything this project does have.`,
+    });
+  }
+  return kept;
 }
 
 // ---------------------------------------------------------------------------
@@ -519,9 +948,13 @@ async function walkOne(req, where) {
 
   if (!adapter) {
     gaps.push({
-      what: `The journey "${req.journey.describe || req.journey.name}" was not walked.`,
-      why: `Nothing here knows how to drive a ${req.journey.surface} journey yet.`,
-      unlockedBy: 'Wait for that platform, or write the journey against one that is here: a command, a module import, or an HTTP route.',
+      what: `The journey "${req.journey.describe || req.journey.name}" was not walked, so nothing at all is known about it.`,
+      // Naming the missing adapter matters more than it looks. "Nothing knows how to
+      // drive this" is a shrug; "there is no Android adapter in this copy" is something
+      // an agent can act on, and it is the difference between a hole somebody closes and
+      // a hole somebody skims past.
+      why: NO_ADAPTER_FOR.get(req.journey.surface) ?? `Nothing in this copy drives a ${req.journey.surface} journey.`,
+      unlockedBy: `Install a copy of Stays Fixed that has the ${req.journey.surface} adapter in it, or write this journey against something that is here: a command, a module import, an HTTP route, a web page, or a desktop app.`,
       surface: req.journey.surface,
     });
   } else {

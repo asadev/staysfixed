@@ -43,7 +43,7 @@ const MOST_LINES = 6;
 /** The flags the difference engine adds. Declared once so help and parsing agree. */
 const V2_SPEC = {
   booleans: ['paired', 'selfcheck', 'json'],
-  strings: ['against', 'journeys', 'escalations'],
+  strings: ['against', 'journeys', 'escalations', 'surface', 'at'],
 };
 
 /** @type {[string, string][]} */
@@ -51,6 +51,8 @@ const V2_OPTIONS = [
   ['--against <ref>', 'Compare against this marker, tag or commit instead of the newest reference.'],
   ['--paired', 'Boot the old build live from the start instead of trusting the stored record. Slower, and the strongest answer there is.'],
   ['--journeys <source>', 'Where the steps come from: suite, code, recorded, or a path to a journeys file.'],
+  ['--surface <kind>', 'Check only one kind of product: cli, library, server, web, electron, android, ios or windows. Nothing else is walked, and a run that cannot reach it says so instead of quietly checking something else.'],
+  ['--at <where>', 'Where that product is: a URL for the web, the built app for a desktop, the APK or the .app for a phone.'],
   ['--selfcheck', 'Run the deliberately broken builds and prove the engine still catches them.'],
   ['--json', 'Print the whole result as JSON and nothing else. This is what an agent reads.'],
   ['--escalations <file>', 'Write the handful of things a person has to rule on into a file, in plain English, ready to paste into a closing summary.'],
@@ -85,6 +87,19 @@ export const V2_COMMANDS = {
   // `staysfixed ship` comes from src/v2/ship.js. It is merged in here rather than into the
   // version 1 command table so that wiring version 2 into the front door stays the one
   // import it has always been.
+  //
+  // `staysfixed init` from src/v2/init.js is deliberately NOT merged in yet, and this is
+  // the same call as the MCP server: version 2's init is a BREAKING change. Version 1's
+  // init writes settings for any folder; version 2's reads the project first and writes
+  // nothing when it cannot tell what the project is, which is better and is not what the
+  // three tests in test/cli.test.js describe. Somebody installed this last week and has
+  // `staysfixed init` in a setup script. Adding one line here —
+  //
+  //     import { INIT_COMMANDS } from './init.js';   ...INIT_COMMANDS,
+  //
+  // switches it over, and those three tests have to be rewritten in the same change to
+  // say what the new one does. That is a decision, not an oversight, and it belongs in a
+  // change of its own rather than arriving as a side effect of wiring up the phones.
   ...SHIP_COMMANDS,
 
   check: {
@@ -98,6 +113,7 @@ export const V2_COMMANDS = {
       'staysfixed check --json',
       'staysfixed check --against v0.13.0',
       'staysfixed check --paired',
+      'staysfixed check --surface web --at http://localhost:3000',
       'staysfixed check --selfcheck',
       'staysfixed check --pictures        # exactly what version 1 did',
     ],
@@ -296,7 +312,7 @@ export function wantsVersionOne(ctx) {
  * caller in three getting a silent undefined.
  *
  * @param {import('../cli/index.js').CliContext} ctx
- * @returns {{cwd: string, configFile: string|undefined, against: string|undefined, paired: boolean, journeys: string|undefined, only: string[]}}
+ * @returns {{cwd: string, configFile: string|undefined, against: string|undefined, paired: boolean, journeys: string|undefined, surface: string|undefined, at: string|undefined, only: string[]}}
  */
 export function checkOptions(ctx) {
   return {
@@ -305,6 +321,8 @@ export function checkOptions(ctx) {
     against: ctx.str('against'),
     paired: ctx.bool('paired'),
     journeys: ctx.str('journeys'),
+    surface: ctx.str('surface'),
+    at: ctx.str('at'),
     only: ctx.list('only'),
   };
 }
@@ -498,7 +516,8 @@ export function report(verdict) {
 
   sizeLine(verdict);
   provenLine(verdict);
-  missingLine(verdict);
+  blank();
+  notCheckedBlock(verdict);
   blank();
 }
 
@@ -569,16 +588,70 @@ function provenLine(verdict) {
 }
 
 /**
- * What it did NOT look at. Said every time, including on a clean run: a gap that
- * is only mentioned when something fails is a gap nobody ever sees.
+ * What it did NOT look at, under its own heading, every single time.
+ *
+ * This used to be a few grey lines at the bottom, and grey lines at the bottom are what a
+ * reader skips. The whole honesty of the tool rests on this block: a clean run on a
+ * product with three hundred doors nobody has ever opened is TRUE and it is not what it
+ * looks like. So it gets a heading, it is printed on good runs as well as bad ones, and
+ * the count of unopened doors goes first — it is the number that most often turns "it is
+ * fine" back into "it is fine as far as anybody looked".
+ *
+ * The engine says the same thing in one sentence inside `summary`, which is printed just
+ * above. That is not a duplicate: the sentence is what somebody quotes, and this is the
+ * list they act on.
+ *
  * @param {Verdict} verdict
  */
-function missingLine(verdict) {
-  const gaps = verdict.coverage?.gaps ?? [];
-  for (const gap of gaps.slice(0, MOST_LINES)) {
-    say(paint.grey(`  Not covered: ${gap.what}${gap.unlockedBy ? ` — ${gap.unlockedBy}` : ''}`));
+function notCheckedBlock(verdict) {
+  const coverage = verdict.coverage;
+  if (!coverage) {
+    warn('This run did not say what it covered, so how much of your product was actually looked at is unknown. Treat the result above as unproven.');
+    return;
   }
-  if (gaps.length > MOST_LINES) {
-    say(paint.grey(`  and ${gaps.length - MOST_LINES} more things it did not look at. All of them: staysfixed check --json`));
+
+  heading('What this run did not check');
+  blank();
+
+  const known = coverage.doorsKnown ?? 0;
+  const unopened = Math.max(0, known - (coverage.doorsWalked ?? 0));
+  if (unopened > 0) {
+    say(
+      known === 1
+        ? '  The only way into this product has never been walked through.'
+        : `  ${unopened} of the ${known} ways into this product ${unopened === 1 ? 'has' : 'have'} never been walked through.`,
+    );
+    say(
+      paint.grey(
+        `      A break behind ${unopened === 1 ? 'it' : 'any of them'} is invisible to this tool. Point a journey at ${unopened === 1 ? 'it' : 'them'}, or run the project’s own test suite as journeys.`,
+      ),
+    );
+  }
+
+  // Several holes can share one sentence — the coverage count's own caveats all do — and
+  // printing that sentence three times reads as three separate holes rather than as one
+  // heading with three reasons under it.
+  /** @type {Map<string, string[]>} */
+  const gaps = new Map();
+  for (const gap of coverage.gaps ?? []) {
+    if (typeof gap.doors === 'number') continue;
+    const reasons = gaps.get(gap.what) ?? [];
+    reasons.push(`${gap.why}${gap.unlockedBy ? ` ${gap.unlockedBy}` : ''}`);
+    gaps.set(gap.what, reasons);
+  }
+  let shown = 0;
+  for (const [what, reasons] of gaps) {
+    if (shown >= MOST_LINES) break;
+    shown += 1;
+    say(`  ${what}`);
+    for (const reason of reasons) say(paint.grey(`      ${reason}`));
+  }
+  if (gaps.size > shown) {
+    say(paint.grey(`  and ${gaps.size - shown} more. All of them: staysfixed check --json`));
+  }
+
+  if (unopened === 0 && gaps.size === 0) {
+    say('  Everything this run knows how to walk was walked.');
+    say(paint.grey('      That is not every possible state of your product — nothing can enumerate that. It is every way in this tool knows about.'));
   }
 }
