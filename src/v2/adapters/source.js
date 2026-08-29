@@ -748,12 +748,16 @@ function methodNames(tokens, nameAt) {
  * @param {string} opts.root                  Project root. Only ever read.
  * @param {string[]} [opts.folders]           Subfolders to read. Defaults to the usual ones.
  * @param {boolean} [opts.includeTests]       Count doors found in test files. Default false.
- * @param {number} [opts.maxFileBytes]        Skip anything bigger. Default 2MB.
+ * @param {number} [opts.maxFileBytes]        Skip anything bigger. Default 24MB — a built
+ *   bundle is a legitimate thing to read, and Terminal Deck's is 3.5MB. At the old 2MB
+ *   the whole main process was skipped and the reader then said it had found no source
+ *   at all, which is the exact shape of failure this tool exists to prevent: a silence
+ *   that reads like an all-clear.
  * @returns {Promise<ContractReading>}
  */
 export async function readContract(opts) {
   const root = path.resolve(opts.root);
-  const maxFileBytes = opts.maxFileBytes ?? 2 * 1024 * 1024;
+  const maxFileBytes = opts.maxFileBytes ?? 24 * 1024 * 1024;
   const found = await collectFiles(root, opts.folders ?? SOURCE_FOLDERS, maxFileBytes);
 
   /** @type {RawDoor[]} */
@@ -854,6 +858,8 @@ function describeError(error) {
  * @param {number} maxFileBytes
  */
 async function collectFiles(root, folders, maxFileBytes) {
+  /** @type {string[]} Files skipped for size, named so the gap can be reported. */
+  const tooBig = [];
   /** @type {string[]} */
   const files = [];
   let skipped = 0;
@@ -879,7 +885,14 @@ async function collectFiles(root, folders, maxFileBytes) {
       if (!CODE_EXTENSIONS.has(path.extname(entry.name))) continue;
       if (/\.d\.[cm]?ts$/.test(entry.name)) continue;   // declarations describe, they open nothing
       try {
-        if ((await fsp.stat(full)).size > maxFileBytes) { skipped++; continue; }
+        // A file too big to read is a hole, and a hole has to be named. Recording the
+        // path — not just a count — is what lets the coverage ledger say WHICH door it
+        // cannot see rather than quietly reporting fewer of them.
+        if ((await fsp.stat(full)).size > maxFileBytes) {
+          skipped++;
+          tooBig.push(path.relative(root, full));
+          continue;
+        }
       } catch {
         continue;
       }
@@ -890,7 +903,7 @@ async function collectFiles(root, folders, maxFileBytes) {
   const roots = folders.map((f) => path.join(root, f)).filter((d) => fs.existsSync(d));
   for (const dir of roots.length > 0 ? roots : [root]) await walk(dir);
   files.sort();
-  return { files, skipped };
+  return { files, skipped, tooBig };
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,7 +1175,10 @@ export const sourceAdapter = defineAdapter({
   /** @param {import('./contract.js').AdapterProject} project */
   async detect(project) {
     const folders = project.config?.folders ?? SOURCE_FOLDERS;
-    const found = await collectFiles(project.root, folders, 2 * 1024 * 1024);
+    // The same limit readContract uses. It was 2MB here and 24MB there, so a project
+    // whose source is one big bundle was declared to have no source at all — and then
+    // never read, even though the reader could have read it perfectly well.
+    const found = await collectFiles(project.root, folders, 24 * 1024 * 1024);
     const canStrip = typeof nodeModule.stripTypeScriptTypes === 'function';
     /** @type {import('./contract.js').Missing[]} */
     const missing = [];
