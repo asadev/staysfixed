@@ -133,6 +133,12 @@ So names are enforced: `sidebar_collapse_test` and `#4412` are refused, with an
 explanation and — where one can honestly be built — a rewrite. Three plain words
 minimum, present tense, no test ids. See [docs/guards.md](docs/guards.md).
 
+**It does not steal your screen.** A desktop app has to really open to be
+photographed, but it opens *behind* whatever you are using and stays there. The
+rendering flags keep it painting while it sits in the background, so the pictures
+are identical either way — bring it to the front yourself whenever you want to
+watch it work. Set `app.foreground: true` if you would rather it came forward.
+
 ### 3. Walk
 
 Before a release, open the real built app, walk the main routes, photograph each

@@ -7,7 +7,8 @@
  * of which is the one a person means.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,6 +16,8 @@ import path from 'node:path';
 import { StaysFixedError, isExpected } from '../core/errors.js';
 import { detail } from '../core/log.js';
 import { DEFAULT_VIEWPORT } from '../core/config.js';
+
+const execFileAsync = promisify(execFile);
 import { waitForEndpoint, listTargets, connect } from './cdp.js';
 import { resolveElectronBinary, freePort } from './find.js';
 import { createPage } from './page.js';
@@ -136,6 +139,18 @@ export async function launchElectron(app, opts = {}) {
   detail(`app: ${binary}`);
   detail(`debugging port: ${port}`);
 
+  // Remember who had the screen, so we can give it straight back.
+  //
+  // Opening a desktop app takes the foreground, and a check that runs every few minutes
+  // takes it every few minutes — it steals the window out from under whatever the person
+  // was actually doing. The app still has to really open (it is being photographed, not
+  // simulated), but it does not have to be in front: the flags below keep it painting
+  // while it is behind another window, so the pictures are the same either way.
+  //
+  // Set `app.foreground: true` to watch it work instead.
+  const wantsFront = /** @type {any} */ (app).foreground === true;
+  const previousApp = wantsFront ? null : await frontmostApp();
+
   const child = spawn(binary, args, {
     cwd: app.cwd,
     env: childEnv(app, opts),
@@ -233,6 +248,9 @@ export async function launchElectron(app, opts = {}) {
       return closing;
     };
 
+    // The window is up and answering; hand the screen back to whoever had it.
+    if (previousApp) await giveFocusBack(previousApp);
+
     return { cdp, page, close, endpoint, pid: child.pid ?? null, kind: 'electron' };
   } catch (e) {
     // Half-launched means a leaked app window sitting on somebody's screen.
@@ -260,4 +278,49 @@ export async function listElectronWindows(endpoint) {
   // Real windows first. An app also reports service workers and popups, and the
   // first row a person reads should be the one a check would actually drive.
   return windows.sort((a, b) => Number(b.type === 'page') - Number(a.type === 'page'));
+}
+
+/**
+ * The name of the application currently in front, on macOS. Null anywhere else.
+ *
+ * @returns {Promise<string|null>}
+ */
+async function frontmostApp() {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const { stdout } = await execFileAsync(
+      'osascript',
+      ['-e', 'tell application "System Events" to get name of first application process whose frontmost is true'],
+      { timeout: 4000 },
+    );
+    const name = stdout.trim();
+    return name.length > 0 ? name : null;
+  } catch {
+    // No Apple Events permission, or no window server at all (CI). Not worth a word.
+    return null;
+  }
+}
+
+/**
+ * Put the screen back where it was before we opened anything.
+ *
+ * The app carries on running and carries on being photographed — the rendering flags it
+ * was launched with keep it painting while it sits behind another window. Bring it to the
+ * front yourself any time you want to watch it work.
+ *
+ * @param {string} name
+ * @returns {Promise<void>}
+ */
+async function giveFocusBack(name) {
+  if (process.platform !== 'darwin') return;
+  try {
+    await execFileAsync(
+      'osascript',
+      ['-e', `tell application "System Events" to set frontmost of first application process whose name is ${JSON.stringify(name)} to true`],
+      { timeout: 4000 },
+    );
+    detail(`left the screen with ${name}; the app is running behind it`);
+  } catch {
+    // Worst case the app keeps the foreground. Never a reason to fail a run.
+  }
 }
