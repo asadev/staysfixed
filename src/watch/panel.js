@@ -190,6 +190,10 @@ export function panelHtml(plan = {}) {
     '<div class="track" id="track"><div class="fill" id="fill"></div></div>',
     '<span class="counts mono" id="counts"></span>',
     '</div>',
+    // Said once, plainly. Without it the list of names and times reads as a
+    // speed report — which is exactly how it read to the first person who
+    // looked at it. The times are how long a check took; the check is this.
+    '<p class="what" id="what"></p>',
     '</header>',
 
     // --- the two columns. One on a narrow panel, two on a wide one. ---------
@@ -487,6 +491,19 @@ button { font: inherit; color: inherit; }
   from { opacity: 0; transform: translateY(7px); filter: blur(4px); }
   to { opacity: 1; transform: none; filter: blur(0); }
 }
+.what {
+  margin: 8px 0 0; font-size: var(--t-small); color: var(--faint);
+  line-height: 1.45; overflow-wrap: anywhere;
+}
+.rverdict {
+  flex: 0 0 auto; font-size: var(--t-small); color: var(--faint);
+  white-space: nowrap; padding-left: 10px;
+}
+.item.held .rverdict { color: var(--faint); }
+.item.moved .rverdict { color: var(--moved); }
+.item.broke .rverdict { color: var(--broke); }
+.item.waiting .rverdict { color: var(--waiting); }
+.item.pending .rverdict, .item.skip .rverdict { color: var(--faintest, var(--faint)); }
 .note { margin-top: 5px; font-size: var(--t-body); color: var(--faint); overflow-wrap: anywhere; }
 
 /* One hairline, not a row of blocks. Each finished check adds its own slice of
@@ -750,6 +767,7 @@ button { font: inherit; color: inherit; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .item.pending .rname, .item.skip .rname { color: var(--faint); }
+.rtime { margin-left: 12px; }
 .rtime {
   flex: 0 0 auto;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -1102,7 +1120,7 @@ const SCRIPT = `
   var ui = {
     clock: el('clock'), project: el('project'), app: el('app'), targetsep: el('targetsep'),
     state: el('state'), note: el('note'),
-    track: el('track'), fill: el('fill'), counts: el('counts'),
+    track: el('track'), fill: el('fill'), counts: el('counts'), what: el('what'),
     stage: el('stage'), shot: el('shot'), layerA: el('layerA'), layerB: el('layerB'), blank: el('blank'),
     caption: el('caption'), shotname: el('shotname'), shotout: el('shotout'), tabs: el('tabs'),
     scroll: el('scroll'), follow: el('follow'), nothing: el('nothing'),
@@ -1201,6 +1219,54 @@ const SCRIPT = `
       case 'skipped': return 'left out on purpose';
       default: return ev.message || '';
     }
+  }
+
+  /**
+   * Two or three words for the row itself.
+   *
+   * The long sentence stays in the detail; this is what a person reads while
+   * scanning the column. A check that held has to say so — silence next to a
+   * duration is what made the panel look like it was timing page loads.
+   */
+  function shortOutcome(kind, ev) {
+    var status = ev.status;
+    if (kind === 'guard') {
+      if (status === 'passed') return 'still holds';
+      if (status === 'skipped') return 'left out';
+      return 'broken again';
+    }
+    switch (status) {
+      case 'passed': return 'matches';
+      case 'changed':
+        var n = ev.diffPixels || 0;
+        return commas(n) + ' ' + plural(n, 'pixel', 'pixels') + ' moved';
+      case 'new': return 'needs your eyes';
+      case 'missing': return 'no approved picture';
+      case 'failed': return 'no picture taken';
+      case 'flaky': return 'would not settle';
+      case 'skipped': return 'left out';
+      default: return '';
+    }
+  }
+
+  /**
+   * The one line that says what a run is, in the words a person would use.
+   */
+  function describeWork(screens, guards) {
+    var bits = [];
+    if (screens) {
+      bits.push(
+        screens + ' ' + plural(screens, 'screen', 'screens') +
+        ' photographed and compared, pixel for pixel, with the picture you approved',
+      );
+    }
+    if (guards) {
+      bits.push(
+        guards + ' ' + plural(guards, 'guard', 'guards') +
+        ' — one per bug that was already fixed once',
+      );
+    }
+    return bits.join(' · ');
   }
 
   // -------------------------------------------------------------------------
@@ -1312,10 +1378,13 @@ const SCRIPT = `
     var rname = document.createElement('span');
     rname.className = 'rname';
     rname.textContent = name;
+    var rverdict = document.createElement('span');
+    rverdict.className = 'rverdict';
     var rtime = document.createElement('span');
     rtime.className = 'rtime';
     row.appendChild(dot);
     row.appendChild(rname);
+    row.appendChild(rverdict);
     row.appendChild(rtime);
     row.insertAdjacentHTML('beforeend', CHEVRON);
 
@@ -1327,7 +1396,7 @@ const SCRIPT = `
     root.appendChild(detail);
 
     var entry = {
-      kind: kind, name: name, root: root, row: row, time: rtime,
+      kind: kind, name: name, root: root, row: row, time: rtime, verdict: rverdict,
       detail: detail, describe: describe || '', open: false, hasDetail: false
     };
 
@@ -1522,6 +1591,12 @@ const SCRIPT = `
     }
     ui.countScreens.textContent = countIn('picture');
     ui.countGuards.textContent = countIn('guard');
+    var nScreens = 0, nGuards = 0;
+    for (var w = 0; w < order.length; w++) {
+      if (order[w].kind === 'guard') nGuards++; else nScreens++;
+    }
+    ui.what.textContent = describeWork(nScreens, nGuards);
+    ui.what.hidden = order.length === 0;
     ui.nothing.hidden = order.length > 0;
     paintMeter();
   }
@@ -2344,6 +2419,7 @@ const SCRIPT = `
       preloadAll(entry.pics);
     }
     entry.outText = outcomeText(kind, ev);
+    if (entry.verdict) entry.verdict.textContent = shortOutcome(kind, ev);
     entry.failedAt = (kind === 'guard' && ev.status === 'failed' && ev.failedAt) ? ev.failedAt : '';
     entry.story = (kind === 'guard' && ev.status === 'failed' && ev.because) ? ev.because : '';
     if (typeof ev.durationMs === 'number') tweenTo(entry.time, ev.durationMs, fmt);
