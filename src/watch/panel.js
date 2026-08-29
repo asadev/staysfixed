@@ -217,6 +217,10 @@ export function panelHtml(plan = {}) {
 
     // --- every check, one quiet line each ----------------------------------
     '<div class="scroll" id="scroll">',
+    // The working for whatever is on the glass. It belongs in the scrolling
+    // column, not inside the picture's own box — put there it stole the
+    // picture's height and squashed it to a sliver.
+    '<section class="work-here" id="work" hidden></section>',
     '<section class="group" id="groupScreens" hidden>',
     '<p class="grouplabel">Screens<span class="mono" id="countScreens"></span></p>',
     '<div class="items" id="listScreens"></div>',
@@ -807,6 +811,56 @@ button { font: inherit; color: inherit; }
 .detail .claim em { font-style: normal; color: var(--faint); }
 .detail .story { margin-top: 7px; color: var(--faint); }
 
+/* The working, shown.
+   A verdict and a stopwatch do not tell anybody what was actually done to a
+   screen — which is exactly what the first person to look at this panel said.
+   So every step of a picture check is written out here in the order it
+   happened, numbered, with the number behind it on the right. It reads like a
+   receipt: quiet, aligned, and only ever seen by somebody who opened the row.
+   The spine down the left is built one segment per step, so the step that
+   moved or broke colours its own piece of it — the same idea as the meter at
+   the top of the window. */
+.work-here { padding: 2px var(--pad) 10px; }
+.work-here .worklabel { margin: 0 0 6px; }
+.detail .worklabel {
+  margin: 11px 0 6px;
+  font-size: var(--t-label); font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--faint);
+}
+.work { list-style: none; margin: 0; padding: 0; }
+.step {
+  display: flex; align-items: baseline; gap: 9px;
+  padding: 4px 0 4px 11px;
+  box-shadow: inset 1px 0 0 var(--line);
+}
+.step.warn { box-shadow: inset 1.5px 0 0 var(--moved); }
+.step.bad { box-shadow: inset 1.5px 0 0 var(--broke); }
+.step.skipped { box-shadow: inset 1px 0 0 var(--resting); }
+/* The numeral keeps its own column whatever happens to the right of it — a
+   number that has been left behind on a line of its own is not a sequence any
+   more, which is what a long label does to it on a panel dragged narrow. */
+.stepno { flex: 0 0 15px; text-align: right; font-size: var(--t-label); color: var(--faint); }
+/* Label on one line, its number under it.
+   They used to share a line and wrap to a second, right-aligned one whenever the
+   number was long — which at 460px was most of them, and the column came out
+   ragged. Stacked, it reads down the page like a receipt: what was done, then
+   what it came to. */
+.stepbody { flex: 1 1 auto; min-width: 0; }
+.stepwhat { color: var(--soft); }
+.stepnum {
+  display: block; margin-top: 1px;
+  font-size: var(--t-meta); color: var(--faint);
+  overflow-wrap: anywhere;
+}
+/* A step that wants a person is the one thing in the list that is allowed to
+   be read from across the row: its words go to full strength, its number takes
+   the colour of what happened. */
+.step.warn .stepwhat, .step.bad .stepwhat { color: var(--ink); }
+.step.warn .stepno, .step.warn .stepnum { color: var(--moved); }
+.step.bad .stepno, .step.bad .stepnum { color: var(--broke); }
+.step.skipped .stepwhat, .step.skipped .stepno, .step.skipped .stepnum { color: var(--faint); }
+
 .nothing { padding: 26px 16px; color: var(--faint); font-size: var(--t-body); line-height: 1.7; text-align: center; }
 .nothing .mono { color: var(--soft); }
 
@@ -1120,7 +1174,7 @@ const SCRIPT = `
   var ui = {
     clock: el('clock'), project: el('project'), app: el('app'), targetsep: el('targetsep'),
     state: el('state'), note: el('note'),
-    track: el('track'), fill: el('fill'), counts: el('counts'), what: el('what'),
+    track: el('track'), fill: el('fill'), counts: el('counts'), what: el('what'), work: el('work'),
     stage: el('stage'), shot: el('shot'), layerA: el('layerA'), layerB: el('layerB'), blank: el('blank'),
     caption: el('caption'), shotname: el('shotname'), shotout: el('shotout'), tabs: el('tabs'),
     scroll: el('scroll'), follow: el('follow'), nothing: el('nothing'),
@@ -1454,6 +1508,17 @@ const SCRIPT = `
       out.textContent = entry.outText;
       d.appendChild(out);
     }
+    // The working. Everything that was really done to this screen, in the
+    // order it happened, numbered so it reads as a sequence rather than a bag
+    // of facts. Absent on older runs and on guards, and then simply not drawn.
+    var work = workList(entry.checks);
+    if (work) {
+      var worklabel = document.createElement('p');
+      worklabel.className = 'worklabel';
+      worklabel.textContent = 'What was done';
+      d.appendChild(worklabel);
+      d.appendChild(work);
+    }
     if (entry.failedAt) {
       var claim = document.createElement('div');
       claim.className = 'claim';
@@ -1475,6 +1540,80 @@ const SCRIPT = `
     if (!entry.hasDetail) setOpen(entry, false);
   }
 
+  /**
+   * The working, as a numbered list — or null when there is nothing to show.
+   *
+   * Everything that was really done to a screen, in the order it happened.
+   * Numbered because that is the question people ask: not "did it pass" but
+   * "what did you actually check". Absent on older runs and on guards.
+   *
+   * @param {any} checks
+   * @returns {HTMLOListElement|null}
+   */
+  function workList(checks) {
+    var steps = Array.isArray(checks) ? checks : null;
+    if (!steps || !steps.length) return null;
+    var work = document.createElement('ol');
+    work.className = 'work';
+    var counted = 0;
+    for (var k = 0; k < steps.length; k++) {
+      var step = steps[k];
+      if (!step || typeof step !== 'object') continue;
+      var said = String(step.label == null ? '' : step.label).trim();
+      if (!said) continue;
+      counted++;
+
+      var line = document.createElement('li');
+      var state = step.state;
+      var carries = state === 'warn' || state === 'bad' || state === 'skipped';
+      line.className = 'step ' + (carries ? state : 'ok');
+
+      var no = document.createElement('span');
+      no.className = 'stepno mono';
+      no.textContent = String(counted);
+      var body = document.createElement('span');
+      body.className = 'stepbody';
+      var what = document.createElement('span');
+      what.className = 'stepwhat';
+      what.textContent = said;
+      body.appendChild(what);
+
+      var behind = String(step.detail == null ? '' : step.detail).trim();
+      if (behind) {
+        var num = document.createElement('span');
+        num.className = 'stepnum mono';
+        num.textContent = behind;
+        body.appendChild(num);
+      }
+      line.appendChild(no);
+      line.appendChild(body);
+      work.appendChild(line);
+    }
+    return counted ? work : null;
+  }
+
+  /**
+   * The same list, always visible, under the picture on the glass.
+   *
+   * Behind a click it may as well not exist — the first person to use this asked
+   * for the checks and never found them, because a passing row is closed by
+   * default. Whichever screen is being shown says what was done to it, right
+   * there, without anybody having to go looking.
+   *
+   * @param {any} checks
+   */
+  function showWork(checks) {
+    var list = workList(checks);
+    ui.work.textContent = '';
+    if (!list) { ui.work.hidden = true; return; }
+    var label = document.createElement('p');
+    label.className = 'worklabel';
+    label.textContent = 'What was done';
+    ui.work.appendChild(label);
+    ui.work.appendChild(list);
+    ui.work.hidden = false;
+  }
+
   /** Put a screen's pictures back in the hero, with the words that went with them. */
   function recall(entry) {
     var p = entry.pics;
@@ -1488,6 +1627,7 @@ const SCRIPT = `
     if (!showed) return;
     nameTheShot(entry.name);
     sayOutcome(entry.tone, outcomeShort(p));
+    showWork(entry.checks);
     markShowing(entry);
   }
 
@@ -2348,6 +2488,9 @@ const SCRIPT = `
         // in the list, because the picture is where the person is looking and
         // that line is what tells them there is something to decide.
         sayOutcome(tone, outcomeShort(ev));
+        // And what was actually done to it, right under the picture, while the
+        // person is looking at it.
+        showWork(ev.checks);
       }
       tint(worstTone());
       return;
@@ -2418,6 +2561,9 @@ const SCRIPT = `
       // picture that is already decoded and the swap never flashes.
       preloadAll(entry.pics);
     }
+    // What was actually done to this screen. Kept as it arrived — the run is
+    // the one thing that knows, and the panel never invents a step.
+    if (Array.isArray(ev.checks)) entry.checks = ev.checks;
     entry.outText = outcomeText(kind, ev);
     if (entry.verdict) entry.verdict.textContent = shortOutcome(kind, ev);
     entry.failedAt = (kind === 'guard' && ev.status === 'failed' && ev.failedAt) ? ev.failedAt : '';

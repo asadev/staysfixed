@@ -503,6 +503,10 @@ export {};
  *                                          thumbnail is unreadable, which is the whole point of looking.
  * @property {string} [approvedFile]          file:// URL of the approved picture.
  * @property {string} [diffFile]              file:// URL of the difference image.
+ * @property {CheckStep[]} [checks]           What was actually done to this screen, in order.
+ *                                          A verdict on its own ("matches") does not tell anyone what
+ *                                          was verified, and a row showing only a name and a duration
+ *                                          reads as a speed test. This is the working shown.
  * @property {string} [approvedThumb]
  * @property {string} [diffThumb]
  * @property {RunSummary} [summary]           Only on 'run:done'.
@@ -543,4 +547,17 @@ export {};
  * @property {number} guards
  * @property {number} other
  * @property {number} total
+ */
+
+/**
+ * One thing that was done to a screen, and how it went.
+ *
+ * These are the real steps of a picture check, in the order they happen — reaching the
+ * screen, holding it still, waiting for fonts and pictures, matching the size, comparing
+ * every pixel, and listening for errors the page threw while nobody was looking.
+ *
+ * @typedef {object} CheckStep
+ * @property {string} label                   Plain language: "held still", "every pixel compared".
+ * @property {string} [detail]                The number behind it: "5,184,000 pixels, none different".
+ * @property {'ok'|'warn'|'bad'|'skipped'} state
  */

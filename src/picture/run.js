@@ -21,12 +21,17 @@ import { resetWindow } from '../drive/launch.js';
 import { gitInfo } from '../core/git.js';
 import { messageOf } from '../core/errors.js';
 import { detail } from '../core/log.js';
-import { emitEvent, fileUrl } from '../core/events.js';
+import { emitEvent, fileUrl, buildChecks } from '../core/events.js';
 
 /**
- * A picture result plus the one extra fact the flake register needs: whether it
- * only agreed with the approved picture after being photographed again.
- * @typedef {import('../types.js').PictureResult & {retriedToPass?: boolean}} PictureRunResult
+ * A picture result plus two things the plain result has no room for: whether it
+ * only agreed with the approved picture after being photographed again, which is
+ * what the flake register needs, and the list of what was actually done to the
+ * screen, which is what a person needs before they will believe the verdict.
+ * @typedef {import('../types.js').PictureResult & {
+ *   retriedToPass?: boolean,
+ *   checks?: import('../types.js').CheckStep[],
+ * }} PictureRunResult
  */
 
 /**
@@ -163,6 +168,10 @@ function emitDone(events, result, thumbs) {
     thumbnail: thumbs.shot,
     approvedThumb: thumbs.approved,
     diffThumb: thumbs.diff,
+    // The working: every step this screen really went through, in order. Built once,
+    // on the result, and passed straight along — so the panel and anything else
+    // listening read the same words the result was saved with.
+    checks: result.checks,
     // The real pictures. Only ever set for a file that was written or read a moment
     // ago, so anything that arrives here can be opened; a screen that was skipped, or
     // one that could not be photographed at all, sends none of them.
@@ -222,6 +231,44 @@ async function runOneScreen(project, page, screen, ctx) {
   /** @type {import('../types.js').CompareReport|null} */
   let compare = null;
   let attempts = 0;
+  /** @type {Awaited<ReturnType<typeof captureScreen>>|undefined} */
+  let last;
+
+  /**
+   * Hand back one finished screen, with the list of what was done to it when that
+   * list is worth building.
+   *
+   * Every way out of this function goes through here, so there is exactly one place
+   * that knows how to describe a screen — and no path that can quietly forget to.
+   *
+   * @param {PictureRunResult} result
+   * @param {string} [failure]  Why the screen could not be photographed at all.
+   * @returns {PictureRunResult}
+   */
+  function done(result, failure) {
+    if (worthExplaining(ctx, result)) {
+      result.checks = buildChecks({
+        screen,
+        status: result.status,
+        frozen: last?.frozen,
+        settle: last?.settle,
+        loaded: last?.loaded,
+        freeze: last?.freeze,
+        masks: last?.masks,
+        masksAsked: settings.masks.length,
+        consoleErrors,
+        size,
+        approvedSize: result.approvedSize,
+        compare,
+        hasApproved: Boolean(approved),
+        tolerance: settings.tolerance,
+        attempts,
+        platform: { approvedOn: approved?.meta?.platform, here: ctx.here },
+        failure,
+      });
+    }
+    return finish(ctx, result);
+  }
 
   try {
     // Photograph, and if it disagrees with the approved picture, photograph again
@@ -243,6 +290,7 @@ async function runOneScreen(project, page, screen, ctx) {
         thumbnail: ctx.thumbnail === true,
       });
       accountForCapture(ctx.timings, shot);
+      last = shot;
       consoleErrors = shot.consoleErrors;
       size = { width: shot.width, height: shot.height };
 
@@ -283,15 +331,18 @@ async function runOneScreen(project, page, screen, ctx) {
       }
     }
   } catch (error) {
-    return finish(ctx, {
-      name: screen.name,
-      describe: screen.describe,
-      status: 'failed',
-      message: join(`${screen.name} could not be photographed. ${messageOf(error)}`, platformNote),
-      durationMs: Date.now() - started,
-      attempts,
-      consoleErrors: consoleErrors.length > 0 ? consoleErrors : undefined,
-    });
+    return done(
+      {
+        name: screen.name,
+        describe: screen.describe,
+        status: 'failed',
+        message: join(`${screen.name} could not be photographed. ${messageOf(error)}`, platformNote),
+        durationMs: Date.now() - started,
+        attempts,
+        consoleErrors: consoleErrors.length > 0 ? consoleErrors : undefined,
+      },
+      messageOf(error),
+    );
   }
 
   /** @type {PictureRunResult} */
@@ -319,7 +370,7 @@ async function runOneScreen(project, page, screen, ctx) {
       });
       // It exists now, because that call is what wrote it.
       if (ctx.thumbs) ctx.thumbs.approvedFile = fileUrl(approvedPaths.png);
-      return finish(ctx, {
+      return done({
         ...base,
         status: 'new',
         approvedPath: approvedPaths.png,
@@ -327,7 +378,7 @@ async function runOneScreen(project, page, screen, ctx) {
         message: join(`${screen.name} had no approved picture — this one was saved as the first.`, platformNote),
       });
     }
-    return finish(ctx, {
+    return done({
       ...base,
       status: 'new',
       message: join(
@@ -340,7 +391,7 @@ async function runOneScreen(project, page, screen, ctx) {
   if (!compare) {
     // Cannot happen: with an approved picture every attempt compares. Kept so a
     // future edit that breaks that assumption fails loudly instead of silently passing.
-    return finish(ctx, {
+    return done({
       ...base,
       status: 'failed',
       message: join(`${screen.name} was photographed but never compared.`, platformNote),
@@ -357,7 +408,7 @@ async function runOneScreen(project, page, screen, ctx) {
 
   if (compare.equal) {
     const retriedToPass = attempts > 1;
-    return finish(ctx, {
+    return done({
       ...common,
       status: 'passed',
       retriedToPass,
@@ -399,7 +450,7 @@ async function runOneScreen(project, page, screen, ctx) {
     ? 'There is no difference picture for a size change — open the new picture and look at it.'
     : `Open the difference picture, and if the new look is right run \`staysfixed approve ${screen.name}\`.`;
 
-  return finish(ctx, {
+  return done({
     ...common,
     status: 'changed',
     diffPath,
@@ -444,6 +495,28 @@ export function accountForCapture(timings, shot) {
 function platformWarning(approvedOn, here) {
   if (!approvedOn || approvedOn === here) return '';
   return `Careful: this picture was approved on ${approvedOn} and checked on ${here}. Text is drawn differently on each, so a small difference here may mean nothing.`;
+}
+
+/**
+ * Is this screen worth explaining?
+ *
+ * Building the list is cheap — a few dozen short strings — but cheap is not the same
+ * as free, and there is no reason to write out the working of a screen nobody will
+ * ever read it for. Two cases deserve it: somebody has the live panel open and is
+ * watching this happen, or the screen did something other than quietly agree with
+ * its approved picture. A plain pass in a plain run carries no message at all, which
+ * is exactly how a pass with a warning on it — a retry, a picture approved on another
+ * computer — still gets its working shown.
+ *
+ * @param {ScreenCtx} ctx
+ * @param {PictureRunResult} result
+ * @returns {boolean}
+ */
+function worthExplaining(ctx, result) {
+  if (ctx.thumbnail === true) return true;
+  if (result.status !== 'passed') return true;
+  if (result.retriedToPass === true) return true;
+  return Boolean(result.message);
 }
 
 /**

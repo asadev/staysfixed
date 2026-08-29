@@ -59,12 +59,21 @@ const KNOWN_KEYS = new Set([...ACTION_ORDER, 'text', 'note']);
  *   masks: import('../types.js').MaskRect[],
  *   timings: {steps: number, prepare: number, settle: number},
  *   spent: {steps: number, prepare: number, settle: number},
+ *   frozen: import('../core/events.js').FrozenPlan,
+ *   loaded?: import('../core/events.js').LoadedReport,
  *   thumbnail?: string,
  * }>}
  *   The standard report, plus the mask rectangles that were painted so the comparison can
  *   paint the exact same rectangles onto the approved picture, plus where the time went.
  *   Only this function knows how its own milliseconds were spent, so it says, rather than
  *   leaving the run to guess by wrapping things it cannot see inside.
+ *
+ *   `frozen` and `loaded` are here so the run can tell a person what was actually done to
+ *   this screen. `frozen` is what the freeze layer was ASKED for — the only place that
+ *   knows a check was switched off in the config, and therefore the only way the list can
+ *   say so instead of quietly claiming success. `loaded` is what the page itself said was
+ *   still loading at the moment the shutter fired: a measurement, taken here because it
+ *   cannot be recovered afterwards, and gone the instant the app moves on.
  */
 export async function captureScreen(page, screen, settings, ctx) {
   const deviceScaleFactor = settings.viewport.deviceScaleFactor ?? 2;
@@ -134,6 +143,14 @@ export async function captureScreen(page, screen, settings, ctx) {
     });
     spent.settle = since(startedSettle, clock());
 
+    // Asked the moment the picture exists, and never before: this is a statement about
+    // the frame that was kept. Reading it is a single round trip that touches nothing —
+    // no styles, no scroll, no focus — so it cannot change what the picture looks like,
+    // and at a couple of milliseconds against a screen that takes seconds it is not
+    // worth gating behind whether anybody is watching. Nobody can ask the page this
+    // question later; by then the app has moved on.
+    const loaded = await readLoaded(page);
+
     const rects = await resolveMasks(page, settings.masks ?? [], { deviceScaleFactor });
     // Masks force us to decode the picture; hold on to those pixels. The preview a
     // watcher is shown is made from the very same ones — the picture that gets
@@ -156,7 +173,7 @@ export async function captureScreen(page, screen, settings, ctx) {
       await runSteps(page, screen.after);
     }
 
-    /** @type {import('../types.js').CaptureReport & {masks: import('../types.js').MaskRect[], timings: typeof spent, spent: typeof spent, thumbnail?: string}} */
+    /** @type {import('../types.js').CaptureReport & {masks: import('../types.js').MaskRect[], timings: typeof spent, spent: typeof spent, frozen: import('../core/events.js').FrozenPlan, loaded?: import('../core/events.js').LoadedReport, thumbnail?: string}} */
     const report = {
       png,
       width: size.width,
@@ -165,10 +182,23 @@ export async function captureScreen(page, screen, settings, ctx) {
       consoleErrors: page.consoleErrors(),
       freeze: frozen.stats(),
       masks: rects,
+      // What was asked of the freeze layer, in the same words the config used. Written
+      // down here rather than worked out later, because by the time anybody reports on
+      // this screen the settings have been merged away.
+      frozen: {
+        clock: settings.freeze.clock !== false,
+        motion: settings.freeze.motion !== false,
+        random: settings.freeze.random !== 'off',
+        fonts: settings.freeze.fonts !== false,
+        network: settings.freeze.network ?? 'block-external',
+        frames: settleConfig.frames ?? 2,
+        maxDriftPixels: settleConfig.maxDriftPixels ?? 0,
+      },
       // The same three numbers under both names the rest of the tool asks for them by.
       timings: spent,
       spent,
     };
+    if (loaded) report.loaded = loaded;
     if (ctx.thumbnail === true) {
       const small = await thumbnailOf(painted ? painted.image : png);
       if (small) report.thumbnail = small;
@@ -181,6 +211,51 @@ export async function captureScreen(page, screen, settings, ctx) {
     } catch {
       // ignored on purpose
     }
+  }
+}
+
+/**
+ * What the page says is still loading, at the moment the picture was taken.
+ *
+ * The shutter already waited for fonts and images before it fired; this asks the page
+ * whether that wait actually finished, so a run can say "nothing still loading" and mean
+ * it. Read-only by construction — it looks at `document.fonts.status` and the `complete`
+ * flag of every `<img>`, and touches nothing else, which is what makes it safe to run
+ * against a page whose picture has already been kept.
+ *
+ * A page that navigated, closed or crashed answers nothing, and nothing is what gets
+ * reported: a missing measurement must never be dressed up as a passing one.
+ *
+ * @param {import('../types.js').PageHandle} page
+ * @returns {Promise<import('../core/events.js').LoadedReport|undefined>}
+ */
+async function readLoaded(page) {
+  const source = `(() => {
+  var out = { fonts: 'none', images: 0, imagesPending: 0 };
+  try {
+    if (document.fonts && document.fonts.status) out.fonts = String(document.fonts.status);
+  } catch (e) {}
+  try {
+    var imgs = document.images ? Array.prototype.slice.call(document.images) : [];
+    out.images = imgs.length;
+    for (var i = 0; i < imgs.length; i++) {
+      if (!imgs[i].complete) out.imagesPending++;
+    }
+  } catch (e) {}
+  return out;
+})()`;
+
+  try {
+    const seen = await page.evaluate(source);
+    if (!seen || typeof seen !== 'object') return undefined;
+    return {
+      fonts: typeof seen.fonts === 'string' ? seen.fonts : undefined,
+      images: Number(seen.images) || 0,
+      imagesPending: Number(seen.imagesPending) || 0,
+    };
+  } catch {
+    // The page is gone. Say nothing rather than guess.
+    return undefined;
   }
 }
 
