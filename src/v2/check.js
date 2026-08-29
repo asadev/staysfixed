@@ -33,7 +33,8 @@ import { StaysFixedError, messageOf } from '../core/errors.js';
 import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { sha256 } from '../core/hash.js';
 
-import { openStore, ensureStore, saveBuild, newCaptureId } from './store.js';
+import { openStore, ensureStore, saveBuild, newCaptureId, storeExists } from './store.js';
+import { decide, noDecisions, readDecisions, rememberCheck, readCheckRecord } from './escalate.js';
 import { sortObservations } from './observation.js';
 import { DEFAULT_RULES, machineRules, mergeRules, normaliseCapture, loadRules } from './normalise.js';
 import { runCheck, makeCheckEvents } from './run.js';
@@ -64,11 +65,17 @@ const exec = promisify(execFile);
 /**
  * What a check hands back.
  *
- * A Verdict, plus the one state a Verdict has no room for: BLOCKED. "I could not test this"
- * is neither a pass nor a failure, and filing it under either is the exact failure this tool
- * exists to prevent — so it travels as its own flag with a plain sentence beside it.
+ * A Verdict, plus the two states a Verdict has no room for.
  *
- * @typedef {Verdict & {blocked?: boolean}} CheckOutcome
+ * BLOCKED: "I could not test this" is neither a pass nor a failure, and filing it under
+ * either is the exact failure this tool exists to prevent — so it travels as its own flag
+ * with a plain sentence beside it.
+ *
+ * ACCOUNTED: how much of what the engine found never reached the reader, and why. A verdict
+ * that quietly dropped fifty waived findings and a verdict that genuinely found nothing read
+ * identically without this, and one of those is a safety net that has been switched off.
+ *
+ * @typedef {Verdict & {blocked?: boolean, accounted?: import('./escalate.js').Accounting}} CheckOutcome
  */
 
 /**
@@ -141,12 +148,73 @@ export async function check(options = {}) {
       events,
       signal: options.signal,
     });
-    return verdict;
+    return await settle(verdict, project.store, project.product);
   } catch (e) {
-    return blocked(options, e);
+    const outcome = blocked(options, e);
+    // A run that never happened still has to reach a person, because "no answer" looks
+    // exactly like "nothing changed" from the outside. It is only written down where a
+    // store already exists: a check aimed at a folder that was never set up must not leave
+    // a folder of its own behind as its parting gesture.
+    const store = openStore({ root: projectRootFor(options) });
+    if (storeExists(store)) await settle(outcome, store, outcome.product);
+    return outcome;
   } finally {
     if (project) await project.close();
   }
+}
+
+/**
+ * The step between "what is different" and "what anybody has to read".
+ *
+ * The engine's job ends at finding differences. Deciding which of them an agent may stop
+ * looking at is a separate job with its own rules, and it is done here rather than inside
+ * the loop so that an engine bug can never widen a gate. Three things happen:
+ *
+ *   - findings already recorded as intended, against the reference that is in force NOW, are
+ *     dropped from what anybody reads — and counted, out loud, on the verdict;
+ *   - findings in a sealed class are marked unwaivable, so no later code has to re-derive
+ *     that rule and no later code can get it wrong;
+ *   - the whole thing is written down, so `staysfixed_explain`, `staysfixed_prove` and the
+ *     escalation block can all be handed an id and answer honestly.
+ *
+ * Bookkeeping may never lose an answer. Everything after the arithmetic is wrapped, because
+ * a full disk is a reason to lose a record and never a reason to lose a verdict.
+ *
+ * @param {CheckOutcome} verdict
+ * @param {import('./types.js').Store} store
+ * @param {string} product
+ * @param {string[]} [guards]  Guard names, so a difference touching one is sealed by name.
+ * @returns {Promise<CheckOutcome>}
+ */
+async function settle(verdict, store, product, guards) {
+  /** @type {import('./escalate.js').Decisions} */
+  let decisions;
+  try {
+    decisions = await readDecisions(store, product);
+  } catch {
+    // Unreadable bookkeeping means nothing is accounted for, which reports MORE than it
+    // should rather than less. That is the only safe direction for this to fail in.
+    decisions = noDecisions(product);
+  }
+
+  const decided = decide(verdict.findings ?? [], decisions, { guards: guards ?? [] });
+  verdict.findings = decided.reported;
+  verdict.accounted = decided.accounting;
+  if (verdict.blocked !== true) {
+    verdict.ok = decided.reported.length === 0 && (verdict.newlyUnstable ?? []).length === 0;
+    // The count goes into the sentence a person and an agent both read, not into a field
+    // one of them has to know to look for.
+    if (decided.accounting.waived > 0 || decided.accounting.expiredWaivers > 0) {
+      verdict.summary = `${verdict.summary} ${decided.accounting.note}`;
+    }
+  }
+
+  try {
+    await rememberCheck(store, { product, verdict, decided });
+  } catch {
+    // Nothing here is worth failing a finished check over.
+  }
+  return verdict;
 }
 
 /**
@@ -200,8 +268,10 @@ function blocked(options, e) {
  */
 export async function prove(options = {}) {
   const root = projectRootFor(options);
-  const last = await readLastCheck(root);
-  const finding = last?.findings?.find((/** @type {{id?: string}} */ f) => f.id === options.finding);
+  // The same record `check` writes and the MCP surface reads. One file, so a finding id an
+  // agent was handed a moment ago still means the same finding here.
+  const last = await readCheckRecord(openStore({ root }));
+  const finding = last?.findings?.find((f) => f.id === options.finding);
   if (!finding) {
     return {
       gone: false,
@@ -237,16 +307,53 @@ export async function prove(options = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// explain
+// ---------------------------------------------------------------------------
+
 /**
- * @param {string} root
- * @returns {Promise<{findings?: any[]}|null>}
+ * One finding, with the detail a check reply deliberately left out.
+ *
+ * The check reply carries one sample value per finding, on purpose: five hundred differences
+ * from one missing stylesheet must not cost an agent its whole context. This is where the
+ * rest is kept, and it is only ever fetched, never pushed.
+ *
+ * @param {CheckOptions & {finding?: string, include?: string[]}} options
+ * @returns {Promise<{text: string, pictures: string[]}>}
  */
-async function readLastCheck(root) {
-  try {
-    return JSON.parse(await fsp.readFile(path.join(root, '.staysfixed', 'v2', 'last-check.json'), 'utf8'));
-  } catch {
-    return null;
+export async function explain(options = {}) {
+  const store = openStore({ root: projectRootFor(options) });
+  const last = await readCheckRecord(store);
+  const f = last?.findings?.find((x) => x.id === options.finding);
+  if (!f) {
+    return { text: `The last check has no finding called "${options.finding ?? ''}", so there is nothing to go deeper on.`, pictures: [] };
   }
+
+  /** @type {string[]} */
+  const out = [];
+  const differences = f.differences ?? [];
+  out.push(`${differences.length} ${differences.length === 1 ? 'address' : 'addresses'} in this finding, in full:`);
+  for (const d of differences.slice(0, 40)) {
+    if (d.kind === 'appeared') out.push(`  ${d.path} — was not there before, and now it is ${short(d.candidate)}`);
+    else if (d.kind === 'vanished') out.push(`  ${d.path} — was ${short(d.reference)}, and now it is not there at all`);
+    else out.push(`  ${d.path} — was ${short(d.reference)}, now ${short(d.candidate)}`);
+  }
+  if (differences.length > 40) out.push(`  and ${differences.length - 40} more.`);
+  if (f.nearFiles?.length) out.push('', `Nearest code: ${f.nearFiles.slice(0, 6).join(', ')}.`);
+  if (f.unwaivable === true) out.push('', `This cannot be recorded as intended by anyone: ${f.unwaivableWhy ?? 'a person has to look at it'}.`);
+  if (f.waivedBecause) out.push('', `Already recorded as intended: ${f.waivedBecause}`);
+
+  const pictures = differences.map((d) => d.evidence).filter((/** @type {string|undefined} */ e) => typeof e === 'string' && /\.png$/i.test(e));
+  return { text: out.join('\n'), pictures: /** @type {string[]} */ (pictures) };
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function short(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+  return text.length > 200 ? `${text.slice(0, 197)}...` : text;
 }
 
 // ---------------------------------------------------------------------------

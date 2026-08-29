@@ -32,12 +32,22 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import crypto from 'node:crypto';
 
 import { isExpected, messageOf } from '../../core/errors.js';
-import { gitInfo } from '../../core/git.js';
 import { findConfigFile, rootForConfig } from '../../core/paths.js';
 import { openStore } from '../store.js';
+import { SEALED_CLASSES, classify } from '../sealed.js';
+import { sealIntent } from '../intent.js';
+import { waive } from '../waiver.js';
+import {
+  WAIVER_BUDGET,
+  decide,
+  escalationBlock,
+  escalationsFor,
+  productFor,
+  readCheckRecord,
+  readDecisions,
+} from '../escalate.js';
 
 /**
  * What a check hands back, and one finding inside it.
@@ -80,28 +90,17 @@ import { openStore } from '../store.js';
 // ---------------------------------------------------------------------------
 
 /**
- * The five classes an agent may never wave through. These are not merely
- * "important bugs" - they are the differences where being wrong costs money, an
- * account, data, or a person's afternoon, and where a plausible-sounding reason
- * from a model under pressure to finish is worth nothing at all.
+ * The five classes an agent may never wave through, said as a name and a sentence.
  *
- * The keys are the strings the engine puts in `sealed`.
+ * This file used to keep its own copy of the list and its own regular expressions for
+ * matching it, which is precisely the shape of bug the whole tool exists to catch: two
+ * statements of what may never be waived, agreeing today, one of them quietly edited in six
+ * months. There is one list now, in src/v2/sealed.js, and one function that decides which
+ * class a difference is in. This only reads them.
+ *
+ * @type {Record<string, string>}
  */
-const SEALED_CLASSES = {
-  money: 'it touches money - a charge, a price, a refund, a balance',
-  'sign-in': 'it touches signing in - credentials, sessions, permissions',
-  'data-loss': 'it could lose data - a delete, a migration, an overwrite',
-  crash: 'the product crashed, or stopped with an error it did not stop with before',
-  guard: 'a named guard covers this - somebody already reported this bug once',
-};
-
-/**
- * Five waivers between one ship and the next. Past that it is not a change with
- * side effects, it is a rewrite, and a person looks at a rewrite. The number is
- * deliberately small enough to be annoying: an agent that needs a sixth is an
- * agent that has misunderstood its task.
- */
-const WAIVER_BUDGET = 5;
+const SEALED_SAYS = Object.fromEntries(SEALED_CLASSES.map((c) => [c.name, `${c.says} - ${c.because}`]));
 
 /** How many findings ride in a default reply before the rest are counted instead. */
 const DEFAULT_LIMIT = 10;
@@ -236,20 +235,6 @@ function engineMissing(engine, part, needs) {
 // ---------------------------------------------------------------------------
 
 /**
- * Sealed intents, waivers and a small index of the last check.
- *
- * They sit beside the engine's own store but they are not part of it, and that
- * separation is the point: the engine decides what is different, this decides
- * what an agent is allowed to say about it, and an engine bug must not be able
- * to widen a gate.
- *
- * @param {string} root
- */
-function stateDir(root) {
-  return path.join(root, '.staysfixed', 'v2');
-}
-
-/**
  * The project root: the folder with the settings file in it, else the folder
  * with the repository or the package, else where we were started.
  *
@@ -269,150 +254,34 @@ export function findRoot(from) {
 }
 
 /**
- * @param {string} file
- * @param {any} fallback
- * @returns {Promise<any>}
- */
-async function readJson(file, fallback) {
-  try {
-    return JSON.parse(await fsp.readFile(file, 'utf8'));
-  } catch {
-    // Not there, or hand-edited into nonsense. Either way start clean rather
-    // than refuse to run: losing a waiver is safe, refusing to check is not.
-    return fallback;
-  }
-}
-
-/**
- * @param {string} file
- * @param {unknown} value
- */
-async function writeJson(file, value) {
-  await fsp.mkdir(path.dirname(file), { recursive: true });
-  await fsp.writeFile(file, JSON.stringify(value, null, 2) + '\n');
-}
-
-/**
- * Which reference is in force, as one short string.
+ * The sealed intents, the waivers and the record of the last check all live in the store's
+ * own folder. This file reads and writes none of them: intents belong to src/v2/intent.js,
+ * waivers to src/v2/waiver.js, the record and the escalations to src/v2/escalate.js.
  *
- * Taken as a digest of the store's references file rather than of any one
- * product's pointer, so that ANY movement of ANY reference retires every
- * outstanding waiver. That errs towards waivers dying too often, which costs an
- * agent one extra call, rather than towards a waiver outliving the thing it was
- * written about, which costs somebody a regression.
+ * That separation is the point. The engine decides what is DIFFERENT; the decision layer
+ * decides what an agent is ALLOWED to say about it; this surface only asks, and repeats the
+ * answer word for word. An engine bug must not be able to widen a gate, and neither must a
+ * rewording here — which is exactly what happened while this file held its own copy of the
+ * sealed classes and its own idea of what an intent covered.
  *
- * @param {string} root
- * @returns {string}
+ * @param {ToolContext} ctx
+ * @returns {import('../types.js').Store}
  */
-function referenceStamp(root) {
-  const store = openStore({ root });
-  try {
-    const raw = fs.readFileSync(store.referencesFile);
-    return 'ref-' + crypto.createHash('sha256').update(raw).digest('hex').slice(0, 12);
-  } catch {
-    // Nothing has ever been shipped with the hook in place. That is the cold
-    // start, it is expected on any existing product, and it is a real state
-    // rather than an error - but a waiver written now must not survive the day
-    // the first reference is cut, so it gets its own stamp.
-    return 'no-reference-yet';
-  }
+function storeFor(ctx) {
+  return openStore({ root: ctx.root });
 }
 
 /**
  * A sealed statement of what the agent meant to change, written before the run.
- *
- * @typedef {object} Intent
- * @property {string} id
- * @property {string} sealedAt        ISO. A waiver only counts against an intent sealed BEFORE the check.
- * @property {string} summary
- * @property {string[]} touches       Files, folders or named areas it expected to affect.
- * @property {string[]} expect        Differences it expects to see, in its own words.
- * @property {string|null} commit
- * @property {string} reference       The reference stamp in force when it was sealed.
+ * @typedef {import('../intent.js').Intent} Intent
  */
 
 /**
- * @param {string} root
- * @returns {Promise<Intent|null>}
- */
-async function readIntent(root) {
-  const raw = await readJson(path.join(stateDir(root), 'intent.json'), null);
-  return raw && typeof raw === 'object' && typeof raw.id === 'string' ? raw : null;
-}
-
-/**
- * A recorded "I meant to do that".
- *
- * @typedef {object} Waiver
- * @property {string} id
- * @property {string} fingerprint     Pins the exact difference. A different value is a different finding.
- * @property {string} summary
- * @property {string} because
- * @property {string} intentId
- * @property {string} at
- * @property {string} reference       The stamp it was written against. It dies when this moves.
- */
-
-/**
- * @param {string} root
- * @returns {Promise<Waiver[]>}
- */
-async function readWaivers(root) {
-  const raw = await readJson(path.join(stateDir(root), 'waivers.json'), []);
-  return Array.isArray(raw) ? raw : [];
-}
-
-/**
- * What the last check found, kept so that explain, prove and waive can be given
- * an id to work with, and so "there is no finding called that" is a real answer
+ * The record of the last check, written by the engine and read here, so that explain, prove
+ * and waive can all be handed an id and "there is no finding called that" is a real answer
  * rather than a shrug.
- *
- * @typedef {object} CheckIndex
- * @property {string} at
- * @property {string} reference
- * @property {string} verdict
- * @property {Finding[]} findings
- * @property {string[]} newlyUnstable
- * @property {CheckResult} result
+ * @typedef {import('../escalate.js').CheckRecord} CheckIndex
  */
-
-/**
- * @param {string} root
- * @returns {Promise<CheckIndex|null>}
- */
-async function readLastCheck(root) {
-  const raw = await readJson(path.join(stateDir(root), 'last-check.json'), null);
-  return raw && typeof raw === 'object' && Array.isArray(raw.findings) ? raw : null;
-}
-
-/**
- * Something to call a finding by, stable while the finding itself persists, so
- * an agent can run a check twice and still explain the same one.
- * @param {RawFinding} f
- * @returns {string}
- */
-function idOf(f) {
-  return 'f-' + digest([f.title, ...(f.paths ?? [])]).slice(0, 6);
-}
-
-/**
- * What a waiver pins to. Change the values and the waiver stops applying, which
- * is the whole point: "I meant the total to read 9.99 instead of 10.00" must not
- * quietly go on covering the total the day it becomes 0.
- * @param {RawFinding} f
- * @returns {string}
- */
-function fingerprintOf(f) {
-  return digest([f.title, ...(f.paths ?? []), f.sample?.path ?? '', stringy(f.sample?.reference), stringy(f.sample?.candidate)]).slice(0, 16);
-}
-
-/**
- * @param {unknown[]} parts
- * @returns {string}
- */
-function digest(parts) {
-  return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
-}
 
 // ---------------------------------------------------------------------------
 // The list
@@ -629,9 +498,8 @@ async function toolCapabilities(ctx, input) {
     }
   }
 
-  const waivers = await readWaivers(ctx.root);
-  const stamp = referenceStamp(ctx.root);
-  const spent = waivers.filter((w) => w.reference === stamp).length;
+  const decisions = await readDecisions(storeFor(ctx), await productFor(ctx.root));
+  const spent = decisions.spent;
 
   if (input.format === 'json') {
     const payload = {
@@ -639,7 +507,7 @@ async function toolCapabilities(ctx, input) {
       version: ctx.version,
       loop: LOOP_STEPS,
       resultShapes: RESULT_SHAPES,
-      waiving: { budget: WAIVER_BUDGET, spent, sealedClasses: SEALED_CLASSES, expiresWhen: 'the reference moves - when a build is shipped' },
+      waiving: { budget: WAIVER_BUDGET, spent, sealedClasses: SEALED_SAYS, expiresWhen: 'the reference moves - when a build is shipped' },
       engine: { loaded: engine.loaded, missing: engine.missing },
       machine: caps,
       machineError: capsError,
@@ -698,7 +566,7 @@ async function toolCapabilities(ctx, input) {
   out.push(`- You cannot write a reference. Only shipping does that, and only a person ships.`);
   out.push(`- You can record that a difference was intended: ${WAIVER_BUDGET} between one ship and the next, ${spent} already spent, and every one of them dies when the reference moves.`);
   out.push('- These can never be waived by you, whatever the reason:');
-  for (const [name, why] of Object.entries(SEALED_CLASSES)) out.push(`    ${name} - ${why}`);
+  for (const [name, why] of Object.entries(SEALED_SAYS)) out.push(`    ${name} - ${why}`);
 
   if (full) {
     out.push('');
@@ -776,37 +644,30 @@ async function toolIntent(ctx, input) {
     );
   }
 
-  const git = await gitInfo(ctx.root).catch(() => null);
-  const stamp = referenceStamp(ctx.root);
+  const store = storeFor(ctx);
+  const product = await productFor(ctx.root);
 
-  /** @type {Intent} */
-  const intent = {
-    id: 'intent-' + crypto.randomBytes(5).toString('hex'),
-    sealedAt: new Date().toISOString(),
-    summary,
-    touches,
-    expect,
-    commit: git?.shortSha ?? null,
-    reference: stamp,
-  };
-  await writeJson(path.join(stateDir(ctx.root), 'intent.json'), intent);
+  // src/v2/intent.js does the sealing, and it does more than write a file down: it
+  // fingerprints the working tree at this moment, so whether the intent was written before
+  // the edits or after them stops being a promise and becomes something anybody can check.
+  const intent = await sealIntent(store, { product, summary, touches, expect, by: 'an agent, over MCP' });
 
   // Sealing a new intent does NOT hand out a fresh five. The budget is counted
   // against the reference, precisely so an agent that has spent its waivers
   // cannot buy five more by re-declaring what it meant to do. Between one ship
   // and the next, all of it is one change.
-  const waivers = await readWaivers(ctx.root);
-  const spent = waivers.filter((w) => w.reference === stamp).length;
+  const spent = (await readDecisions(store, product)).spent;
 
   return {
     content: [
       {
         type: 'text',
         text: [
-          `Sealed as ${intent.id} at ${intent.sealedAt}${intent.commit ? `, commit ${intent.commit}` : ''}.`,
+          `Sealed as ${intent.id} at ${intent.sealedAt}${intent.tree.head ? `, on commit ${intent.tree.head.slice(0, 7)}` : ''}.`,
           `You said: ${summary}`,
-          `Expecting to affect: ${touches.join(', ')}.`,
+          `Expecting to affect: ${intent.files.join(', ')}.`,
           expect.length ? `Expecting to see: ${expect.join('; ')}.` : '',
+          intent.ordering,
           '',
           `You may waive at most ${WAIVER_BUDGET} differences before a person has to look, and ${spent} of those are already spent since the last time a build shipped. Sealing another intent does not give you more, and you can only waive a difference that falls inside what you just named.`,
           'Now run staysfixed_check.',
@@ -834,6 +695,7 @@ async function toolCheck(ctx, input) {
     return engineMissing(engine, 'check', 'check({cwd, configFile, against, paired, journeys, only}) returning a CheckResult - the shape at the top of src/v2/cli.js.');
   }
 
+  const store = storeFor(ctx);
   const limit = positive(input.limit) ?? DEFAULT_LIMIT;
   const offset = positive(input.offset) ?? 0;
 
@@ -841,8 +703,15 @@ async function toolCheck(ctx, input) {
   const at = text(input.at);
   const aimed = (surface !== null && surface !== 'auto') || at !== null;
 
+  // Paging really does page. An agent asking for the next ten findings is asking to read
+  // more of an answer it already has, and running the whole product again to give it to
+  // them would be minutes of work for a result that could also come back DIFFERENT - which
+  // is the one thing a page two must never be.
+  const product = await productFor(ctx.root);
+  const paging = offset > 0 ? await readCheckRecord(store) : null;
+
   /** @type {CheckResult} */
-  const result = await run({
+  const result = paging ? paging.result : await run({
     cwd: ctx.root,
     configFile: undefined,
     against: text(input.against) ?? undefined,
@@ -857,22 +726,23 @@ async function toolCheck(ctx, input) {
   // that quietly ignores an unknown option would hand back a perfectly clean
   // result about something else entirely, and the agent would read it as proof
   // about the thing it named. So the confirmation is required, not assumed.
-  const missedTheTarget = aimed ? aimingNote(surface, at, /** @type {any} */ (result).target) : null;
+  const missedTheTarget = aimed && !paging ? aimingNote(surface, at, /** @type {any} */ (result).target) : null;
 
-  const stamp = referenceStamp(ctx.root);
-  const waivers = await readWaivers(ctx.root);
-  const live = waivers.filter((w) => w.reference === stamp);
-  const expired = waivers.length - live.length;
+  // Waivers were applied by the engine, in src/v2/escalate.js, before this ever saw the
+  // verdict - and the record it wrote holds EVERY finding, waived ones included, so this
+  // surface can still explain and prove one. What is applied here is only the fallback for
+  // an engine too old to have done it, and it calls exactly the same function rather than
+  // keeping a second opinion about what a waiver means.
+  const record = paging ?? (await readCheckRecord(store));
+  const fresh = record && (paging !== null || record.result?.runId === result?.runId);
 
   /** @type {Finding[]} */
-  const all = (Array.isArray(result?.findings) ? result.findings : []).map((/** @type {RawFinding} */ f) => ({ ...f, id: idOf(f), fingerprint: fingerprintOf(f) }));
+  const all = fresh && record ? record.findings : decide(Array.isArray(result?.findings) ? result.findings : [], await readDecisions(store, product)).all;
+  const accounting = fresh && record ? record.accounting : (/** @type {any} */ (result).accounted ?? null);
 
-  // Everything already accounted for is dropped here rather than in the engine.
-  // The engine's job is to find differences; deciding which ones an agent may
-  // stop looking at is a separate job with its own rules. Counting them out loud
-  // is part of the deal - a silently applied waiver is how a rubber stamp starts.
-  const waived = all.filter((f) => !sealedOf(f) && live.some((w) => w.fingerprint === f.fingerprint));
-  const unaccounted = all.filter((f) => !waived.includes(f));
+  const waived = all.filter((f) => typeof (/** @type {any} */ (f).waivedBy) === 'string');
+  const unaccounted = all.filter((f) => typeof (/** @type {any} */ (f).waivedBy) !== 'string');
+  const expired = accounting?.expiredWaivers ?? 0;
 
   // The engine reports a newly unpredictable address as a whole wobble entry. The
   // agent only needs the address, so that is all that is carried forward - the values
@@ -881,29 +751,30 @@ async function toolCheck(ctx, input) {
     typeof e === 'string' ? e : e.path
   );
 
-  await writeJson(path.join(stateDir(ctx.root), 'last-check.json'), {
-    at: new Date().toISOString(),
-    reference: stamp,
-    verdict: result?.blocked ? 'blocked' : result?.ok ? 'nothing unaccounted for' : 'differences found',
-    findings: all,
-    newlyUnstable,
-    result,
-  });
-
   const page = unaccounted.slice(offset, offset + limit);
   const clean = unaccounted.length === 0 && newlyUnstable.length === 0 && result?.blocked !== true;
 
   if (input.format === 'json') {
     const payload = {
       ok: clean,
-      verdict: result?.blocked ? 'blocked' : result?.ok ? 'nothing unaccounted for' : 'differences found',
+      verdict: result?.blocked ? 'blocked' : clean ? 'nothing unaccounted for' : 'differences found',
       mode: result?.mode ?? null,
       note: result?.summary ?? null,
       noiseRemoved: result?.differencesNoise ?? null,
       newlyUnstable,
       coverage: result?.coverage ?? null,
       unaccounted: unaccounted.length,
-      accountedFor: { waived: waived.length, expiredWaivers: expired },
+      // Never a bare number. An agent has to be able to see that fifty things were waived
+      // rather than merely that nothing was reported, or "silent" and "switched off" look
+      // the same from here.
+      accountedFor: {
+        waived: waived.length,
+        expiredWaivers: expired,
+        unwaivable: unaccounted.filter((f) => classify(f) !== null).length,
+        budget: accounting?.budget ?? WAIVER_BUDGET,
+        waiversLeft: accounting?.left ?? null,
+        note: accounting?.note ?? null,
+      },
       findings: page,
       aimedAt: aimed ? { surface: surface ?? 'auto', at: at ?? null, confirmed: missedTheTarget === null } : null,
       aimingWarning: missedTheTarget,
@@ -911,14 +782,42 @@ async function toolCheck(ctx, input) {
     return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], structuredContent: payload, isError: !clean };
   }
 
-  const intent = await readIntent(ctx.root);
-  const body = renderCheck({ result, unaccounted, page, offset, limit, waived: waived.length, expired, newlyUnstable, intent, clean, missedTheTarget });
+  const intent = (await readDecisions(store, product)).intent;
+  const body = renderCheck({
+    result,
+    unaccounted,
+    page,
+    offset,
+    limit,
+    waived: waived.length,
+    expired,
+    waiversLeft: accounting?.left ?? null,
+    newlyUnstable,
+    intent,
+    clean,
+    missedTheTarget,
+  });
+
+  // The handful of things a person has to rule on, written for the person rather than for
+  // the agent, and handed over as a block to be pasted whole. This is the entire delivery
+  // mechanism: he reads one closing summary at the end of a working stretch, so anything
+  // that is not inside it did not reach him. There is no report to open and no dashboard.
+  const escalations = await escalationsFor(store, result?.product ?? product);
+  const tail = escalations.items.length
+    ? [
+        '',
+        '',
+        'PUT THIS IN YOUR CLOSING SUMMARY, WORD FOR WORD. It is written for the person you are working for, not for you, and it is the only part of this run they will ever see:',
+        '',
+        escalationBlock(escalations),
+      ].join('\n')
+    : '';
 
   // A difference is reported as an error result on purpose. Protocol-wise the
   // call succeeded, but `isError` is the flag every client puts in front of the
   // agent, and an agent that skims past a real regression is exactly the failure
   // this whole tool exists to prevent.
-  return { content: [{ type: 'text', text: body }], isError: !clean };
+  return { content: [{ type: 'text', text: body + tail }], isError: !clean };
 }
 
 /**
@@ -930,13 +829,14 @@ async function toolCheck(ctx, input) {
  * @param {number} a.limit
  * @param {number} a.waived
  * @param {number} a.expired
+ * @param {number|null} a.waiversLeft
  * @param {string[]} a.newlyUnstable
  * @param {Intent|null} a.intent
  * @param {boolean} a.clean
  * @param {string|null} a.missedTheTarget
  * @returns {string}
  */
-function renderCheck({ result, unaccounted, page, offset, limit, waived, expired, newlyUnstable, intent, clean, missedTheTarget }) {
+function renderCheck({ result, unaccounted, page, offset, limit, waived, expired, waiversLeft, newlyUnstable, intent, clean, missedTheTarget }) {
   /** @type {string[]} */
   const out = [];
 
@@ -950,7 +850,7 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
   if (clean) {
     out.push('NOTHING UNACCOUNTED FOR. Everything that worked before still works, as far as this run could see.');
   } else if (unaccounted.length) {
-    const sealed = unaccounted.filter(sealedOf).length;
+    const sealed = unaccounted.filter((f) => classify(f) !== null).length;
     out.push(`${unaccounted.length} ${unaccounted.length === 1 ? 'DIFFERENCE' : 'DIFFERENCES'} YOU DID NOT ACCOUNT FOR${sealed ? `, ${sealed} of them sealed and not yours to waive` : ''}.`);
   } else {
     out.push('NOTHING CHANGED, BUT THIS IS NOT A CLEAN RUN - see the newly unpredictable addresses below.');
@@ -962,7 +862,7 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
   const arithmetic = [];
   if (result?.coverage) arithmetic.push(`${result.coverage.journeys} ${result.coverage.journeys === 1 ? 'way in was' : 'ways in were'} walked`);
   if (typeof result?.differencesNoise === 'number' && result.differencesNoise > 0) arithmetic.push(`${result.differencesNoise} differences subtracted as this product's own wobble`);
-  if (waived) arithmetic.push(`${waived} waived earlier`);
+  if (waived) arithmetic.push(`${waived} already recorded as intended and not shown again`);
   if (arithmetic.length) out.push(arithmetic.join(', ') + '.');
   if (!result?.coverage) {
     out.push('This run did not report what it covered, so how thorough it was is unknown. Treat a clean result with suspicion until it does, and call staysfixed_coverage.');
@@ -999,7 +899,19 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
 
   if (expired > 0) {
     out.push('');
-    out.push(`${expired} ${expired === 1 ? 'waiver has' : 'waivers have'} expired because the reference moved. They cover nothing any more.`);
+    out.push(
+      `${expired} ${expired === 1 ? 'waiver has' : 'waivers have'} expired because the reference moved - a build shipped since ${expired === 1 ? 'it was' : 'they were'} written. ${expired === 1 ? 'It covers' : 'They cover'} nothing any more, and anything ${expired === 1 ? 'it' : 'they'} used to cover is either in the list above or is now simply how the product works.`
+    );
+  }
+
+  // Counted out loud on every run that has spent any of them. A waiver applied in silence
+  // is how a rubber stamp starts, and the whole point of the budget is that an agent can
+  // see itself running out.
+  if (waived > 0 || (typeof waiversLeft === 'number' && waiversLeft < WAIVER_BUDGET)) {
+    out.push('');
+    out.push(
+      `${waived} ${waived === 1 ? 'difference is' : 'differences are'} being held as intended by you, and ${typeof waiversLeft === 'number' ? `${waiversLeft} of your ${WAIVER_BUDGET} waivers ${waiversLeft === 1 ? 'is' : 'are'} left` : 'the budget could not be read'} before a person has to look. None of it is the new normal until a build ships.`
+    );
   }
 
   if (unaccounted.length) {
@@ -1055,8 +967,8 @@ function renderFinding(f) {
   /** @type {string[]} */
   const out = [];
   const flags = [];
-  const sealed = sealedOf(f);
-  if (sealed) flags.push(`SEALED: ${sealed}`);
+  const sealed = classify(f);
+  if (sealed) flags.push(`SEALED: ${sealed.class}`);
   if (typeof f.count === 'number' && f.count > 1) flags.push(`${f.count} addresses`);
   out.push(`- [${f.id}] ${trim(f.title, 200)}${flags.length ? `  (${flags.join(', ')})` : ''}`);
 
@@ -1067,7 +979,7 @@ function renderFinding(f) {
   const worthListing = paths.filter((p) => !f.title.includes(p));
   if (worthListing.length) out.push(`    ${worthListing.slice(0, 3).join(', ')}${worthListing.length > 3 ? `, and ${worthListing.length - 3} more` : ''}`);
   if (f.sample) out.push(`    ${f.sample.path}: was ${valueOf(f.sample.reference)}, now ${valueOf(f.sample.candidate)}`);
-  if (sealed) out.push(`    You cannot waive this: ${SEALED_CLASSES[/** @type {'money'} */ (sealed)] ?? 'a person has to look at it'}. Fix it, or tell a person.`);
+  if (sealed) out.push(`    You cannot waive this: ${sealed.says}. Fix it, or tell a person. ${sealed.strength === 'likely' ? 'Read it before you assume it is a false alarm - and if it is one, that is a person\'s call, not yours.' : ''}`.trimEnd());
   return out;
 }
 
@@ -1084,7 +996,7 @@ async function toolExplain(ctx, input) {
   const id = text(input.finding);
   if (!id) return problem('Say which finding to explain, e.g. { "finding": "f-a1b2c3" }. The ids come from staysfixed_check.');
 
-  const last = await readLastCheck(ctx.root);
+  const last = await readCheckRecord(storeFor(ctx));
   if (!last) return problem('No check has run in this copy yet, so there is nothing to explain. Run staysfixed_check first.');
   const f = last.findings.find((x) => x.id === id);
   if (!f) {
@@ -1107,7 +1019,7 @@ async function toolExplain(ctx, input) {
 
   /** @type {string[]} */
   const out = [];
-  const sealed = sealedOf(f);
+  const sealed = classify(f);
   out.push(f.title + (sealed ? `  (SEALED: ${sealed} - not yours to waive)` : ''));
   if (typeof f.distance === 'number') {
     out.push(f.distance === 0 ? 'This sits inside the code you changed.' : `This sits ${f.distance} away from the code you changed, which is why it is ranked where it is. The further away, the more it looks like a side effect.`);
@@ -1215,7 +1127,7 @@ async function toolProve(ctx, input) {
   if (!id) return problem('Say which finding you are trying to explain, e.g. { "finding": "f-a1b2c3", "revert": ["src/total.js"] }.');
   if (!revert) return problem('Name what to put back to the reference for one run, e.g. { "revert": ["src/checkout/total.js"] }. Without that there is no claim to test.');
 
-  const last = await readLastCheck(ctx.root);
+  const last = await readCheckRecord(storeFor(ctx));
   const f = last?.findings.find((x) => x.id === id);
   if (!f) return problem(`The last check has no finding called "${id}". Run staysfixed_check first, then prove one of the ids it gives you.`);
 
@@ -1263,153 +1175,43 @@ async function toolWaive(ctx, input) {
   if (!id) return problem('Say which finding, e.g. { "finding": "f-a1b2c3", "because": "..." }.');
   if (!because) return problem('Say why this difference is what you meant, in one plain sentence. A waiver with no reason is worth nothing to whoever reads it later.');
 
-  const last = await readLastCheck(ctx.root);
+  const store = storeFor(ctx);
+  const last = await readCheckRecord(store);
   if (!last) return problem('No check has run in this copy yet, so there is no difference to waive. Run staysfixed_check first.');
   const f = last.findings.find((x) => x.id === id);
   if (!f) return problem(`The last check has no finding called "${id}". You can only waive something this tool actually reported.`);
 
-  // GATE (a) - the sealed classes. Nothing gets through this, ever.
-  const sealed = sealedOf(f);
-  if (sealed) {
-    return problem(
-      [
-        `Refused. This one is sealed: ${SEALED_CLASSES[/** @type {'money'} */ (sealed)] ?? 'a person has to look at it'}.`,
-        `  ${trim(f.title, 200)}`,
-        '',
-        'No agent can wave this through, whatever the reason, and asking again with different wording will get the same answer. Either fix it, or report it to a person in your closing summary and say plainly what changed.',
-      ].join('\n')
-    );
-  }
+  // Every gate lives in src/v2/waiver.js, and it runs all four itself rather than trusting
+  // this file to have run them first. A safety property that depends on being CALLED
+  // correctly is not a safety property, and this surface used to hold its own slightly
+  // different copy of all four — which is how a gate quietly stops meaning anything.
+  //
+  // The check stamp is what makes gate two real: an intent sealed after this check ran
+  // cannot be used to justify anything in it, and only the record knows when it ran.
+  const decision = await waive(store, {
+    product: last.product ?? (await productFor(ctx.root)),
+    finding: f,
+    why: because,
+    check: { at: last.at, runId: last.result?.runId },
+    by: 'an agent, over MCP',
+  });
 
-  const intent = await readIntent(ctx.root);
+  // A refusal is the tool working, not the tool being difficult, and the wording is the
+  // feature: an agent told "refused" tries again in different words, an agent told which
+  // gate stopped it and what it could legitimately do instead goes and does that.
+  if (!decision.ok) return problem(decision.say);
 
-  // GATE (b), first half - there has to be an intent, and it has to predate the run.
-  if (!intent) {
-    return problem(
-      'Refused. You did not seal an intent before this run, so there is nothing to check your claim against. Seal one with staysfixed_intent, run the check again, and waive from that. Sealing an intent now, after seeing what broke, would prove nothing.'
-    );
-  }
-  if (Date.parse(intent.sealedAt) > Date.parse(last.at)) {
-    return problem(
-      `Refused. That intent (${intent.id}) was sealed AFTER the check ran. An intent only means something when it is written before you see what broke. Run staysfixed_check again so the claim is tested against an intent that predates it.`
-    );
-  }
-
-  // GATE (b), second half - it has to fall inside what was sealed. This is the
-  // substance of the gate: a claim about something the agent never said it was
-  // touching is not a claim about a side effect, it is a rationalisation.
-  if (!withinIntent(f, intent)) {
-    return problem(
-      [
-        'Refused. This is outside what you sealed.',
-        `  ${trim(f.title, 200)}`,
-        '',
-        `You said you were changing: ${intent.summary}`,
-        `You said it would affect: ${intent.touches.join(', ')}.`,
-        'This is somewhere else, which is the definition of a side effect - the exact thing you are not allowed to wave through.',
-        '',
-        'If you genuinely meant to change this too, that is a different change: seal a new intent that names it, run the check again, and waive from there.',
-      ].join('\n')
-    );
-  }
-
-  const waivers = await readWaivers(ctx.root);
-  const stamp = referenceStamp(ctx.root);
-
-  if (waivers.some((w) => w.fingerprint === f.fingerprint && w.reference === stamp)) {
-    return { content: [{ type: 'text', text: `Already waived - this is recorded as intended and it did not cost you another slot.\n  ${trim(f.title, 200)}` }] };
-  }
-
-  // GATE (c) - five per change, counted against the REFERENCE rather than the
-  // intent, so an agent that has spent its five cannot buy five more by sealing
-  // a fresh intent and calling the same work a different change.
-  const spent = waivers.filter((w) => w.reference === stamp).length;
-  if (spent >= WAIVER_BUDGET) {
-    return problem(
-      [
-        `Refused. That would be your ${ordinal(spent + 1)} waiver since the last build shipped, and the limit is ${WAIVER_BUDGET}.`,
-        '',
-        'Past five, this is not a change with side effects - it is a rewrite, and a person looks at a rewrite. Sealing another intent will not give you more. Stop waiving, fix what you can, and report the rest plainly.',
-      ].join('\n')
-    );
-  }
-
-  /** @type {Waiver} */
-  const waiver = {
-    id: 'waiver-' + crypto.randomBytes(5).toString('hex'),
-    fingerprint: f.fingerprint,
-    summary: f.title,
-    because,
-    intentId: intent.id,
-    at: new Date().toISOString(),
-    // GATE (d) - fingerprinted to the exact difference and pinned to this
-    // reference. When the reference moves, every waiver written against the old
-    // one stops applying. Waivers are provisional; only shipping makes anything
-    // the new normal.
-    reference: stamp,
-  };
-  waivers.push(waiver);
-  await writeJson(path.join(stateDir(ctx.root), 'waivers.json'), waivers);
-
-  const left = WAIVER_BUDGET - (spent + 1);
-  return {
-    content: [
-      {
-        type: 'text',
-        text: [
-          `Recorded as intended: ${trim(f.title, 200)}`,
-          `Reason kept: ${because}`,
-          '',
-          `${left} of your ${WAIVER_BUDGET} waivers left before the next ship. This one is pinned to the exact values that differ and to the reference in force now - if either moves, it stops covering anything.`,
-          'This is not approval. Nothing becomes the new normal until a build is shipped. Say in what you report back that you waived this, and why.',
-        ].join('\n'),
-      },
-    ],
-  };
+  return { content: [{ type: 'text', text: decision.say }] };
 }
 
 /**
- * Does this finding fall inside what the agent said it was touching?
- *
- * Deliberately generous about wording and strict about scope. An agent that
- * named `src/checkout/` covers everything whose address or sentence mentions the
- * checkout; an agent that named "the basket page" covers a finding about the
- * basket page. What it does not cover is a finding that shares no words with
- * anything it named at all - and that case is precisely a side effect.
- *
- * @param {Finding} f
- * @param {Intent} intent
- * @returns {boolean}
+ * Whether a finding falls inside what the agent declared is decided by `intentCovers` in
+ * src/v2/intent.js, and it used to be decided here as well, by a second and slightly
+ * different set of rules. Two answers to one question is how a gate quietly stops meaning
+ * anything: the strict one refuses, somebody notices, and the loose one becomes the one
+ * that gets called. There is one now, and it grades its own confidence rather than
+ * returning a bare yes.
  */
-function withinIntent(f, intent) {
-  // A finding the engine placed at distance zero is INSIDE the code that was
-  // edited, and the intent named the code that was edited. There is nothing left
-  // to test: this is the waivable case by definition, and refusing it would make
-  // the gate refuse the one thing it exists to allow. The gate's whole job is to
-  // stop a difference FAR from the edit being waved through as intended.
-  if (f.distance === 0) return true;
-
-  // `nearFiles` is not in the finding shape the CLI publishes yet, but the
-  // engine's own findings carry it and it is by far the strongest signal for
-  // this test. Read it if it is there rather than waiting for the shape to catch
-  // up: the gate gets sharper the day it appears, and nothing breaks until then.
-  const carried = /** @type {any} */ (f).nearFiles;
-  const near = Array.isArray(carried) ? carried.filter((/** @type {unknown} */ x) => typeof x === 'string') : [];
-  const haystacks = [f.title, ...(f.paths ?? []), ...near, f.sample?.path ?? ''].map((s) => String(s).toLowerCase());
-  for (const raw of intent.touches) {
-    const needle = String(raw).toLowerCase().trim().replace(/^\.\//, '').replace(/\/+$/, '');
-    if (!needle) continue;
-    if (haystacks.some((h) => h.includes(needle))) return true;
-    // A file path was named: match on the parts that carry meaning, so
-    // "src/checkout/total.js" also covers an address reported as "cli.checkout.total".
-    const words = needle.split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !GENERIC_WORDS.has(w));
-    if (words.length && words.every((w) => haystacks.some((h) => h.includes(w)))) return true;
-  }
-  return false;
-}
-
-/** Words that appear in every path and therefore prove nothing about scope. */
-const GENERIC_WORDS = new Set(['src', 'lib', 'app', 'index', 'the', 'and', 'page', 'file', 'test', 'main', 'dist', 'build', 'js', 'ts']);
 
 // ---------------------------------------------------------------------------
 // coverage
@@ -1429,7 +1231,7 @@ const GENERIC_WORDS = new Set(['src', 'lib', 'app', 'index', 'the', 'and', 'page
  */
 async function toolCoverage(ctx, input) {
   const engine = await loadEngine();
-  const last = await readLastCheck(ctx.root);
+  const last = await readCheckRecord(storeFor(ctx));
 
   /** @type {any} */
   let caps = null;
@@ -1452,7 +1254,7 @@ async function toolCoverage(ctx, input) {
       lastCheckAt: last?.at ?? null,
       covers: caps?.covers ?? null,
       walked: coverage?.journeys ?? null,
-      unopened: (coverage?.gaps ?? []).map((g) => g.what),
+      unopened: (coverage?.gaps ?? []).map((/** @type {{what: string}} */ g) => g.what),
       surfacesOutOfReach: unreachable.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary, needs: s.needs })),
       surfacesPartial: partial.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary })),
       neverVisible: caps?.limits ?? null,
@@ -1478,7 +1280,7 @@ async function toolCoverage(ctx, input) {
   } else {
     // A gap IS a way in that was never opened, said in plain English by whoever
     // could not open it. Printing the sentence keeps the reason attached to the hole.
-    const unopened = (coverage.gaps ?? []).map((g) => g.what);
+    const unopened = (coverage.gaps ?? []).map((/** @type {{what: string}} */ g) => g.what);
     out.push(`The last run walked ${coverage.journeys} ${coverage.journeys === 1 ? 'way in' : 'ways in'}.`);
     if (unopened.length === 0) {
       out.push('It opened every way in that it knows about. That is not the same as every possible state - nothing can enumerate that - but there is no known door it has never been through.');
@@ -1517,23 +1319,6 @@ async function toolCoverage(ctx, input) {
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Which sealed class a finding is in, if any.
- *
- * A crash counts however it arrives, even when the engine did not label it: the
- * one class where guessing wrong is unrecoverable is the one to be generous
- * about.
- *
- * @param {RawFinding} f
- * @returns {string|null}
- */
-function sealedOf(f) {
-  if (typeof f.sealed === 'string' && f.sealed in SEALED_CLASSES) return f.sealed;
-  if (typeof f.sealed === 'string' && f.sealed) return f.sealed;
-  if (/\bcrash|fatal|unhandled|segfault\b/i.test(String(f.title))) return 'crash';
-  return null;
-}
 
 /**
  * @param {unknown} e
@@ -1633,12 +1418,6 @@ function indent(s) {
     .slice(0, 40)
     .map((line) => `  ${line}`)
     .join('\n');
-}
-
-/** @param {number} n */
-function ordinal(n) {
-  const suffix = n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th';
-  return `${n}${suffix}`;
 }
 
 /**

@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { StaysFixedError, EXIT } from '../core/errors.js';
 import { setLogLevel } from '../core/log.js';
 import { V2_COMMANDS } from '../v2/cli.js';
+import { SHIP_COMMANDS } from '../v2/ship.js';
 
 /** @type {{version?: string}} */
 const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -236,6 +237,7 @@ const COMMANDS = {
  * thing tomorrow.
  */
 Object.assign(COMMANDS, V2_COMMANDS);
+Object.assign(COMMANDS, SHIP_COMMANDS);
 
 /**
  * @param {string[]} argv

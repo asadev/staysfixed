@@ -20,6 +20,9 @@
 
 import { StaysFixedError, EXIT, messageOf } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, duration, setLogLevel } from '../core/log.js';
+import { openStore } from './store.js';
+import { SHIP_COMMANDS } from './ship.js';
+import { escalationBlock, escalationsFor, productFor, writeEscalations } from './escalate.js';
 
 /**
  * What comes back from a check. Everything that did not change never appears
@@ -40,7 +43,7 @@ const MOST_LINES = 6;
 /** The flags the difference engine adds. Declared once so help and parsing agree. */
 const V2_SPEC = {
   booleans: ['paired', 'selfcheck', 'json'],
-  strings: ['against', 'journeys'],
+  strings: ['against', 'journeys', 'escalations'],
 };
 
 /** @type {[string, string][]} */
@@ -50,6 +53,7 @@ const V2_OPTIONS = [
   ['--journeys <source>', 'Where the steps come from: suite, code, recorded, or a path to a journeys file.'],
   ['--selfcheck', 'Run the deliberately broken builds and prove the engine still catches them.'],
   ['--json', 'Print the whole result as JSON and nothing else. This is what an agent reads.'],
+  ['--escalations <file>', 'Write the handful of things a person has to rule on into a file, in plain English, ready to paste into a closing summary.'],
 ];
 
 /** The version 1 flags, kept working word for word. */
@@ -78,6 +82,11 @@ const V1_OPTIONS = [
  * @type {Record<string, {summary: string, usage: string, describe: string, options: [string,string][], examples: string[], spec: {booleans?: string[], strings?: string[], arrays?: string[]}, load: () => Promise<{run: (ctx: any) => Promise<number>}>}>}
  */
 export const V2_COMMANDS = {
+  // `staysfixed ship` comes from src/v2/ship.js. It is merged in here rather than into the
+  // version 1 command table so that wiring version 2 into the front door stays the one
+  // import it has always been.
+  ...SHIP_COMMANDS,
+
   check: {
     summary: 'Prove nothing that already worked has changed. This is the one you run.',
     usage: 'staysfixed check [--against <ref>] [--paired] [--journeys <source>] [--json]',
@@ -160,17 +169,77 @@ export async function run(ctx) {
   /** @type {Verdict} */
   const verdict = await check(checkOptions(ctx));
 
+  // Write down what this check concluded, before printing anything.
+  //
+  // `shouldCut` refuses to make a build the reference unless that build was
+  // actually checked — which is the whole safeguard against a broken build
+  // quietly becoming the definition of working. Without this line a person who
+  // checks on the command line and then ships is told their build was "never
+  // checked", and the safeguard fires on the honest case instead of the careless
+  // one. The agent surface records its own; this is the command line's half.
+  try {
+    const { recordCheck } = await import('./reference.js');
+    const { openStore } = await import('./store.js');
+    await recordCheck(openStore({ root: ctx.cwd ?? process.cwd() }), {
+      buildId: verdict.candidate?.id,
+      product: verdict.product,
+      ok: verdict.ok,
+      blocked: /** @type {any} */ (verdict).blocked === true,
+      findings: verdict.findings.length,
+      by: 'staysfixed check',
+    });
+  } catch {
+    // Never let bookkeeping cost somebody the result they came for.
+  }
+
   if (asJson) {
     process.stdout.write(JSON.stringify(verdict) + '\n');
   } else {
     report(verdict);
   }
 
+  await sayWhatNeedsAPerson(ctx, verdict, asJson);
+
   // A run with nothing on record to compare against has not proved your product
   // is fine — it has proved nothing at all, and it must not exit 0 and let a
   // release through on the strength of it.
   if (nothingToCompare(verdict)) return EXIT.error;
   return verdict.ok ? EXIT.ok : EXIT.failed;
+}
+
+/**
+ * The handful of things a person has to rule on, and nothing else.
+ *
+ * This is the whole of what version 2 asks of him. Everything else — what is different,
+ * whether it is noise, whether the agent caused it — is answered by the machine or by the
+ * agent. What lands here is the small class no agent may wave through, and it is written to
+ * be pasted straight into a closing summary rather than read from a screen.
+ *
+ * @param {import('../cli/index.js').CliContext} ctx
+ * @param {Verdict} verdict
+ * @param {boolean} asJson
+ * @returns {Promise<void>}
+ */
+async function sayWhatNeedsAPerson(ctx, verdict, asJson) {
+  const store = openStore({ root: ctx.cwd });
+  const product = verdict.product || (await productFor(ctx.cwd));
+  const escalations = await escalationsFor(store, product).catch(() => null);
+  if (!escalations) return;
+
+  const file = ctx.str('escalations');
+  if (file) {
+    const written = await writeEscalations(store, product, file);
+    if (!asJson) {
+      say(paint.grey(`  ${written.count === 0 ? 'Nothing needs a person' : `${written.count} thing${written.count === 1 ? '' : 's'} for a person`} — written to ${written.file}`));
+      blank();
+    }
+  }
+
+  if (asJson || escalations.items.length === 0) return;
+  heading('Put this in your summary');
+  blank();
+  for (const line of escalationBlock(escalations).split('\n')) say(line === '' ? '' : `  ${line}`);
+  blank();
 }
 
 /**

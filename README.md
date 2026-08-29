@@ -14,20 +14,25 @@ disagrees with itself about, and hands back **only the differences nobody asked
 for**. Everything unchanged is skipped and never mentioned. The agent already
 knows what it *meant* to change, so what is left is its work queue.
 
-You are not in that loop. You hear about it only when a difference lands in a
-class no agent may wave through: money, signing in, lost data, a crash, or a bug
-you already reported once.
+You are not in that loop, and you never approve anything. **What "working" means
+is cut by something you already do: saying ship.** You hear about it only when a
+difference lands in a class no agent may wave through — money, signing in, lost
+data, a crash, or a bug you already reported once — and then it arrives as three
+plain sentences inside the summary you were reading anyway.
 
 ---
 
 ## The loop
 
-1. The agent changes some code.
-2. It calls `staysfixed_check` over MCP.
-3. Everything unchanged is skipped and never reaches its context.
-4. What comes back is what changed. It already knows what it intended, so the
+1. The agent seals what it **meant** to change, before it runs anything.
+2. It changes some code.
+3. It calls `staysfixed_check` over MCP.
+4. Everything unchanged is skipped and never reaches its context.
+5. What comes back is what changed. It already knows what it intended, so the
    targets are the differences it did **not** intend.
-5. It fixes those and runs again.
+6. It fixes those and runs again. Anything it genuinely meant, it can record as
+   intended — five times, never in a sealed class, and only inside what it
+   sealed in step 1.
 
 > "You will call the MCP, make it run the tests, the results come back, then you
 > decide. Whatever is unchanged will be skipped. The things that changed other
@@ -109,12 +114,15 @@ pretend otherwise.
 | --- | --- |
 | Picture checks, guards, walk, markers, flake register, MCP server | **Shipped.** Published as `staysfixed` 0.3.x and in use. |
 | `doctor` describing this machine in plain English and as JSON | **Shipped.** |
-| The parts of the difference engine — the address space, normalisation, wobble subtraction, clustering, ranking, causal proof, the store, the MCP tools, the self-check corpus | **Written, being wired together.** |
-| The engine assembled behind `staysfixed check`, on command-line tools and libraries | **Being built.** This is the next thing to land. |
-| Web and Electron through the difference engine | Next. |
-| The reference cut automatically when you ship, and the waiver system | After that. |
-| Android, then the iOS simulator | After that. |
-| Native Windows | Only if somebody ships a native Windows product. |
+| The difference engine — the address space, normalisation, wobble subtraction, clustering, ranking, causal proof, the store, the MCP tools, the self-check corpus | **Works.** |
+| Command-line tools, libraries and HTTP servers | **Works.** |
+| Reading the contract straight out of your source — routes, exports, message channels — without running anything | **Works.** 5,785 doors read out of one desktop app in 1.4 seconds. |
+| Websites, through a browser of the tool's own | **Works.** |
+| Electron desktop apps, over their own debugging port | **Works.** |
+| The reference cut when you ship, sealed intents, the waiver budget, and escalations in your closing summary | **Works.** This page describes what it actually does. |
+| Android APKs on an emulator | Not yet. Needs Java, `adb` and Appium, none of which are here. |
+| The iOS simulator | Not yet. |
+| Native Windows GUI (a real Win32 app, not an Electron one) | Not yet, and possibly never — see the honest limits at the bottom. |
 
 `staysfixed check` is the front door for both. Version 1's flags still mean
 exactly what they meant yesterday — `--pictures`, `--guards`, `--watch` and
@@ -232,12 +240,82 @@ The word "approve" was hiding four different decisions.
 4. **Is an unintended difference acceptable anyway** — you. This is the only thing
    that reaches a person, and it should be a handful of items a month.
 
-**An agent cannot write a reference.** It can only write a waiver, through four
-machine-checked gates: sealed classes are unwaivable; the waiver must agree with
-an intent the agent sealed **before** the run, so it has to say what it meant to
-change before it sees what broke; five waivers per change and no more; and every
-waiver is fingerprinted to one exact difference and expires when the reference
-moves.
+**An agent can check, and it can waive within limits. It can never decide what
+"working" means.** That is cut by shipping, by a person, and there is no tool on
+the MCP surface that could move it — not refused, not on the list.
+
+An agent's only door is a waiver, and it passes four machine-checked gates:
+
+1. **Sealed classes are unwaivable.** Whatever the reason, whoever is asking.
+2. **The waiver has to agree with an intent sealed *before* the run** — so the
+   agent says what it meant to change before it sees what broke. Sealing one
+   afterwards is refused, and the refusal says so in those words.
+3. **Five waivers between one ship and the next.** Past five it is not a change
+   with side effects, it is a rewrite, and a person looks at a rewrite. Sealing
+   another intent does not buy five more.
+4. **Every waiver is fingerprinted to one exact difference** and dies the moment
+   the reference moves. Change the value it was written about and it stops
+   covering anything.
+
+Every waiver is counted out loud in the reply. "Nothing changed", "nothing ran"
+and "everything was waived" read identically otherwise, and two of those three
+are a safety net quietly announcing success.
+
+### The five sealed classes, in full
+
+These go to a person whatever any agent believes, and there is no setting that
+turns them off:
+
+| | |
+| --- | --- |
+| **a bug somebody already reported once** | A guard exists because this exact thing broke before and somebody had to say so. A difference here means it is back. |
+| **a crash** | The product stopped, or started stopping. Nothing about that can be intended. |
+| **losing data** | Code can be edited back. Data that was deleted cannot. |
+| **money** | A charge, a price or a refund that goes out wrong costs a real person real money. |
+| **signing in** | Getting this wrong locks the right people out, or lets the wrong people in. |
+
+### Saying ship
+
+```
+staysfixed ship --why "0.14.0 to TestFlight"
+```
+
+One line at the end of your release script, after the thing has actually gone
+out. The build you shipped becomes the standard every later check is compared
+against; every outstanding waiver is retired, because what it covered has either
+shipped and become normal or has to be decided again.
+
+It never fails your release. And it **refuses to make a build the standard if
+that build was never checked, or was checked and found broken** — your release
+still succeeds, it just tells you what "working" means did not move, and why.
+Cutting a broken build as the standard is exactly how a safety net turns into a
+rubber stamp.
+
+### What actually reaches you
+
+A handful of things a month, in three sentences each — what changed, why no agent
+could wave it through, and what to do — inside the closing summary you were
+reading anyway. Not a report, not a dashboard, not a link:
+
+```
+Stays Fixed: 1 thing needs your word on terminal-deck.
+
+1. The checkout total now says 9.99 where it said 10.00
+   No agent may wave this through: it touches money.
+   Say whether that is the amount you wanted. If it is, shipping makes it the
+   new normal; if it is not, nothing ships.
+```
+
+Five things can land there and four of them are rare on purpose: a sealed class;
+the waiver budget running out with differences still outstanding; something that
+used to give the same answer every run and now does not; a check that could not
+run at all; and, once, the fact that you have never shipped with the hook in
+place so there is nothing to compare against yet. A clean run produces none of
+them and says one line: *nothing needs your word.*
+
+```
+staysfixed check --escalations notes.txt   # the same block, in a file
+```
 
 ---
 
@@ -280,7 +358,7 @@ cwd = "/absolute/path/to/your/project"
 | `staysfixed_check` | Run it. Returns only the differences you did not account for, ranked with the ones furthest from your edit at the top. Unchanged paths never reach you; the reply says how many were skipped. |
 | `staysfixed_explain` | One finding, in depth — both values in full, the journey that reached it, the code around it, the evidence. Never pushed into a check reply, so ask for it on the two or three you intend to act on. |
 | `staysfixed_prove` | Test a causal claim by undoing a change and running again. If the difference survives the revert, your edit did not cause it and you were about to fix the wrong thing. |
-| `staysfixed_waive` | Record that a difference was intended. Not approval, and it makes nothing the new normal — only shipping does that. |
+| `staysfixed_waive` | Record that a difference was intended. Not approval, and it makes nothing the new normal — only shipping does that. Four gates, and a refusal is final. |
 | `staysfixed_coverage` | What was **not** checked. Read it before telling anyone a change is safe. |
 
 **An agent can check; only a person can approve.** `staysfixed_approve` is not
@@ -434,6 +512,12 @@ Honestly, so you know before you invest an afternoon.
   actively hides intermittent bugs. Running the new build twice recovers half of
   this by flagging anything newly unstable. Only half. That is the sharpest
   weakness in the whole architecture and it is not going to be dressed up.
+- **A waiver is a judgement, and judgements can be wrong.** The gates make an
+  agent's claim falsifiable — it has to be written before the damage is visible,
+  it has to fall inside what was named, there are five of them, and they all die
+  when you ship. What they cannot do is read the agent's mind. The five sealed
+  classes are the answer to that: in the places where being wrong is expensive,
+  no judgement is accepted from any agent at all.
 - **Real phones cannot be paired.** No paired run is possible on a device in your
   hand. Real iPhones and real Android handsets fall back to comparing against the
   stored record, and say so out loud on every run.
@@ -448,6 +532,15 @@ Honestly, so you know before you invest an afternoon.
 - **Pictures still do not travel between operating systems.** Text is drawn
   differently on every system. Pixels are evidence now rather than the accusation,
   which makes this matter far less than it did — but it has not gone away.
+- **Phones are not covered yet.** Android APKs and the iOS simulator are designed
+  and not built. Android needs a Java runtime, `adb` and Appium, none of which
+  this tool installs for you today. If you ship a phone app, this covers
+  everything around it and not the app itself, and it will say so rather than
+  report a green run that quietly means less than it looks like.
+- **Native Windows GUI is not covered, and may never be.** If your Windows
+  product is Electron — most are — it is already covered, driven from any
+  machine. A real Win32 application needs a Windows desktop and cannot run two
+  builds at once even in principle.
 - **Not battle-tested.** It works, it is used, and it has not yet met the thousand
   strange apps a widely-used tool meets. If it reports something that is not true,
   that is the most serious kind of bug it can have — please
