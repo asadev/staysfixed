@@ -1,13 +1,21 @@
 /**
  * `staysfixed walk` — the last look before a release.
+ *
+ * `--watch` opens the same live panel `check` uses, which is worth more here than
+ * anywhere else: a walk is something you sit and look at. The panel snaps itself
+ * flush against the app once the walk has opened it, so the two read as one
+ * window; `--no-snap` leaves both where they are.
  */
 
 import { spawn } from 'node:child_process';
 import { loadProject } from '../core/config.js';
 import { runWalk } from '../run.js';
-import { printWalkReport } from '../report/console.js';
+import { makeEvents, makeTimings } from '../core/events.js';
+import { attachWatcher, watchOptionsFrom } from '../watch/index.js';
+import { printWalkReport, printTimings } from '../report/console.js';
 import { say, warn, paint, shortPath } from '../core/log.js';
-import { EXIT } from '../core/errors.js';
+import { EXIT, messageOf } from '../core/errors.js';
+import { watchFlags, watchSettings } from './index.js';
 
 /**
  * @param {import('./index.js').CliContext} ctx
@@ -16,10 +24,65 @@ import { EXIT } from '../core/errors.js';
 export async function run(ctx) {
   const project = await loadProject({ cwd: ctx.cwd, configFile: ctx.configFile });
 
+  const profile = ctx.bool('profile');
+
+  /**
+   * `--no-snap` is read here rather than in the shared flag reader because it is
+   * the only panel flag that says "change nothing at all", and it has to reach
+   * the panel from both commands identically.
+   * @type {import('../watch/index.js').WatchFlags}
+   */
+  const wanted = { ...watchFlags(ctx) };
+  if (ctx.flags.snap !== undefined) wanted.snap = ctx.flags.snap === true;
+
+  let watching = wanted.enabled === true;
+
+  const events = makeEvents();
+  const timings = makeTimings();
+
+  // Listening has to start before the walk does, or the panel misses the first
+  // screen. It never gets to stop the walk: a panel is a nice-to-have.
+  /** @type {import('../watch/index.js').Watcher|null} */
+  let watcher = null;
+  if (watching) {
+    try {
+      watcher = await attachWatcher(events, { project, watch: watchOptionsFrom(watchSettings(project), wanted) });
+    } catch (error) {
+      watching = false;
+      warn(`The panel could not open, so the walk is going ahead without it. ${messageOf(error)}`);
+    }
+  }
+  // Held as a const so the walk's callback below cannot be handed a null later.
+  const panel = watcher;
+
   /** @type {import('../types.js').WalkReport} */
-  const report = await runWalk(project, /** @type {any} */ ({ only: ctx.list('only'), tool: ctx.version }));
+  let report;
+  try {
+    report = await runWalk(
+      project,
+      /** @type {any} */ ({
+        only: ctx.list('only'),
+        events,
+        timings,
+        watching,
+        // How the panel meets the app: called once, the moment the app is open
+        // and before anything is photographed.
+        onApp: panel ? (/** @type {import('../types.js').LaunchedApp} */ app) => panel.snapTo(app) : undefined,
+        tool: ctx.version,
+      }),
+    );
+  } finally {
+    if (watcher) {
+      try {
+        await watcher.stop();
+      } catch {
+        // A panel that will not close is not a reason to change the verdict.
+      }
+    }
+  }
 
   printWalkReport(report);
+  if (profile) printTimings(timings.get(), (report.steps ?? []).length);
 
   const sheet = report.reportFile || report.dir;
   if (ctx.bool('open')) {

@@ -186,6 +186,8 @@ Looked through 3 markers.
 ### And the rest
 
 ```
+staysfixed check --watch             watch the run in a panel beside your app
+staysfixed check --profile           where the time went, printed at the end
 staysfixed status                    what is set up here, and how the last check went
 staysfixed flake                     checks that have changed their mind
 staysfixed doctor                    what is missing before any of this can run
@@ -208,6 +210,27 @@ Stays Fixed
   last checked 11 minutes ago at a1b2c3d on main, took about 12 seconds
 ✓ Everything that worked still works.
 ```
+
+---
+
+## Watch it work
+
+A check is normally something you start and then look away from. `--watch` opens
+a slim panel beside your app and draws the run as it happens: every screen and
+guard ticking over from waiting to done, a thumbnail of each picture the moment
+it is taken, the approved one and the new one side by side for anything that
+changed, and how long each check took.
+
+```
+staysfixed check --watch
+```
+
+It opens behind whatever you are using and keeps working there, and it only
+reads the run — it never touches the app being photographed, so the pictures come
+out the same whether you watch or not. If no browser will open it, you get one
+line saying so and the run carries on without it. There is also `--profile`,
+which needs no window at all and prints where the seconds went when the run ends:
+[docs/watching.md](docs/watching.md).
 
 ---
 

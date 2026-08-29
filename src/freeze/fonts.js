@@ -36,7 +36,9 @@ export function fontsScript() {
   // exactly what made take 1 of twenty differ from takes 2 to 20: one picture in
   // Helvetica, nineteen in the web font.
   //
-  // So we do not wait for the fonts to arrive. We ask for them.
+  // So we do not wait for the fonts to arrive. We ask for them. The list of promises is
+  // handed back rather than awaited here, because how many faces needed asking is the
+  // thing that decides whether there is anything left to wait for at all.
   function forceLoad() {
     var pending = [];
     faces().forEach(function (f) {
@@ -45,7 +47,7 @@ export function fontsScript() {
         else if (f.status === 'loading') pending.push(Promise.resolve(f.loaded).catch(function () {}));
       } catch (e) { /* a face the browser refuses to load is not our problem */ }
     });
-    return Promise.all(pending);
+    return pending;
   }
 
   window.__staysfixed_fontsReady = function (ms) {
@@ -53,21 +55,37 @@ export function fontsScript() {
     if (!document.fonts) return Promise.resolve('no-font-api');
 
     var ready = (async function () {
+      var asked = 0;
       // Loading one face can pull in another (a bold weight referenced by a rule that
       // only matched once the first face changed the layout), so go round a few times
       // until nothing is left unloaded.
+      //
+      // A round that asks for nothing is the finish line, and it is worth leaving on it
+      // rather than going round again: if no face is unloaded or loading then every face
+      // is in, document.fonts.ready would resolve on the spot, and asking it anyway costs
+      // a whole trip through the page for an answer we already have. Most screens of most
+      // apps land here on the first round, and every screen after the first one does,
+      // because the fonts arrived for the screen before it.
       for (var round = 0; round < 5; round++) {
-        await forceLoad();
+        var pending = forceLoad();
+        // The one case where "nothing to ask for" is not the finish line: a document that
+        // is still parsing has not met its @font-face rules yet, so the face list can be
+        // empty and still grow. There, wait the old way at least once.
+        if (pending.length === 0 && (round > 0 || document.readyState === 'complete')) break;
+        asked += pending.length;
+        await Promise.all(pending);
         try { await document.fonts.ready; } catch (e) { /* ignore */ }
-        var waiting = faces().some(function (f) { return f.status !== 'loaded'; });
-        if (!waiting && document.fonts.status === 'loaded') break;
       }
-      // Two frames, so the reflow the last face caused has actually been painted
-      // rather than merely scheduled.
-      await new Promise(function (r) {
-        if (typeof requestAnimationFrame !== 'function') return r(undefined);
-        requestAnimationFrame(function () { requestAnimationFrame(function () { r(undefined); }); });
-      });
+      // Two frames, so the reflow the last face caused has actually been painted rather
+      // than merely scheduled. No face needed loading means no face changed the layout,
+      // so there is no reflow to wait for — and the shutter code waits two frames of its
+      // own after clearing focus and scroll, which is the real paint barrier.
+      if (asked > 0) {
+        await new Promise(function (r) {
+          if (typeof requestAnimationFrame !== 'function') return r(undefined);
+          requestAnimationFrame(function () { requestAnimationFrame(function () { r(undefined); }); });
+        });
+      }
       return document.fonts.status || 'loaded';
     })();
 
@@ -163,11 +181,25 @@ export async function waitForFonts(page, opts = {}) {
 export async function waitForImages(page, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 10000;
 
-  // Walking every element to read computed styles is the expensive part, so it is capped.
-  // Background images below the first few thousand elements are almost always off-screen.
+  // The cheap questions are asked first and the expensive one is earned.
+  //
+  // The expensive one is background images. There is no list of them anywhere, so the
+  // only honest way to find them is to read the computed style of every element — and on
+  // almost every app that walk costs more than the whole rest of the shutter and comes
+  // back with nothing, because no rule on the page ever says url(). So the stylesheets
+  // are asked first, in one pass that stops at the first sign of an image, and elements
+  // are only walked when the answer is yes. When they are walked, it is the ones on
+  // screen: an image below the fold is not what delays this paint.
+  //
+  // Being less than exhaustive here cannot produce a wrong picture. This is a head start,
+  // not the guarantee — the guarantee is the settle loop, which refuses to accept any
+  // photograph until two frames in a row are the same frame. An image nobody waited for
+  // costs one more round of settling and nothing else.
   const source = `(async () => {
   var LIMIT = ${timeoutMs};
   var MAX_ELEMENTS = 4000;
+  var MAX_STYLES = 1200;
+  var MAX_RULES = 4000;
   var waits = [];
 
   var imgs = document.images ? Array.prototype.slice.call(document.images) : [];
@@ -180,34 +212,6 @@ export async function waitForImages(page, opts = {}) {
       }));
     })(imgs[i]);
   }
-
-  var urls = {};
-  var all = document.querySelectorAll('*');
-  var count = Math.min(all.length, MAX_ELEMENTS);
-  for (var e = 0; e < count; e++) {
-    var bg = '';
-    try { bg = getComputedStyle(all[e]).backgroundImage; } catch (err) { bg = ''; }
-    if (!bg || bg === 'none' || bg.indexOf('url(') === -1) continue;
-    var chunks = bg.split('url(');
-    for (var c = 1; c < chunks.length; c++) {
-      var end = chunks[c].indexOf(')');
-      if (end < 0) continue;
-      var u = chunks[c].slice(0, end).trim();
-      var first = u.charAt(0);
-      var last = u.charAt(u.length - 1);
-      if ((first === '"' && last === '"') || (first === "'" && last === "'")) u = u.slice(1, -1);
-      // data: URLs are already here by definition; nothing to wait for.
-      if (u && u.slice(0, 5) !== 'data:') urls[u] = true;
-    }
-  }
-  Object.keys(urls).forEach(function (u) {
-    waits.push(new Promise(function (r) {
-      var probe = new Image();
-      probe.onload = r;
-      probe.onerror = r;
-      probe.src = u;
-    }));
-  });
 
   // A stylesheet still in flight repaints the whole page the instant it applies — the
   // worst possible moment for that is one millisecond after the shutter.
@@ -224,6 +228,92 @@ export async function waitForImages(page, opts = {}) {
         link.addEventListener('error', r, { once: true });
       }));
     })(links[l]);
+  }
+
+  // Does any style on this page mention an image at all? One pass, stopping early, over
+  // the declarations themselves rather than their serialised text.
+  var budget = MAX_RULES;
+  function mentionsUrl(style) {
+    if (!style) return false;
+    var props = ['backgroundImage', 'borderImageSource', 'maskImage', 'webkitMaskImage', 'listStyleImage', 'content'];
+    for (var p = 0; p < props.length; p++) {
+      var v = '';
+      try { v = style[props[p]]; } catch (err) { v = ''; }
+      if (v && String(v).indexOf('url(') !== -1) return true;
+    }
+    return false;
+  }
+  function scanRules(rules) {
+    for (var i = 0; i < rules.length; i++) {
+      if (budget <= 0) return true;
+      budget--;
+      var rule = rules[i];
+      if (mentionsUrl(rule.style)) return true;
+      // @media, @supports and @layer hold their rules inside themselves; @import holds a
+      // whole other stylesheet, which never appears in document.styleSheets on its own.
+      var inner = null;
+      try { inner = rule.cssRules || (rule.styleSheet && rule.styleSheet.cssRules); } catch (err) { inner = null; }
+      if (inner === null) return true;
+      if (inner && inner.length && scanRules(inner)) return true;
+    }
+    return false;
+  }
+  function anyImageInCss() {
+    // Inline styles are not in document.styleSheets at all, and this is one indexed query.
+    try { if (document.querySelector('[style*="url("]')) return true; } catch (err) { }
+    // Sheets a framework adopted straight onto the document are not in styleSheets.
+    var sheets = Array.prototype.slice.call(document.styleSheets || []);
+    if (document.adoptedStyleSheets) sheets = sheets.concat(Array.prototype.slice.call(document.adoptedStyleSheets));
+    for (var s = 0; s < sheets.length; s++) {
+      var rules = null;
+      try { rules = sheets[s].cssRules; } catch (err) { rules = null; }
+      // A sheet from another origin will not show its rules. Assume it could be hiding an
+      // image rather than pretend it cannot.
+      if (rules === null) return true;
+      if (scanRules(rules)) return true;
+    }
+    return false;
+  }
+
+  if (anyImageInCss()) {
+    var urls = {};
+    var vw = window.innerWidth || 0;
+    var vh = window.innerHeight || 0;
+    var all = document.querySelectorAll('*');
+    var count = Math.min(all.length, MAX_ELEMENTS);
+    var looked = 0;
+    for (var e = 0; e < count && looked < MAX_STYLES; e++) {
+      var node = all[e];
+      var box = null;
+      try { box = node.getBoundingClientRect(); } catch (err) { box = null; }
+      if (!box || box.width <= 0 || box.height <= 0) continue;
+      // On screen, or one screenful below it — far enough to cover a full-page picture's
+      // first fold without reading the style of a thousand things nobody can see.
+      if (box.bottom < 0 || box.right < 0 || box.left > vw || box.top > vh * 2) continue;
+      looked++;
+      var bg = '';
+      try { bg = getComputedStyle(node).backgroundImage; } catch (err) { bg = ''; }
+      if (!bg || bg === 'none' || bg.indexOf('url(') === -1) continue;
+      var chunks = bg.split('url(');
+      for (var c = 1; c < chunks.length; c++) {
+        var end = chunks[c].indexOf(')');
+        if (end < 0) continue;
+        var u = chunks[c].slice(0, end).trim();
+        var first = u.charAt(0);
+        var last = u.charAt(u.length - 1);
+        if ((first === '"' && last === '"') || (first === "'" && last === "'")) u = u.slice(1, -1);
+        // data: URLs are already here by definition; nothing to wait for.
+        if (u && u.slice(0, 5) !== 'data:') urls[u] = true;
+      }
+    }
+    Object.keys(urls).forEach(function (u) {
+      waits.push(new Promise(function (r) {
+        var probe = new Image();
+        probe.onload = r;
+        probe.onerror = r;
+        probe.src = u;
+      }));
+    });
   }
 
   if (waits.length === 0) return 0;

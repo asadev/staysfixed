@@ -132,4 +132,11 @@ export async function clearResults(paths) {
 /**
  * The .gitignore lines a project needs. Written by `init`, checked by `doctor`.
  */
-export const GITIGNORE_LINES = ['# Stays Fixed — evidence from the last run, not the promise', '.staysfixed/results/', '.staysfixed/report.html'];
+export const GITIGNORE_LINES = [
+  '# Stays Fixed — evidence from the last run, not the promise',
+  '.staysfixed/results/',
+  '.staysfixed/report.html',
+  // Where one person dragged the watch panel on one screen. Nobody else's business,
+  // and it would otherwise turn up in their commits.
+  '.staysfixed/watch-window.json',
+];

@@ -10,7 +10,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { PNG } from 'pngjs';
 
-import { comparePng, describeDifference } from '../src/picture/compare.js';
+import { comparePng, compareFast, describeDifference } from '../src/picture/compare.js';
 import { DEFAULT_TOLERANCE } from '../src/core/config.js';
 
 /**
@@ -191,6 +191,113 @@ describe('the tolerance arithmetic', () => {
 
     assert.equal(comparePng(approved, actual, { threshold: 0.001, pixels: 0 }).equal, false);
     assert.equal(comparePng(approved, actual, { threshold: 0.5, pixels: 0 }).equal, true);
+  });
+});
+
+describe('the short cut for pictures that did not change', () => {
+  /**
+   * A picture with a real header and nothing behind it. Anything that decodes it
+   * throws, so it is how these tests prove no pixels were touched.
+   * @returns {Buffer}
+   */
+  function headerOnly() {
+    // A PNG is an 8-byte signature and then a 25-byte header holding the width
+    // and the height. Everything after that is the picture itself.
+    return makePng(9, 7).subarray(0, 33);
+  }
+
+  test('the same bytes twice is a pass, with the real sizes', () => {
+    const approved = makePng(120, 80);
+    const actual = Buffer.from(approved); // the same bytes, in a different buffer
+
+    const report = compareFast(approved, actual, {});
+    assert.equal(report.equal, true);
+    assert.equal(report.diffPixels, 0);
+    assert.equal(report.diffRatio, 0);
+    assert.equal(report.diffPng, null);
+    assert.equal(report.sizeMismatch, false);
+    assert.deepEqual(report.size, { width: 120, height: 80 });
+    assert.deepEqual(report.approvedSize, { width: 120, height: 80 });
+  });
+
+  test('identical bytes are never decoded at all', () => {
+    // Most screens pass, so most comparisons are of two files that are already
+    // byte for byte the same. Decoding both of them to prove it is the single
+    // biggest waste of time in a run, and this is the test that it stopped.
+    const truncated = headerOnly();
+    // If this ever stops throwing, the picture below became decodable and the
+    // rest of this test proves nothing.
+    assert.throws(() => comparePng(truncated, Buffer.from(truncated), {}), /could not open/);
+
+    const report = compareFast(truncated, Buffer.from(truncated), {});
+    assert.equal(report.equal, true);
+    assert.equal(report.diffPixels, 0);
+    assert.deepEqual(report.size, { width: 9, height: 7 });
+    assert.deepEqual(report.approvedSize, { width: 9, height: 7 });
+  });
+
+  test('when the bytes differ it gives exactly the answer the slow way gives', () => {
+    /** @type {[string, Buffer, Buffer, import('../src/types.js').ToleranceConfig][]} */
+    const cases = [
+      ['one pixel moved', makePng(40, 40), makePng(40, 40, [255, 255, 255], pixel(20, 20)), {}],
+      ['a whole run of pixels', makePng(100, 100), makePng(100, 100, [255, 255, 255], firstPixels(250)), { pixels: 0.5 }],
+      ['inside the allowance', makePng(100, 100), makePng(100, 100, [255, 255, 255], firstPixels(100)), { pixels: 0.01 }],
+      ['a different size', makePng(40, 40), makePng(41, 40), {}],
+      ['a colour that barely moved', makePng(60, 60, [200, 200, 200]), makePng(60, 60, [200, 200, 200], pixel(30, 30, [198, 198, 198])), { threshold: 0.5, pixels: 0 }],
+    ];
+
+    for (const [what, approved, actual, tolerance] of cases) {
+      const slow = comparePng(approved, actual, tolerance);
+      const fast = compareFast(approved, actual, tolerance);
+
+      assert.equal(fast.equal, slow.equal, what);
+      assert.equal(fast.diffPixels, slow.diffPixels, what);
+      assert.equal(fast.diffRatio, slow.diffRatio, what);
+      assert.equal(fast.sizeMismatch, slow.sizeMismatch, what);
+      assert.deepEqual(fast.size, slow.size, what);
+      assert.deepEqual(fast.approvedSize, slow.approvedSize, what);
+      if (slow.diffPng === null) {
+        assert.equal(fast.diffPng, null, what);
+      } else {
+        assert.ok(fast.diffPng, `${what}: the fast way handed back nothing to look at`);
+        assert.ok(
+          Buffer.compare(/** @type {Buffer} */ (fast.diffPng), /** @type {Buffer} */ (slow.diffPng)) === 0,
+          `${what}: the two difference pictures are not the same picture`,
+        );
+      }
+    }
+  });
+
+  test('a mask never changes what the short cut answers', () => {
+    // Masks are painted onto both pictures, so two files that are already byte for
+    // byte the same are still the same after masking. The short cut is only ever
+    // allowed where that reasoning holds, and this is where it is checked.
+    /** @type {import('../src/types.js').MaskRect[]} */
+    const masks = [{ x: 0, y: 0, width: 4, height: 4 }];
+    const approved = makePng(40, 40);
+    const actual = Buffer.from(approved);
+
+    const slow = comparePng(approved, actual, {}, masks);
+    const fast = compareFast(approved, actual, {}, masks);
+    assert.equal(fast.equal, slow.equal);
+    assert.equal(fast.diffPixels, slow.diffPixels);
+    assert.equal(fast.sizeMismatch, slow.sizeMismatch);
+    assert.deepEqual(fast.size, slow.size);
+  });
+
+  test('a mask does not let a real difference through', () => {
+    // The one thing a short cut must never do: agree that two different pictures
+    // are the same because a mask made it lazy.
+    const approved = makePng(40, 40, [255, 255, 255], pixel(10, 10, [0, 0, 0]));
+    const actual = makePng(40, 40, [255, 255, 255], pixel(30, 30, [0, 0, 0]));
+    /** @type {import('../src/types.js').MaskRect[]} */
+    const masks = [{ x: 8, y: 8, width: 8, height: 8 }];
+
+    const slow = comparePng(approved, actual, {}, masks);
+    const fast = compareFast(approved, actual, {}, masks);
+    assert.equal(slow.equal, false, 'the setup is wrong: this pair should differ outside the mask');
+    assert.equal(fast.equal, slow.equal);
+    assert.equal(fast.diffPixels, slow.diffPixels);
   });
 });
 

@@ -16,13 +16,14 @@ import { ensureDirs, clearResults, resultPicture, safeName } from './core/paths.
 import { gitInfo } from './core/git.js';
 import { loadHistory, saveHistory, foldRun, condemned } from './core/history.js';
 import { warn, detail, shortPath } from './core/log.js';
+import { makeTimings, emitEvent } from './core/events.js';
 import { launchApp } from './drive/launch.js';
 import { platformTag } from './drive/find.js';
 import { runPictures } from './picture/run.js';
 import { approveFromResult, listApproved } from './picture/store.js';
 import { loadGuards } from './guard/load.js';
 import { runGuards } from './guard/run.js';
-import { walkApp, writeWalkContactSheet } from './walk/run.js';
+import { walkApp, writeWalkContactSheet, countWalkSteps } from './walk/run.js';
 import { listMarkers } from './marker/mark.js';
 import { writeRunReport } from './report/html.js';
 import { printPictureResult, printGuardResult } from './report/console.js';
@@ -83,6 +84,10 @@ const LAST_RUN = 'last-run.json';
  *   onPicture?: (result: import('./types.js').PictureResult) => void,
  *   onGuard?: (result: import('./types.js').GuardResult) => void,
  *   writeReport?: boolean,
+ *   events?: import('./types.js').RunEvents,
+ *   watching?: boolean,
+ *   onApp?: (app: import('./types.js').LaunchedApp) => Promise<void>,
+ *   timings?: ReturnType<typeof makeTimings>,
  * }} [opts]
  * @returns {Promise<import('./types.js').RunSummary>}
  */
@@ -90,6 +95,12 @@ export async function runCheck(project, opts = {}) {
   const { config, paths } = project;
   const startedAt = new Date();
   const started = Date.now();
+  const events = opts.events;
+  const watching = opts.watching === true;
+  // A run always knows where its time went, whether or not anybody asked. It
+  // costs two numbers per phase, and the alternative is being unable to answer
+  // "why did that take three minutes" without running it all again.
+  const timings = opts.timings ?? makeTimings();
 
   await ensureDirs(paths);
   // Yesterday's evidence goes in the bin before today's is taken. A stale diff
@@ -117,6 +128,17 @@ export async function runCheck(project, opts = {}) {
     });
   }
 
+  emitEvent(events, {
+    type: 'run:start',
+    plan: {
+      screens: screens.length,
+      guards: guards.length,
+      app: describeApp(config.app),
+      project: path.basename(paths.root),
+      watching,
+    },
+  });
+
   const onPicture = opts.onPicture ?? (opts.quiet ? undefined : (/** @type {import('./types.js').PictureResult} */ r) => printPictureResult(r));
   const onGuard = opts.onGuard ?? (opts.quiet ? undefined : (/** @type {import('./types.js').GuardResult} */ r) => printGuardResult(r));
 
@@ -128,24 +150,41 @@ export async function runCheck(project, opts = {}) {
   // Nothing to look at means nothing to open. Starting a browser to check zero
   // screens is thirty seconds of somebody's life for no answer.
   if (screens.length > 0 || guards.length > 0) {
-    await withApp(project, async (app) => {
-      if (screens.length > 0) {
-        pictures = await runPictures(project, app, {
-          only: screens.map((s) => s.name),
-          record: opts.record ?? false,
-          retries: config.retries,
-          tool: TOOL,
-          onResult: onPicture,
-          signal: opts.signal,
-        });
-      }
-      if (guards.length > 0) {
-        guardResults = await runGuards(project, app, guards, {
-          onResult: onGuard,
-          signal: opts.signal,
-        });
-      }
-    });
+    await withApp(
+      project,
+      async (app) => {
+        if (screens.length > 0) {
+          emitEvent(events, { type: 'phase', message: 'photographing' });
+          pictures = await runPictures(project, app, {
+            only: screens.map((s) => s.name),
+            record: opts.record ?? false,
+            retries: config.retries,
+            tool: TOOL,
+            onResult: onPicture,
+            signal: opts.signal,
+            events,
+            timings,
+            // Small pictures cost time to make, so they are only made when there
+            // is a window open to show them in.
+            thumbnail: Boolean(events && watching),
+          });
+        }
+        if (guards.length > 0) {
+          emitEvent(events, { type: 'phase', message: 'running the guards' });
+          const stopGuards = timings.mark('guards');
+          try {
+            guardResults = await runGuards(project, app, guards, {
+              onResult: onGuard,
+              signal: opts.signal,
+              events,
+            });
+          } finally {
+            stopGuards();
+          }
+        }
+      },
+      { events, timings, onApp: opts.onApp },
+    );
   }
 
   const git = await gitInfo(paths.root);
@@ -171,7 +210,7 @@ export async function runCheck(project, opts = {}) {
 
   const totals = countUp(pictures, guardResults);
 
-  /** @type {import('./types.js').RunSummary} */
+  /** @type {import('./types.js').RunSummary & {timings?: import('./types.js').Timings}} */
   const summary = {
     id: runId(startedAt),
     startedAt: startedAt.toISOString(),
@@ -187,6 +226,9 @@ export async function runCheck(project, opts = {}) {
     tool: TOOL,
     platform: platformTag(),
     condemned: condemnedNames,
+    // Read here rather than at the very end: what follows is writing files, and
+    // where the run spent its time is a fact about the run, not about the report.
+    timings: timings.get(),
   };
 
   if (opts.writeReport !== false) {
@@ -203,6 +245,10 @@ export async function runCheck(project, opts = {}) {
   } catch (e) {
     warn(`The run finished, but its result could not be saved for \`staysfixed status\`. ${messageOf(e)}`);
   }
+
+  // Last, so anything watching that closes on the verdict does not race the
+  // report being written.
+  emitEvent(events, { type: 'run:done', summary });
 
   return summary;
 }
@@ -222,7 +268,15 @@ export async function runCheck(project, opts = {}) {
  *
  * @param {import('./types.js').Project} project
  * @param {string} screenName
- * @param {{record?: boolean, retries?: number, signal?: AbortSignal, onResult?: (r: import('./types.js').PictureResult) => void}} [opts]
+ * @param {{
+ *   record?: boolean,
+ *   retries?: number,
+ *   signal?: AbortSignal,
+ *   onResult?: (r: import('./types.js').PictureResult) => void,
+ *   events?: import('./types.js').RunEvents,
+ *   watching?: boolean,
+ *   timings?: ReturnType<typeof makeTimings>,
+ * }} [opts]
  * @returns {Promise<{png: Buffer, result: import('./types.js').PictureResult, path: string}>}
  */
 export async function captureOne(project, screenName, opts = {}) {
@@ -240,16 +294,46 @@ export async function captureOne(project, screenName, opts = {}) {
 
   await ensureDirs(paths);
 
-  const results = await withApp(project, (app) =>
-    runPictures(project, app, {
-      only: [screen.name],
-      record: opts.record ?? false,
-      retries: opts.retries ?? config.retries,
-      tool: TOOL,
-      onResult: opts.onResult,
-      signal: opts.signal,
-    }),
+  const events = opts.events;
+  const watching = opts.watching === true;
+  const timings = opts.timings ?? makeTimings();
+
+  // One screen is still a run as far as anyone watching is concerned, so it
+  // describes itself the same way. This is what lets an agent's own capture be
+  // watched in the same window as a full check.
+  emitEvent(events, {
+    type: 'run:start',
+    plan: {
+      screens: 1,
+      guards: 0,
+      app: describeApp(config.app),
+      project: path.basename(paths.root),
+      watching,
+    },
+  });
+
+  const results = await withApp(
+    project,
+    (app) => {
+      emitEvent(events, { type: 'phase', message: 'photographing' });
+      return runPictures(project, app, {
+        only: [screen.name],
+        record: opts.record ?? false,
+        retries: opts.retries ?? config.retries,
+        tool: TOOL,
+        onResult: opts.onResult,
+        signal: opts.signal,
+        events,
+        timings,
+        thumbnail: Boolean(events && watching),
+      });
+    },
+    { events, timings },
   );
+
+  // Said as soon as the app is shut. What is left is reading a file off disk,
+  // and a watcher should not be left with a spinner turning through it.
+  emitEvent(events, { type: 'run:done' });
 
   const result = results[0];
   if (!result) {
@@ -281,20 +365,57 @@ export async function captureOne(project, screenName, opts = {}) {
  *   signal?: AbortSignal,
  *   onStep?: (update: import('./walk/run.js').WalkProgress) => void,
  *   writeReport?: boolean,
+ *   events?: import('./types.js').RunEvents,
+ *   watching?: boolean,
+ *   onApp?: (app: import('./types.js').LaunchedApp) => Promise<void>,
+ *   timings?: ReturnType<typeof makeTimings>,
  * }} [opts]
  * @returns {Promise<import('./types.js').WalkReport>}
  */
 export async function runWalk(project, opts = {}) {
   await ensureDirs(project.paths);
 
-  const report = await withApp(project, (app) =>
-    walkApp(project, app, {
-      only: opts.only,
-      record: opts.record ?? false,
-      onStep: opts.onStep,
-      signal: opts.signal,
-    }),
+  const events = opts.events;
+  const watching = opts.watching === true;
+  // The caller's stopwatch when it brought one — `--profile` reads it back out
+  // afterwards, so a walk that quietly kept its own would print all zeros.
+  const timings = opts.timings ?? makeTimings();
+
+  emitEvent(events, {
+    type: 'run:start',
+    plan: {
+      // Counted before anything is opened so the window can draw the whole list
+      // straight away. A walk with nothing to walk through says nothing here and
+      // fails a moment later, in one place, with a sentence a person can act on.
+      screens: countWalk(project.config, opts.only),
+      guards: 0,
+      app: describeApp(project.config.app),
+      project: path.basename(project.paths.root),
+      watching,
+    },
+  });
+
+  const report = await withApp(
+    project,
+    (app) => {
+      emitEvent(events, { type: 'phase', message: 'photographing' });
+      return walkApp(project, app, {
+        only: opts.only,
+        record: opts.record ?? false,
+        onStep: opts.onStep,
+        signal: opts.signal,
+        events,
+        thumbnail: Boolean(events && watching),
+        timings,
+      });
+    },
+    { events, timings, onApp: opts.onApp },
   );
+
+  // A walk has no verdict to hand over — the pictures are the point — so this
+  // says only that it is over. Said here, with the app shut and every photo
+  // taken; the page that shows them is written after.
+  emitEvent(events, { type: 'run:done' });
 
   if (opts.writeReport === false) return report;
 
@@ -441,21 +562,90 @@ export async function approveScreens(project, names, opts = {}) {
  * Electron window left running is a leaked process on somebody's machine, and
  * the next run will fight it for the debug port.
  *
+ * `onApp` is the one hook in here. It is handed the app the moment it is open
+ * and before a single picture is taken, which is what lets the watch panel put
+ * itself beside a window that did not exist when the panel opened. It moves
+ * windows around a desk; it never touches the page, and the picture comes from
+ * the viewport the capture sets, not from the window — so where the window ends
+ * up cannot change what was photographed.
+ *
  * @template T
  * @param {import('./types.js').Project} project
  * @param {(app: import('./types.js').LaunchedApp) => Promise<T>} work
+ * @param {{
+ *   events?: import('./types.js').RunEvents,
+ *   timings?: ReturnType<typeof makeTimings>,
+ *   onApp?: (app: import('./types.js').LaunchedApp) => Promise<void>,
+ * }} [ctx]
  * @returns {Promise<T>}
  */
-async function withApp(project, work) {
-  const app = await launchApp(project);
+async function withApp(project, work, ctx = {}) {
+  emitEvent(ctx.events, { type: 'phase', message: 'opening the app' });
+  const stopLaunch = ctx.timings?.mark('launch');
+  // Stopped even when the app never opened: a launch that gave up after fifty
+  // seconds is exactly the number somebody wants to see.
+  const app = await launchApp(project).finally(() => stopLaunch?.());
+  if (ctx.onApp) {
+    try {
+      await ctx.onApp(app);
+    } catch (e) {
+      // Whatever wanted a look at the app is a spectator. A spectator that
+      // trips over must not take the run down with it, and is not worth a
+      // warning in the middle of a clean one.
+      detail(`Something watching this run could not be shown the app. ${messageOf(e)}`);
+    }
+  }
   try {
     return await work(app);
   } finally {
+    emitEvent(ctx.events, { type: 'phase', message: 'closing' });
     try {
       await app.close();
     } catch (e) {
       warn(`The app could not be closed cleanly. ${messageOf(e)}`);
     }
+  }
+}
+
+/**
+ * How many screens a walk will visit, or none when there is nothing to walk.
+ *
+ * @param {import('./types.js').ResolvedConfig} config
+ * @param {string|string[]} [only]
+ * @returns {number}
+ */
+function countWalk(config, only) {
+  try {
+    return countWalkSteps(config, only);
+  } catch {
+    // Nothing to walk through. The walk itself says so properly, in one place.
+    return 0;
+  }
+}
+
+/**
+ * The app being opened, in a few words: what kind it is and which one it is.
+ *
+ * A watcher shows this at the top of a narrow panel, so the whole path or the
+ * whole address would be noise — the name of the binary, or the host being
+ * opened, is what a person recognises.
+ *
+ * @param {import('./types.js').AppConfig} app
+ * @returns {string}
+ */
+function describeApp(app) {
+  if (app.kind === 'electron') {
+    const binary = app.binary ?? app.attach ?? '';
+    return binary ? `electron — ${path.basename(binary)}` : 'electron';
+  }
+  const url = app.url ?? app.attach ?? '';
+  if (!url) return 'web';
+  try {
+    // A web address has no useful last part — "/" is not a name — so the host is
+    // what gets shown: "web — localhost:5173".
+    return `web — ${new URL(url).host || url}`;
+  } catch {
+    return `web — ${url}`;
   }
 }
 

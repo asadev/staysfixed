@@ -13,6 +13,66 @@ import pixelmatch from 'pixelmatch';
 import { paintMasks } from '../freeze/mask.js';
 import { DEFAULT_TOLERANCE } from '../core/config.js';
 import { StaysFixedError } from '../core/errors.js';
+import { pngSize } from './capture.js';
+
+/**
+ * Whether two pictures are the very same file.
+ * @param {Buffer} a
+ * @param {Buffer} b
+ * @returns {boolean}
+ */
+export function sameBytes(a, b) {
+  return Boolean(a) && Boolean(b) && a.length === b.length && a.equals(b);
+}
+
+/**
+ * The same comparison, without the work when there is nothing to compare.
+ *
+ * On a healthy project every screen is unchanged, which means the new picture is the very
+ * same file as the approved one — the encoder is deterministic, so identical pixels
+ * produce identical bytes. Decoding two full retina PNGs to prove that costs a quarter of
+ * a second per screen, every run, to reach a conclusion the file lengths already gave
+ * away.
+ *
+ * This is not a looser check, it is the same answer arrived at honestly. Identical bytes
+ * are identical pixels, so nothing differs, so nothing can exceed any allowance. Masks do
+ * not change that: a mask paints the same rectangle onto both pictures, and painting the
+ * same thing onto two identical pictures leaves them identical. The size comes out of the
+ * PNG header, which is where `comparePng` would have got it too.
+ *
+ * @param {Buffer} approvedBuf
+ * @param {Buffer} actualBuf
+ * @param {import('../types.js').ToleranceConfig} tolerance
+ * @param {import('../types.js').MaskRect[]} [maskRects]
+ * @returns {import('../types.js').CompareReport}
+ */
+export function compareFast(approvedBuf, actualBuf, tolerance, maskRects = []) {
+  if (sameBytes(approvedBuf, actualBuf)) {
+    try {
+      const size = pngSize(actualBuf);
+      const allowed =
+        tolerance.maxPixels ??
+        Math.floor(size.width * size.height * (tolerance.pixels ?? DEFAULT_TOLERANCE.pixels));
+      // A negative allowance is a setting that says even a perfect match is a failure.
+      // Nonsense, but it is the caller's nonsense, and the long way round is the only one
+      // that can answer it the same way it always has.
+      if (allowed >= 0) {
+        return {
+          equal: true,
+          diffPixels: 0,
+          diffRatio: 0,
+          diffPng: null,
+          sizeMismatch: false,
+          size,
+          approvedSize: { width: size.width, height: size.height },
+        };
+      }
+    } catch {
+      // Not a readable PNG header. Let the full path throw the sentence it always throws.
+    }
+  }
+  return comparePng(approvedBuf, actualBuf, tolerance, maskRects);
+}
 
 /**
  * @param {Buffer} approvedBuf

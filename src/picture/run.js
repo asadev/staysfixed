@@ -12,8 +12,8 @@
  */
 
 import { captureScreen } from './capture.js';
-import { comparePng, describeDifference } from './compare.js';
-import { readApproved, writeResult, writeDiff, approveFromResult } from './store.js';
+import { compareFast, describeDifference } from './compare.js';
+import { readApproved, writeResult, writeDiff, approveFromResult, thumbnailOf } from './store.js';
 import { settingsForScreen } from '../core/config.js';
 import { approvedPicture, resultPicture } from '../core/paths.js';
 import { platformTag } from '../drive/find.js';
@@ -21,11 +21,25 @@ import { resetWindow } from '../drive/launch.js';
 import { gitInfo } from '../core/git.js';
 import { messageOf } from '../core/errors.js';
 import { detail } from '../core/log.js';
+import { emitEvent } from '../core/events.js';
 
 /**
  * A picture result plus the one extra fact the flake register needs: whether it
  * only agreed with the approved picture after being photographed again.
  * @typedef {import('../types.js').PictureResult & {retriedToPass?: boolean}} PictureRunResult
+ */
+
+/**
+ * The small pictures a watcher is shown, filled in as a screen is worked on.
+ *
+ * They are kept apart from the result on purpose. A result is written to disk and
+ * read back by `approve` and `status`, and a base64 picture in there would bloat
+ * every saved run for the sake of a panel that was only open for a minute.
+ *
+ * @typedef {object} Thumbs
+ * @property {string} [shot]        The picture just taken.
+ * @property {string} [approved]    The approved picture, when this screen changed.
+ * @property {string} [diff]        What moved, when this screen changed.
  */
 
 /**
@@ -39,6 +53,9 @@ import { detail } from '../core/log.js';
  *   retries?: number,
  *   tool?: string,
  *   signal?: AbortSignal,
+ *   events?: import('../types.js').RunEvents,
+ *   timings?: ReturnType<typeof import('../core/events.js').makeTimings>,
+ *   thumbnail?: boolean,
  * }} [opts]
  * @returns {Promise<PictureRunResult[]>}
  */
@@ -53,48 +70,118 @@ export async function runPictures(project, app, opts = {}) {
   // A desktop app has no url to go back to between screens, so it gets a reload instead.
   // A web app does not need one: every screen starts with a `goto`.
   const reset = config.app.kind === 'electron' ? () => resetWindow(app) : undefined;
+  const events = opts.events;
+
+  // Which screens are being photographed is settled before the first shutter, so
+  // anyone watching can be told how many there are and where each one sits in the
+  // queue rather than watching a list of unknown length crawl past.
+  const chosen = config.screens.filter((screen) => !only || only.has(screen.name));
+  const total = chosen.length;
 
   /** @type {PictureRunResult[]} */
   const results = [];
 
-  for (const screen of config.screens) {
+  for (let i = 0; i < chosen.length; i++) {
     if (opts.signal?.aborted) break;
-    if (only && !only.has(screen.name)) continue;
+    const screen = chosen[i];
+
+    emitEvent(events, {
+      type: 'screen:start',
+      name: screen.name,
+      describe: screen.describe,
+      index: i + 1,
+      total,
+    });
 
     if (screen.skip) {
-      results.push(
-        finish(opts, {
-          name: screen.name,
-          describe: screen.describe,
-          status: 'skipped',
-          message: `${screen.name} is switched off in the config.`,
-          durationMs: 0,
-        }),
-      );
+      const skipped = finish(opts, {
+        name: screen.name,
+        describe: screen.describe,
+        status: 'skipped',
+        message: `${screen.name} is switched off in the config.`,
+        durationMs: 0,
+      });
+      results.push(skipped);
+      emitDone(events, skipped, {});
       continue;
     }
 
-    results.push(
-      await runOneScreen(project, page, screen, {
-        record: opts.record,
-        updateNew: opts.updateNew,
-        tool: opts.tool,
-        onResult: opts.onResult,
-        retries,
-        here,
-        reset,
-      }),
-    );
+    // Filled in as the screen is worked on, and read once it is finished. The
+    // thumbnails exist only while somebody is watching, so they travel beside the
+    // result instead of inside it.
+    /** @type {Thumbs} */
+    const thumbs = {};
+
+    const result = await runOneScreen(project, page, screen, {
+      record: opts.record,
+      updateNew: opts.updateNew,
+      tool: opts.tool,
+      onResult: opts.onResult,
+      retries,
+      here,
+      reset,
+      events,
+      timings: opts.timings,
+      thumbnail: opts.thumbnail === true,
+      thumbs,
+    });
+    results.push(result);
+    emitDone(events, result, thumbs);
   }
 
   return results;
 }
 
 /**
+ * Tell anyone watching how a screen turned out, with the pictures if there are any.
+ *
+ * @param {import('../types.js').RunEvents|undefined} events
+ * @param {PictureRunResult} result
+ * @param {Thumbs} thumbs
+ * @returns {void}
+ */
+function emitDone(events, result, thumbs) {
+  emitEvent(events, {
+    type: 'screen:done',
+    name: result.name,
+    describe: result.describe,
+    status: result.status,
+    durationMs: result.durationMs,
+    diffPixels: result.diffPixels,
+    diffRatio: result.diffRatio,
+    message: result.message,
+    thumbnail: thumbs.shot,
+    approvedThumb: thumbs.approved,
+    diffThumb: thumbs.diff,
+  });
+}
+
+/**
+ * Everything one screen needs, including where to leave what it learns.
+ *
+ * `thumbs` is written into rather than returned because a screen can finish down
+ * half a dozen different paths, and threading a second return value through all
+ * of them would bury the thing this function is actually for.
+ *
+ * @typedef {object} ScreenCtx
+ * @property {boolean} [record]
+ * @property {boolean} [updateNew]
+ * @property {string} [tool]
+ * @property {(r: PictureRunResult) => void} [onResult]
+ * @property {number} retries
+ * @property {string} here
+ * @property {() => Promise<void>} [reset]
+ * @property {import('../types.js').RunEvents} [events]
+ * @property {ReturnType<typeof import('../core/events.js').makeTimings>} [timings]
+ * @property {boolean} [thumbnail]        Make the small pictures a watcher needs.
+ * @property {Thumbs} [thumbs]            Where those small pictures are left.
+ */
+
+/**
  * @param {import('../types.js').Project} project
  * @param {import('../types.js').PageHandle} page
  * @param {import('../types.js').ScreenConfig} screen
- * @param {{record?: boolean, updateNew?: boolean, tool?: string, onResult?: (r: PictureRunResult) => void, retries: number, here: string, reset?: () => Promise<void>}} ctx
+ * @param {ScreenCtx} ctx
  * @returns {Promise<PictureRunResult>}
  */
 async function runOneScreen(project, page, screen, ctx) {
@@ -132,9 +219,19 @@ async function runOneScreen(project, page, screen, ctx) {
         fixturesDir: paths.fixtures,
         record: ctx.record ?? false,
         timeoutMs: settings.freeze.settle?.timeoutMs,
+        thumbnail: ctx.thumbnail === true,
       });
+      accountForCapture(ctx.timings, shot);
       consoleErrors = shot.consoleErrors;
       size = { width: shot.width, height: shot.height };
+
+      // Said out loud the moment the shutter fires, before anything is compared,
+      // so a person watching sees the picture appear while the run is still
+      // deciding what it thinks of it.
+      if (shot.thumbnail) {
+        if (ctx.thumbs) ctx.thumbs.shot = shot.thumbnail;
+        emitEvent(ctx.events, { type: 'screen:shot', name: screen.name, thumbnail: shot.thumbnail });
+      }
 
       await writeResult(paths, screen.name, shot.png, {
         deviceScaleFactor: settings.viewport.deviceScaleFactor,
@@ -143,7 +240,13 @@ async function runOneScreen(project, page, screen, ctx) {
 
       if (!approved) break;
 
-      compare = comparePng(approved.png, shot.png, settings.tolerance, shot.masks);
+      const stopCompare = ctx.timings?.mark('compare');
+      // compareFast, not comparePng: identical bytes are answered from the PNG header
+      // instead of decoding two retina images pixel by pixel. Nothing changed on most
+      // screens on most runs, so this is the case that actually happens — it took the
+      // comparing stage from about a quarter of a second a screen to nothing at all.
+      compare = compareFast(approved.png, shot.png, settings.tolerance, shot.masks);
+      stopCompare?.();
       if (compare.equal) break;
       if (attempt <= ctx.retries) {
         detail(`${screen.name} looked different on attempt ${attempt} — taking it again.`);
@@ -239,6 +342,14 @@ async function runOneScreen(project, page, screen, ctx) {
   let diffPath;
   if (compare.diffPng) diffPath = await writeDiff(paths, screen.name, compare.diffPng);
 
+  // Only for a screen that actually moved, and only when somebody is watching:
+  // this is the one moment a person wants the approved picture and the difference
+  // side by side with the new one.
+  if (ctx.thumbnail === true && ctx.thumbs) {
+    ctx.thumbs.approved = (await thumbnailOf(approved.png)) ?? undefined;
+    if (compare.diffPng) ctx.thumbs.diff = (await thumbnailOf(compare.diffPng)) ?? undefined;
+  }
+
   const what = describeDifference(compare, screen.name);
   const next = compare.sizeMismatch
     ? 'There is no difference picture for a size change — open the new picture and look at it.'
@@ -250,6 +361,32 @@ async function runOneScreen(project, page, screen, ctx) {
     diffPath,
     message: join(what, next, platformNote),
   });
+}
+
+/**
+ * Put the time one picture took into the buckets it belongs in. The walk uses
+ * this too, so a walkthrough and a check file their time the same way.
+ *
+ * Only capture knows how its own milliseconds went, so it says, and this puts
+ * what it said where the profile can find it. If it ever stops saying, the one
+ * number still worth claiming is how long the screen was held still before the
+ * shutter; the rest goes unclaimed into `other` rather than being guessed at,
+ * because a made-up profile is worse than a missing one.
+ *
+ * @param {ReturnType<typeof import('../core/events.js').makeTimings>|undefined} timings
+ * @param {Awaited<ReturnType<typeof captureScreen>>} shot
+ * @returns {void}
+ */
+export function accountForCapture(timings, shot) {
+  if (!timings) return;
+  const reported = shot.timings;
+  if (reported) {
+    timings.add('steps', reported.steps);
+    timings.add('prepare', reported.prepare);
+    timings.add('settle', reported.settle);
+    return;
+  }
+  if (shot.settle) timings.add('settle', shot.settle.waitedMs);
 }
 
 /**

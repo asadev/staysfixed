@@ -10,6 +10,7 @@
 
 import { makeGuardApi, ExpectationFailed } from './api.js';
 import { resetWindow } from '../drive/launch.js';
+import { emitEvent } from '../core/events.js';
 
 const DEFAULT_TIMEOUT = 30_000;
 
@@ -30,11 +31,18 @@ const DEFAULT_TIMEOUT = 30_000;
  * @param {import('../types.js').Project} project
  * @param {import('../types.js').LaunchedApp} app
  * @param {import('../types.js').Guard[]} guards
- * @param {{onResult?: (result: GuardRunResult) => void, retries?: number, signal?: AbortSignal}} [opts]
+ * @param {{
+ *   onResult?: (result: GuardRunResult) => void,
+ *   retries?: number,
+ *   signal?: AbortSignal,
+ *   events?: import('../types.js').RunEvents,
+ * }} [opts]
  * @returns {Promise<import('../types.js').GuardResult[]>}
  */
 export async function runGuards(project, app, guards, opts = {}) {
   const retries = Math.max(0, Math.trunc(opts.retries ?? 0));
+  const events = opts.events;
+  const total = guards.length;
 
   // Electron apps have no address to go back to; for the web the configured url
   // is the guard's starting line.
@@ -43,12 +51,24 @@ export async function runGuards(project, app, guards, opts = {}) {
   /** @type {GuardRunResult[]} */
   const results = [];
 
-  for (const guard of guards) {
+  for (let i = 0; i < guards.length; i++) {
+    const guard = guards[i];
     // Between guards only — stopping one halfway would leave the app in a state
     // the next run cannot reason about.
     if (opts.signal?.aborted) break;
 
     const startedAt = Date.now();
+
+    // The story of the bug goes out with the start, not only with a failure: a
+    // person watching a guard run wants to know what it is protecting while it is
+    // still running, not after it has already gone red.
+    emitEvent(events, {
+      type: 'guard:start',
+      name: guard.name,
+      because: guard.because,
+      index: i + 1,
+      total,
+    });
 
     if (guard.skip === true) {
       /** @type {GuardRunResult} */
@@ -63,6 +83,7 @@ export async function runGuards(project, app, guards, opts = {}) {
       };
       results.push(skipped);
       opts.onResult?.(skipped);
+      emitGuardDone(events, skipped);
       continue;
     }
 
@@ -100,9 +121,27 @@ export async function runGuards(project, app, guards, opts = {}) {
 
     results.push(result);
     opts.onResult?.(result);
+    emitGuardDone(events, result);
   }
 
   return results;
+}
+
+/**
+ * @param {import('../types.js').RunEvents|undefined} events
+ * @param {GuardRunResult} result
+ * @returns {void}
+ */
+function emitGuardDone(events, result) {
+  emitEvent(events, {
+    type: 'guard:done',
+    name: result.name,
+    status: result.status,
+    durationMs: result.durationMs,
+    message: result.message,
+    failedAt: result.failedAt,
+    because: result.because,
+  });
 }
 
 /**

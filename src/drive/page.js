@@ -15,6 +15,7 @@ import { Buffer } from 'node:buffer';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { StaysFixedError } from '../core/errors.js';
 import { detail } from '../core/log.js';
+import { waitForQuietDom } from './launch.js';
 
 /**
  * Keys `press()` understands by name. Anything else is sent as literal text.
@@ -49,6 +50,18 @@ const MAX_CONSOLE_ERRORS = 50;
 
 /** Chrome cannot paint a picture wider or taller than this. */
 const MAX_CAPTURE_SIDE = 16384;
+
+/**
+ * After a click, how long the page has to stay unchanged before we call it finished,
+ * and how long we are prepared to wait for that.
+ *
+ * Both are deliberately small. This is here to replace the `{ wait: 400 }` people write
+ * because they are guessing, so it has to be quicker than the guess on a page that has
+ * already finished and it must never become the slow part of a run on a page that fidgets
+ * forever — the settle loop is the real guarantee, not this.
+ */
+const CLICK_QUIET_MS = 120;
+const CLICK_QUIET_CAP_MS = 1500;
 
 /**
  * Seconds, written the way a person says them: 15, 1.5, 0.5.
@@ -518,8 +531,17 @@ export async function createPage(cdp, opts) {
   }
 
   /**
+   * Click something, and by default wait for the page to finish reacting.
+   *
+   * `settle` is the reason a screen recipe does not need `{ wait: 400 }` after a click.
+   * A hand-written wait is always a guess: too short and the picture catches the screen
+   * half-drawn, too long and every run pays for it forever. Instead we watch the page
+   * itself and carry on the moment it stops changing — usually in a fraction of the time
+   * somebody would have guessed. Pass `{ settle: false }` for a click that deliberately
+   * starts something you want to photograph while it is still happening.
+   *
    * @param {string} selector
-   * @param {{timeoutMs?: number}} [o]
+   * @param {{timeoutMs?: number, settle?: boolean}} [o]
    * @returns {Promise<void>}
    */
   async function click(selector, o) {
@@ -543,7 +565,10 @@ export async function createPage(cdp, opts) {
       await send('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', buttons: 0 });
       await send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons: 1 });
       await send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0 });
-      if (await heard()) return;
+      if (await heard()) {
+        await settleAfterClick(o);
+        return;
+      }
       detail(`click on ${selector} was not delivered (try ${attempt} of ${attempts})`);
       await sleep(120);
     }
@@ -556,6 +581,25 @@ export async function createPage(cdp, opts) {
     if (!done) {
       throw new StaysFixedError(`Could not click "${selector}" — it disappeared while I was trying.`);
     }
+    await settleAfterClick(o);
+  }
+
+  /**
+   * Give whatever the click started a chance to finish.
+   *
+   * `waitForQuietDom` wants the whole launched app because that is what everything else
+   * hands it; all it ever touches is `page.evaluate`, and here the page is the one being
+   * built, so it is handed exactly that.
+   *
+   * @param {{settle?: boolean}} [o]
+   * @returns {Promise<void>}
+   */
+  async function settleAfterClick(o) {
+    if (o?.settle === false) return;
+    const asApp = /** @type {import('../types.js').LaunchedApp} */ (
+      /** @type {unknown} */ ({ page: { evaluate } })
+    );
+    await waitForQuietDom(asApp, { quietMs: CLICK_QUIET_MS, timeoutMs: CLICK_QUIET_CAP_MS });
   }
 
   /**
@@ -845,7 +889,16 @@ export async function createPage(cdp, opts) {
   }
 
   /**
-   * @param {import('../types.js').CaptureOptions} [captureOpts]
+   * Take a picture of the window.
+   *
+   * `format: 'jpeg'` with a `quality` exists for one caller: the settle loop, which
+   * shoots the same screen over and over only to ask whether anything moved. Those frames
+   * are thrown away, never compared against an approved picture and never written to
+   * disk, so a cheap lossy encode is the right tool — it costs a fraction of a full-size
+   * retina PNG and two JPEGs of one unchanged frame are byte-for-byte identical, which is
+   * the whole question. Every kept picture is a PNG, which is the default.
+   *
+   * @param {import('../types.js').CaptureOptions & {format?: 'png'|'jpeg', quality?: number}} [captureOpts]
    * @returns {Promise<Buffer>}
    */
   async function shoot(captureOpts) {
@@ -891,12 +944,15 @@ export async function createPage(cdp, opts) {
       };
     }
 
+    const jpeg = o.format === 'jpeg';
     /** @type {Record<string, unknown>} */
     const params = {
-      format: 'png',
+      format: jpeg ? 'jpeg' : 'png',
       captureBeyondViewport: Boolean(o.fullPage),
       fromSurface: true,
     };
+    // Chrome ignores quality on a PNG, and refuses a value outside 0..100.
+    if (jpeg) params.quality = Math.max(0, Math.min(100, Math.round(o.quality ?? 50)));
     if (clip) params.clip = clip;
 
     const res = await send('Page.captureScreenshot', params);

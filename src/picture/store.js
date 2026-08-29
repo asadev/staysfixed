@@ -9,11 +9,19 @@
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { PNG } from 'pngjs';
 import { approvedPicture, resultPicture, safeName } from '../core/paths.js';
 import { sha256 } from '../core/hash.js';
 import { StaysFixedError } from '../core/errors.js';
 import { platformTag } from '../drive/find.js';
 import { pngSize } from './capture.js';
+
+/**
+ * How wide a thumbnail is, in real pixels. Wide enough to stay sharp in a panel a few
+ * hundred pixels across on a retina screen, small enough that a run can put dozens of
+ * them down a wire without anybody noticing.
+ */
+const THUMBNAIL_WIDTH = 320;
 
 /**
  * A small note written beside a result picture so `approve` knows things the PNG
@@ -22,6 +30,63 @@ import { pngSize } from './capture.js';
  * @property {number} [deviceScaleFactor]
  * @property {string} [describe]
  */
+
+/**
+ * A small copy of a picture, ready to drop straight into a page.
+ *
+ * This is for watching a run happen, so it is built from the finished picture rather than
+ * asked of the app again: what a watcher sees is exactly what was compared, blackout
+ * boxes and all, and never a second photograph taken a moment later that shows something
+ * slightly different.
+ *
+ * Points are sampled rather than averaged. Averaging every pixel of a retina screenshot
+ * costs a fifth of a second per screen and buys smoother edges on a picture two inches
+ * wide; the point of the panel is to watch a run at full speed.
+ *
+ * @param {Buffer} png
+ * @returns {Promise<string|null>} a data: address for an <img>, or null if it cannot be read
+ */
+export async function thumbnailOf(png) {
+  try {
+    const full = PNG.sync.read(png);
+    if (!(full.width > 0) || !(full.height > 0)) return null;
+    const step = full.width > THUMBNAIL_WIDTH ? full.width / THUMBNAIL_WIDTH : 1;
+    const width = Math.max(1, Math.round(full.width / step));
+    const height = Math.max(1, Math.round(full.height / step));
+
+    const small = new PNG({ width, height });
+    for (let y = 0; y < height; y += 1) {
+      const sourceRow = Math.min(full.height - 1, Math.floor(y * step)) * full.width;
+      for (let x = 0; x < width; x += 1) {
+        const from = (sourceRow + Math.min(full.width - 1, Math.floor(x * step))) * 4;
+        const to = (y * width + x) * 4;
+        small.data[to] = full.data[from];
+        small.data[to + 1] = full.data[from + 1];
+        small.data[to + 2] = full.data[from + 2];
+        small.data[to + 3] = full.data[from + 3];
+      }
+    }
+    return `data:image/png;base64,${PNG.sync.write(small).toString('base64')}`;
+  } catch {
+    // A picture nobody can decode is not worth failing a run over — the run itself has
+    // already said what it thinks of the screen, and a watcher simply sees no picture.
+    return null;
+  }
+}
+
+/**
+ * The fingerprint of a picture.
+ *
+ * The same sha256 that is written into an approved picture's note, so anyone holding that
+ * note can tell whether a fresh photograph is the same file without reading the old one
+ * off disk or decoding either of them.
+ *
+ * @param {Buffer|Uint8Array|string} buffer
+ * @returns {string} hex sha256
+ */
+export function fingerprint(buffer) {
+  return sha256(buffer);
+}
 
 /**
  * @param {import('../types.js').ProjectPaths} paths

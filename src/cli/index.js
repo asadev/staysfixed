@@ -68,6 +68,25 @@ const GLOBAL_SPEC = {
 /** Flags that swallow the next word, needed before we know which command it is. */
 const GLOBAL_VALUE_FLAGS = new Set(['--config', '--cwd']);
 
+/**
+ * The live panel and the profiler. Both `check` and `walk` take them, and they
+ * are declared once here so the two commands cannot drift apart.
+ */
+const WATCH_SPEC = {
+  booleans: ['watch', 'watch-front', 'keep-open', 'profile'],
+  strings: ['watch-side', 'watch-width'],
+};
+
+/** @type {[string, string][]} */
+const WATCH_OPTIONS = [
+  ['--watch', 'Open a small panel beside your app and watch the run happen.'],
+  ['--watch-side <side>', 'Which side of the app the panel sits on: left or right. Default right.'],
+  ['--watch-width <n>', 'How wide the panel is, in pixels. Default 460.'],
+  ['--no-keep-open', 'Close the panel as soon as the run finishes.'],
+  ['--watch-front', 'Bring the panel to the front. By default it opens behind your work.'],
+  ['--profile', 'Print where the time went when the run is over.'],
+];
+
 /** @type {Record<string, CommandEntry>} */
 const COMMANDS = {
   init: {
@@ -85,7 +104,7 @@ const COMMANDS = {
   },
   check: {
     summary: 'Photograph the screens and run the guards. This is the one you run.',
-    usage: 'staysfixed check [--only <name>] [--guards] [--pictures] [--json]',
+    usage: 'staysfixed check [--only <name>] [--guards] [--pictures] [--watch] [--json]',
     describe:
       'Opens the real app, takes a picture of every screen you named, compares each one\nagainst the picture a human approved, and runs every guard. It stops on nothing:\nyou get the whole list of what changed, and the exact command to accept it.',
     options: [
@@ -95,9 +114,19 @@ const COMMANDS = {
       ['--record', 'Save the network replies this run, so later runs can replay them.'],
       ['--no-report', 'Skip writing the side-by-side HTML report.'],
       ['--json', 'Print the result as JSON and nothing else. For CI.'],
+      ...WATCH_OPTIONS,
     ],
-    examples: ['staysfixed check', 'staysfixed check --only sessions-empty', 'staysfixed check --guards'],
-    spec: { booleans: ['guards', 'pictures', 'record', 'report', 'json'], arrays: ['only'] },
+    examples: [
+      'staysfixed check',
+      'staysfixed check --only sessions-empty',
+      'staysfixed check --guards',
+      'staysfixed check --watch',
+    ],
+    spec: {
+      booleans: ['guards', 'pictures', 'record', 'report', 'json', ...WATCH_SPEC.booleans],
+      strings: [...WATCH_SPEC.strings],
+      arrays: ['only'],
+    },
     load: () => import('./check.js'),
   },
   approve: {
@@ -115,15 +144,20 @@ const COMMANDS = {
   },
   walk: {
     summary: 'Open the real app and photograph every screen, in order, before you ship.',
-    usage: 'staysfixed walk [--only <name>] [--open]',
+    usage: 'staysfixed walk [--only <name>] [--open] [--watch]',
     describe:
       'A walk is not a test. It opens the app you are about to release, visits each screen\nand photographs it into one page you can scroll — the last look before a release,\nwithout clicking through the app yourself.',
     options: [
       ['--only <name>', 'Just this screen. Repeat it for several.'],
       ['--open', 'Open the contact sheet when it is done.'],
+      ...WATCH_OPTIONS,
     ],
-    examples: ['staysfixed walk --open'],
-    spec: { booleans: ['open'], arrays: ['only'] },
+    examples: ['staysfixed walk --open', 'staysfixed walk --watch'],
+    spec: {
+      booleans: ['open', ...WATCH_SPEC.booleans],
+      strings: [...WATCH_SPEC.strings],
+      arrays: ['only'],
+    },
     load: () => import('./walk.js'),
   },
   mark: {
@@ -263,6 +297,74 @@ function contextFor(parsed, cwd, configFile) {
       return [];
     },
   };
+}
+
+/**
+ * What the panel flags on the command line asked for. Anything the person did
+ * not mention is left undefined on purpose, so the settings file still decides it.
+ *
+ * @typedef {object} WatchFlags
+ * @property {boolean} enabled          Whether --watch was asked for at all.
+ * @property {'left'|'right'} [side]
+ * @property {number} [width]
+ * @property {boolean} [keepOpen]
+ * @property {boolean} [foreground]
+ */
+
+/**
+ * Read the panel flags. Shared by `check` and `walk` so the two behave the same.
+ * @param {CliContext} ctx
+ * @returns {WatchFlags}
+ */
+export function watchFlags(ctx) {
+  /** @type {WatchFlags} */
+  const flags = { enabled: ctx.bool('watch') };
+
+  const side = ctx.str('watch-side');
+  if (side !== undefined) {
+    if (side !== 'left' && side !== 'right') {
+      throw new StaysFixedError(`--watch-side has to be left or right, not "${side}".`, {
+        hint: 'Write it as `--watch-side left` or `--watch-side right`.',
+      });
+    }
+    flags.side = side;
+  }
+
+  const width = ctx.str('watch-width');
+  if (width !== undefined) {
+    const n = Number(width);
+    // A panel narrower than this cannot show the before-and-after pictures side
+    // by side, which is the only reason to open it.
+    if (!Number.isFinite(n) || n < 240) {
+      throw new StaysFixedError(`--watch-width has to be a number of pixels, 240 or more — I got "${width}".`, {
+        hint: 'Write it as `--watch-width 520`.',
+      });
+    }
+    flags.width = Math.round(n);
+  }
+
+  // Only mention these when they were actually typed, so --no-keep-open turns the
+  // panel off at the end without a bare --watch turning it on against the settings.
+  if (ctx.flags['keep-open'] !== undefined) flags.keepOpen = ctx.flags['keep-open'] === true;
+  if (ctx.bool('watch-front')) flags.foreground = true;
+
+  return flags;
+}
+
+/**
+ * The panel settings a project's settings file carries, if it carries any.
+ *
+ * A settings file may hold a `watch` block, and the resolved config type does not
+ * describe one, so it is read through a shape that names exactly what is being
+ * looked for rather than reaching in through `any`.
+ *
+ * @param {import('../types.js').Project} project
+ * @returns {{watch?: import('../types.js').WatchOptions|boolean}}
+ */
+export function watchSettings(project) {
+  return /** @type {{watch?: import('../types.js').WatchOptions|boolean}} */ (
+    /** @type {unknown} */ (project.config ?? {})
+  );
 }
 
 /**
@@ -484,6 +586,7 @@ function printHelp() {
   out('  staysfixed check                    check every screen and guard');
   out('  staysfixed approve sessions-empty   accept one new picture as correct');
   out('  staysfixed walk --open              photograph the whole app before a release');
+  out('  staysfixed check --watch            watch it work in a panel beside your app');
   out('');
   out('It answers with 0 when nothing changed, 1 when something changed or broke,');
   out('and 2 when it could not run at all.');

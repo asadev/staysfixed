@@ -11,10 +11,12 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { captureScreen } from '../picture/capture.js';
+import { accountForCapture } from '../picture/run.js';
 import { settingsForScreen } from '../core/config.js';
 import { gitInfo } from '../core/git.js';
 import { StaysFixedError, messageOf } from '../core/errors.js';
 import { safeName } from '../core/paths.js';
+import { emitEvent } from '../core/events.js';
 
 /**
  * Progress handed to `opts.onStep`, once when a step starts and once when it is done.
@@ -37,12 +39,16 @@ import { safeName } from '../core/paths.js';
  *   only?: string|string[],
  *   signal?: AbortSignal,
  *   record?: boolean,
+ *   events?: import('../types.js').RunEvents,
+ *   thumbnail?: boolean,
+ *   timings?: ReturnType<typeof import('../core/events.js').makeTimings>,
  * }} [opts]
  * @returns {Promise<import('../types.js').WalkReport>}
  */
 export async function walkApp(project, app, opts = {}) {
   const { config, paths } = project;
   const chosen = chooseSteps(config, opts.only);
+  const events = opts.events;
 
   const id = walkId(new Date());
   const dir = await makeWalkDir(paths.results, id);
@@ -71,14 +77,42 @@ export async function walkApp(project, app, opts = {}) {
       ...(screen.describe !== undefined ? { describe: screen.describe } : {}),
     });
 
+    // A walk goes through the same events as a check, so the live window draws a
+    // walkthrough exactly the way it draws a run of picture checks.
+    emitEvent(events, {
+      type: 'screen:start',
+      name: screen.name,
+      describe: screen.describe,
+      index,
+      total: chosen.length,
+    });
+
+    /** @type {{shot?: string}} */
+    const thumbs = {};
     const step = await walkOneStep(page, screen, {
       index,
       dir,
       settings: settingsForScreen(config, screen),
       fixturesDir: paths.fixtures,
       record: opts.record ?? false,
+      events,
+      thumbnail: opts.thumbnail === true,
+      thumbs,
+      timings: opts.timings,
     });
     steps.push(step);
+
+    emitEvent(events, {
+      type: 'screen:done',
+      name: step.name,
+      describe: step.describe,
+      // A walk has nothing to compare against, so a step either happened or it
+      // did not. Anything the app complained about is said in the message.
+      status: step.error ? 'failed' : 'passed',
+      durationMs: step.durationMs,
+      message: stepMessage(step),
+      thumbnail: thumbs.shot,
+    });
 
     opts.onStep?.({
       phase: 'done',
@@ -115,6 +149,10 @@ export async function walkApp(project, app, opts = {}) {
  *   settings: ReturnType<typeof settingsForScreen>,
  *   fixturesDir: string,
  *   record: boolean,
+ *   events?: import('../types.js').RunEvents,
+ *   thumbnail?: boolean,
+ *   thumbs?: {shot?: string},
+ *   timings?: ReturnType<typeof import('../core/events.js').makeTimings>,
  * }} ctx
  * @returns {Promise<import('../types.js').WalkStep>}
  */
@@ -136,10 +174,16 @@ async function walkOneStep(page, screen, ctx) {
     const shot = await captureScreen(page, screen, ctx.settings, {
       fixturesDir: ctx.fixturesDir,
       record: ctx.record,
+      thumbnail: ctx.thumbnail === true,
     });
+    accountForCapture(ctx.timings, shot);
     await fsp.writeFile(target, shot.png);
     file = target;
     consoleErrors = shot.consoleErrors;
+    if (shot.thumbnail) {
+      if (ctx.thumbs) ctx.thumbs.shot = shot.thumbnail;
+      emitEvent(ctx.events, { type: 'screen:shot', name: screen.name, thumbnail: shot.thumbnail });
+    }
   } catch (cause) {
     error = messageOf(cause);
     consoleErrors = readConsole(page);
@@ -171,6 +215,38 @@ async function walkOneStep(page, screen, ctx) {
   if (title) step.title = title;
 
   return step;
+}
+
+/**
+ * How many screens a walk is about to visit.
+ *
+ * The engine needs this before it opens anything, so it can tell a watcher how
+ * long the list will be. It asks the same function the walk itself asks, because
+ * two places counting the same thing differently is how a progress bar starts
+ * lying.
+ *
+ * @param {import('../types.js').ResolvedConfig} config
+ * @param {string|string[]} [only]
+ * @returns {number}
+ */
+export function countWalkSteps(config, only) {
+  return chooseSteps(config, only).length;
+}
+
+/**
+ * What to say about a finished step, in plain language, or nothing when it went
+ * through cleanly.
+ *
+ * @param {import('../types.js').WalkStep} step
+ * @returns {string|undefined}
+ */
+function stepMessage(step) {
+  if (step.error) return step.error;
+  const complaints = (step.consoleErrors ?? []).length;
+  if (complaints === 0) return undefined;
+  return complaints === 1
+    ? 'The app logged one error while this screen was open.'
+    : `The app logged ${complaints} errors while this screen was open.`;
 }
 
 /**

@@ -469,3 +469,71 @@ export {};
  * @property {number} markersSearched
  * @property {string} [message]
  */
+
+// ---------------------------------------------------------------------------
+// Live events — what a run tells anyone watching, as it happens
+// ---------------------------------------------------------------------------
+
+/**
+ * One thing that happened during a run.
+ *
+ * The terminal, the watch window and any future listener all read the same stream, so a
+ * run only has to describe itself once. Every event carries `at` (milliseconds since the
+ * run began) so a watcher can draw a timeline without keeping its own clock.
+ *
+ * @typedef {object} RunEvent
+ * @property {'run:start'|'screen:start'|'screen:shot'|'screen:done'|'guard:start'|'guard:done'|'phase'|'note'|'run:done'} type
+ * @property {number} at                      Milliseconds since the run started.
+ * @property {string} [name]                  Screen or guard name.
+ * @property {string} [describe]              The plain-language description.
+ * @property {number} [index]                 1-based position within its phase.
+ * @property {number} [total]                 How many there are in this phase.
+ * @property {CheckStatus} [status]
+ * @property {number} [durationMs]
+ * @property {number} [diffPixels]
+ * @property {number} [diffRatio]
+ * @property {string} [message]
+ * @property {string} [failedAt]              The plain-language expectation that failed.
+ * @property {string} [because]               Why a guard exists.
+ * @property {string} [thumbnail]             A small JPEG as a data: URI, for watching.
+ * @property {string} [approvedThumb]
+ * @property {string} [diffThumb]
+ * @property {RunSummary} [summary]           Only on 'run:done'.
+ * @property {{screens: number, guards: number, app: string, project: string, watching: boolean}} [plan]
+ *           Only on 'run:start'.
+ */
+
+/**
+ * @typedef {object} RunEvents
+ * @property {(event: RunEvent) => void} emit
+ * @property {(listener: (event: RunEvent) => void) => () => void} on
+ * @property {() => number} elapsed
+ * @property {() => RunEvent[]} history       Everything so far, so a late listener catches up.
+ */
+
+/**
+ * @typedef {object} WatchOptions
+ * @property {boolean} [enabled]
+ * @property {number} [width]                 Panel width in CSS pixels. Default 460.
+ * @property {number} [height]                Default: as tall as the app.
+ * @property {'right'|'left'} [side]          Which side of the app to sit on. Default 'right'.
+ * @property {boolean} [keepOpen]             Leave the panel up after the run. Default true.
+ * @property {boolean} [foreground]           Bring the panel to the front. Default false.
+ * @property {boolean} [snap]                 Pin the app to a screen edge and sit flush against it. Default true.
+ * @property {'dark'|'light'|'system'} [theme]  Default 'dark'. The panel opens on a brand new browser
+ *                                          profile, and a fresh profile insists the computer is in light
+ *                                          mode however it is really set — so the look is stated, not guessed.
+ */
+
+/**
+ * Where a run spent its time. Printed by `--profile`, and drawn in the watch window.
+ * @typedef {object} Timings
+ * @property {number} launch
+ * @property {number} steps
+ * @property {number} prepare
+ * @property {number} settle
+ * @property {number} compare
+ * @property {number} guards
+ * @property {number} other
+ * @property {number} total
+ */

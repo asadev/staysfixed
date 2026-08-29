@@ -13,6 +13,10 @@ import { applyFreeze, prepareForShutter } from '../freeze/index.js';
 import { settle } from '../freeze/settle.js';
 import { resolveMasks, paintMasks } from '../freeze/mask.js';
 import { StaysFixedError, isExpected, messageOf } from '../core/errors.js';
+// store.js reads `pngSize` back out of this file. Two modules about the same pictures
+// leaning on each other is fine here — both sides are plain functions, so neither is
+// half-built when the other asks for it.
+import { thumbnailOf } from './store.js';
 
 /**
  * Every instruction a declarative step is allowed to give, in the order they run
@@ -47,10 +51,19 @@ const KNOWN_KEYS = new Set([...ACTION_ORDER, 'text', 'note']);
  *   freeze: import('../types.js').FreezeConfig,
  *   masks: import('../types.js').Mask[],
  * }} settings
- * @param {{fixturesDir: string, record?: boolean, timeoutMs?: number}} ctx
- * @returns {Promise<import('../types.js').CaptureReport & {masks: import('../types.js').MaskRect[]}>}
- *   The standard report plus the mask rectangles that were painted, so the
- *   comparison can paint the exact same rectangles onto the approved picture.
+ * @param {{fixturesDir: string, record?: boolean, timeoutMs?: number, thumbnail?: boolean}} ctx
+ *   `thumbnail` is asked for only while somebody is watching the run happen; it costs a
+ *   decode of the picture that was just taken, so it is off unless it is wanted.
+ * @returns {Promise<import('../types.js').CaptureReport & {
+ *   masks: import('../types.js').MaskRect[],
+ *   timings: {steps: number, prepare: number, settle: number},
+ *   spent: {steps: number, prepare: number, settle: number},
+ *   thumbnail?: string,
+ * }>}
+ *   The standard report, plus the mask rectangles that were painted so the comparison can
+ *   paint the exact same rectangles onto the approved picture, plus where the time went.
+ *   Only this function knows how its own milliseconds were spent, so it says, rather than
+ *   leaving the run to guess by wrapping things it cannot see inside.
  */
 export async function captureScreen(page, screen, settings, ctx) {
   const deviceScaleFactor = settings.viewport.deviceScaleFactor ?? 2;
@@ -67,6 +80,14 @@ export async function captureScreen(page, screen, settings, ctx) {
     deviceScaleFactor,
   });
 
+  // A frozen clock cannot time anything, so the stopwatch is the host's own, and it is
+  // the monotonic one: a machine that adjusts its clock mid-run must not be able to
+  // report that a screen took a negative amount of time.
+  const clock = process.hrtime.bigint;
+  const startedSteps = clock();
+  /** @type {{steps: number, prepare: number, settle: number}} */
+  const spent = { steps: 0, prepare: 0, settle: 0 };
+
   try {
     if (typeof screen.do === 'function') {
       await screen.do(page);
@@ -79,6 +100,9 @@ export async function captureScreen(page, screen, settings, ctx) {
     const scrolledOnPurpose =
       typeof screen.do === 'function' || (screen.steps ?? []).some((s) => s.scrollTo !== undefined);
 
+    const startedPrepare = clock();
+    spent.steps = since(startedSteps, startedPrepare);
+
     await prepareForShutter(page, {
       fonts: settings.freeze.fonts !== false,
       timeoutMs,
@@ -90,13 +114,24 @@ export async function captureScreen(page, screen, settings, ctx) {
     if (screen.fullPage) shotOptions.fullPage = true;
     if (screen.clip) shotOptions.clip = screen.clip;
 
+    // The same frame, asked for cheaply. The settle loop shoots the screen over and over
+    // to find out whether anything moved and throws every one of those pictures away, so
+    // it gets a small lossy one; the picture that is kept and compared is always the PNG.
+    /** @type {import('../types.js').CaptureOptions & {format: 'jpeg', quality: number}} */
+    const probeOptions = { ...shotOptions, format: 'jpeg', quality: 50 };
+
+    const startedSettle = clock();
+    spent.prepare = since(startedPrepare, startedSettle);
+
     const held = await settle(page, {
       frames: settleConfig.frames ?? 2,
       intervalMs: settleConfig.intervalMs ?? 250,
       timeoutMs: settleConfig.timeoutMs ?? 10_000,
       maxDriftPixels: settleConfig.maxDriftPixels ?? 0,
       capture: () => page.shoot(shotOptions),
+      probe: () => page.shoot(probeOptions),
     });
+    spent.settle = since(startedSettle, clock());
 
     const rects = await resolveMasks(page, settings.masks ?? [], { deviceScaleFactor });
     const png = rects.length > 0 ? paintInto(held.png, rects) : held.png;
@@ -115,7 +150,8 @@ export async function captureScreen(page, screen, settings, ctx) {
       await runSteps(page, screen.after);
     }
 
-    return {
+    /** @type {import('../types.js').CaptureReport & {masks: import('../types.js').MaskRect[], timings: typeof spent, spent: typeof spent, thumbnail?: string}} */
+    const report = {
       png,
       width: size.width,
       height: size.height,
@@ -123,7 +159,15 @@ export async function captureScreen(page, screen, settings, ctx) {
       consoleErrors: page.consoleErrors(),
       freeze: frozen.stats(),
       masks: rects,
+      // The same three numbers under both names the rest of the tool asks for them by.
+      timings: spent,
+      spent,
     };
+    if (ctx.thumbnail === true) {
+      const small = await thumbnailOf(png);
+      if (small) report.thumbnail = small;
+    }
+    return report;
   } finally {
     // Releasing must never be the thing that hides a real failure.
     try {
@@ -132,6 +176,16 @@ export async function captureScreen(page, screen, settings, ctx) {
       // ignored on purpose
     }
   }
+}
+
+/**
+ * Milliseconds between two readings of the monotonic clock.
+ * @param {bigint} from
+ * @param {bigint} to
+ * @returns {number}
+ */
+function since(from, to) {
+  return Number(to - from) / 1e6;
 }
 
 /**

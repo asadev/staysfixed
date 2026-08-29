@@ -268,9 +268,12 @@ export function printGuardResult(r) {
  * The closing block of `staysfixed check`.
  * @param {import('../types.js').RunSummary} run
  * @param {import('../types.js').Project} [project]
+ * @param {{profile?: boolean, timings?: import('../types.js').Timings|null}} [opts]
+ *        Ask for the timing block with --profile; pass `timings` when the caller
+ *        kept its own record rather than reading it back off the summary.
  * @returns {void}
  */
-export function printRunSummary(run, project) {
+export function printRunSummary(run, project, opts = {}) {
   const pictures = run.pictures ?? [];
   const guards = run.guards ?? [];
   const verdict = verdictFor(run);
@@ -283,6 +286,13 @@ export function printRunSummary(run, project) {
   if (pictures.length) counted.push(`${countText(pictures.length)} ${plural(pictures.length, 'screen', 'screens')}`);
   if (guards.length) counted.push(`${countText(guards.length)} ${plural(guards.length, 'guard', 'guards')}`);
   if (counted.length) say(paint.grey(`  ${counted.join(', ')}, ${plainTime(run.durationMs ?? 0)}.`));
+
+  // Nobody asked for numbers unless they asked for numbers. The run reads the
+  // same with or without this block.
+  if (opts.profile) {
+    const measured = opts.timings ?? /** @type {{timings?: import('../types.js').Timings}} */ (run).timings;
+    printTimings(measured, pictures.length);
+  }
 
   /** @type {string[][]} */
   const rows = [];
@@ -322,6 +332,75 @@ export function printRunSummary(run, project) {
     say(`  The pictures, side by side: ${paint.cyan(shortPath(project.paths.reportFile))}`);
   }
   blank();
+}
+
+/**
+ * Where the seconds went, in the order of biggest first, because the only reason
+ * anyone reads this is to find the one part worth speeding up.
+ *
+ * The names are what each phase actually does, not what the code calls it: nobody
+ * outside this repository knows what "settle" or "prepare" mean.
+ */
+const TIMING_LABELS = /** @type {[string, string][]} */ ([
+  ['launch', 'opening the app'],
+  ['steps', 'running the steps'],
+  ['prepare', 'waiting for fonts and images'],
+  ['settle', 'taking the pictures until two agree'],
+  ['compare', 'comparing against the approved pictures'],
+  ['guards', 'running the guards'],
+  ['other', 'everything else'],
+]);
+
+/**
+ * The `--profile` block. Rounded to something a person would say out loud: this
+ * is here to point at the slow part, not to be a benchmark.
+ *
+ * @param {import('../types.js').Timings|null|undefined} timings
+ * @param {number} [screenCount]   Screens photographed, for the per-screen average.
+ * @returns {void}
+ */
+export function printTimings(timings, screenCount = 0) {
+  if (!timings) {
+    heading('Where the time went');
+    say(paint.grey('  This run did not record its timings.'));
+    return;
+  }
+
+  // Timings is a fixed shape, but reading it by name keeps the table and the
+  // type from drifting apart.
+  const t = /** @type {Record<string, number>} */ (/** @type {unknown} */ (timings));
+  const total = Number(t.total) || 0;
+
+  /** @type {string[][]} */
+  const rows = [];
+  const parts = TIMING_LABELS.map(([key, label]) => ({ label, ms: Number(t[key]) || 0 }))
+    .filter((part) => part.ms > 0)
+    .sort((a, b) => b.ms - a.ms);
+
+  for (const part of parts) {
+    const share = total > 0 ? `${Math.round((part.ms / total) * 100)}%` : '';
+    rows.push([part.label, duration(part.ms), paint.grey(share)]);
+  }
+
+  heading('Where the time went');
+  if (rows.length === 0) {
+    say(paint.grey('  Nothing took long enough to measure.'));
+    return;
+  }
+  table(rows, { indent: 2 });
+
+  // The two closing lines are written by hand rather than added as rows, so the
+  // totals sit under the parts instead of being sorted in among them.
+  const labelWidth = Math.max(...rows.map((row) => row[0].length));
+  say(paint.grey(`  ${'in total'.padEnd(labelWidth)}  ${duration(total)}`));
+  if (screenCount > 0) {
+    const each = duration(total / screenCount);
+    say(
+      paint.grey(
+        `  ${'each screen'.padEnd(labelWidth)}  ${each} on average, across ${countText(screenCount)} ${plural(screenCount, 'screen', 'screens')}`,
+      ),
+    );
+  }
 }
 
 /**
