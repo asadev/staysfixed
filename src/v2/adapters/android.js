@@ -953,22 +953,54 @@ export const androidAdapter = defineAdapter({
         const key = `${call.method} ${call.host}${call.route}`;
         byCall.set(key, (byCall.get(key) ?? 0) + 1);
       }
+      /**
+       * The phone's own background chatter is COUNTED, never given an address of its own.
+       *
+       * A device-wide proxy sees the whole phone, and on a Google APIs emulator most of what
+       * it sees is Play services: checking connectivity, fetching fonts, asking about digital
+       * asset links, phoning gmscompliance. None of it belongs to the app being checked, none
+       * of it is the same twice, and every one of those hosts given an address of its own is
+       * an address that appears in one run and is gone in the next.
+       *
+       * Measured on Terminal Deck on 2026-08-30, on a build with NOTHING changed in it: eight
+       * findings, seven of them a Google host that came or went. Running the build twice
+       * subtracted fifteen more and still could not subtract those, because this traffic is
+       * not merely unstable — it is episodic, so a run pair can agree with itself and still
+       * disagree with the run pair before it. Left as it was, an Android check reports noise
+       * on a build nobody touched, and the first thing anybody does with a tool that cries
+       * wolf is switch it off.
+       *
+       * So: the app's own calls keep one address each, which is the signal worth having, and
+       * the phone's own are reduced to a count that sits on one rung of a coarse ladder. What
+       * was seen is still said in plain English, and the ledger still records that nothing
+       * inside those requests was ever opened.
+       */
+      let fromThePhone = 0;
       for (const [key, times] of [...byCall.entries()].sort()) {
         const call = calls.find((c) => `${c.method} ${c.host}${c.route}` === key);
         if (!call) continue;
-        const mine = !isDeviceHost(call.host);
-        if (mine) fromTheApp += 1;
+        if (isDeviceHost(call.host)) {
+          fromThePhone += 1;
+          continue;
+        }
+        fromTheApp += 1;
         out.push(observation({
           channel: 'effects',
-          path: joinPath('net', journey.name, mine ? 'the app' : 'the phone itself', key),
+          path: joinPath('net', journey.name, 'the app', key),
           value: { asked: countBucket(times), reached: call.allowed ? 'let through' : 'stopped here' },
-          says: `${mine ? 'the app' : 'the phone, not the app,'} tried to call ${key}${times > 1 ? ` ${times} times` : ''} — ${call.why}`,
+          says: `the app tried to call ${key}${times > 1 ? ` ${times} times` : ''} — ${call.why}`,
           covered: call.how === 'encrypted' ? false : undefined,
           reason: call.how === 'encrypted' ? 'not supported here' : undefined,
           journey: journey.name,
           surface: 'android',
         }));
       }
+      out.push(notCovered({
+        channel: 'effects',
+        path: joinPath('net', journey.name, 'the phone itself'),
+        reason: 'not supported here',
+        says: `${fromThePhone === 0 ? 'nothing else on the phone' : `${fromThePhone} other thing${fromThePhone === 1 ? '' : 's'} on the phone`} reached out while this ran — Android\'s own services, not this app. It is watched and stopped here like everything else, and it is not compared, because a device-wide proxy cannot tell which program made a call and Google\'s background traffic is different every single run.`,
+      }));
       out.push(observation({
         channel: 'counters',
         path: joinPath('count', journey.name, 'calls the app made'),

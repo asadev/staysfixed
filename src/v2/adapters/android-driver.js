@@ -1183,7 +1183,14 @@ export function looksIrreversible(method, url) {
  * in the background is filed separately, and this limit is stated in the adapter's own
  * description rather than hidden here.
  */
-const DEVICE_HOSTS = /(^|\.)(google|googleapis|gstatic|android|gvt1|gvt2|doubleclick|crashlytics|firebaseinstallations)\.com$|(^|\.)google\.[a-z.]+$/i;
+/*
+ * Every one of these was seen leaving a Google APIs emulator on 2026-08-30 while Terminal
+ * Deck — an app that talks to one relay and nothing else — sat on its first screen. The
+ * ones added that day are on the second line: `googleadservices` and `youtube` were being
+ * filed as calls THE APP made, which reads as "your change made the app phone YouTube" and
+ * is the most alarming false alarm this adapter is capable of producing.
+ */
+const DEVICE_HOSTS = /(^|\.)(google|googleapis|gstatic|android|gvt1|gvt2|doubleclick|crashlytics|firebaseinstallations)\.com$|(^|\.)(googleadservices|googlesyndication|googletagmanager|googleusercontent|google-analytics|youtube|ytimg|ggpht|appspot)\.com$|(^|\.)google\.[a-z.]+$/i;
 
 /**
  * @param {string} host
