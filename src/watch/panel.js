@@ -14,12 +14,15 @@
  *
  * The design brief, in one line: this thing is pinned against a person's work
  * all day, so it must be pleasant to have open and never once demand attention
- * it has not earned. That gives three rules the whole layout follows.
+ * it has not earned. That gives four rules the whole layout follows.
  *
- *   1. The picture is the hero. It is the only large thing on the page, and
- *      everything else is sized to defer to it. A watch panel that shows you a
- *      photograph of your own app the instant the shutter fires is alive; a
- *      watch panel that shows you a list of names is a log file with a border.
+ *   1. The picture is the hero, and it is a REAL picture. The panel is itself a
+ *      local page, so it loads the full-resolution PNG straight off the disk the
+ *      run just wrote it to — `shotFile`, `approvedFile`, `diffFile`. The small
+ *      preview that travels inside the event is only the frame or two before
+ *      that file exists. A watch panel that shows you a blurred stamp of your
+ *      own app is worse than useless: looking at the picture IS the product, so
+ *      it has to survive being looked at closely.
  *
  *   2. Nothing is said twice, and detail is earned. At rest every check is one
  *      quiet line — a dot, a name, a time. The description, the outcome, the
@@ -33,6 +36,12 @@
  *      one red (broke). The timing breakdown, which is information rather than
  *      state, is drawn in shades of the text colour — so a screenful of colour
  *      always means a screenful of things to look at.
+ *
+ *   4. Everything moves, and nothing waves. State never snaps: pictures cross
+ *      fade, rows settle, numbers count, the verdict arrives. Every one of those
+ *      is between 150 and 320 milliseconds on one easing curve, every one of
+ *      them is tied to something that really happened, and every one of them is
+ *      switched off for anyone who has asked their computer for less motion.
  */
 
 import { escapeHtml } from '../report/html.js';
@@ -124,6 +133,14 @@ const COPY = [
   '</svg>',
 ].join('');
 
+/** A cross: put the big picture away. */
+const CLOSE = [
+  '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor"',
+  ' stroke-width="1.7" stroke-linecap="round" aria-hidden="true">',
+  '<path d="M7 7l10 10M17 7L7 17"></path>',
+  '</svg>',
+].join('');
+
 /**
  * The whole panel document.
  * @param {PanelPlan} [plan]
@@ -183,7 +200,9 @@ export function panelHtml(plan = {}) {
     '<div class="shot" id="shot">',
     '<img class="layer" id="layerA" alt="">',
     '<img class="layer" id="layerB" alt="">',
+    '<span class="sweep" aria-hidden="true"></span>',
     '<p class="blank" id="blank">The first picture appears the moment it is taken.</p>',
+    '<span class="closer" aria-hidden="true">click to look closer</span>',
     '</div>',
     '<div class="caption" id="caption">',
     '<span class="shotname mono" id="shotname"></span>',
@@ -234,7 +253,39 @@ export function panelHtml(plan = {}) {
     '</footer>',
 
     '</div>',
-    '<div class="lightbox" id="lightbox" hidden><img id="lightimg" alt=""></div>',
+
+    // --- the viewer: the real picture, as big as the window goes ------------
+    //
+    // This is where a person decides whether to approve something, so it is the
+    // most carefully built thing on the page: the full-resolution file, zoom to
+    // eight times with the actual pixels showing rather than a smoothed guess,
+    // drag to move around, and — for a screen that moved — the approved picture
+    // and the new one under one draggable line, plus the difference.
+    '<div class="viewer" id="viewer" hidden>',
+    '<header class="vtop">',
+    '<span class="vname mono" id="vname"></span>',
+    '<div class="vmodes" id="vmodes"></div>',
+    '<span class="vright">',
+    '<span class="vzoom mono" id="vzoom" title="double-click the picture to fit it again">1.0&#215;</span>',
+    `<button class="vclose" id="vclose" type="button" aria-label="close the picture">${CLOSE}</button>`,
+    '</span>',
+    '</header>',
+    '<div class="vstage" id="vstage">',
+    '<div class="vframe" id="vframe">',
+    '<img class="vlayer" id="vApproved" alt="the approved picture">',
+    '<img class="vlayer" id="vNow" alt="the picture just taken">',
+    '<img class="vlayer" id="vDiff" alt="the difference between them">',
+    '</div>',
+    '<div class="vwipe" id="vwipe" hidden><span class="vgrip" aria-hidden="true"></span></div>',
+    '</div>',
+    '<footer class="vfoot" id="vfoot" hidden>',
+    '<span class="vside">approved</span>',
+    '<input class="vblend" id="vblend" type="range" min="0" max="100" value="100" aria-label="fade between the approved picture and the new one">',
+    '<span class="vside">now</span>',
+    '</footer>',
+    '<p class="vhelp">scroll to zoom &#183; drag to move &#183; double-click to fit &#183; esc to close</p>',
+    '</div>',
+
     `<script type="application/json" id="staysfixed-plan">${embedded}</script>`,
     `<script>${SCRIPT}</script>`,
     '</body>',
@@ -252,6 +303,9 @@ const STYLE = `
    broke. Everything structural is the ground, the ink, or a hairline. That is
    what lets a single amber dot be seen from across a desk.
 
+   One type scale, five steps, used everywhere. One easing curve, used by every
+   moving thing on the page, so the whole panel moves like one object.
+
    Dark is the design — this window lives beside an editor all day. Light is a
    warm paper, never the white page with grey cards the brief rules out.
    -------------------------------------------------------------------------- */
@@ -260,7 +314,7 @@ const STYLE = `
 
   --ground: #0a0c12;
   --lift: #12161f;
-  --card: rgba(255, 255, 255, 0.032);
+  --card: rgba(255, 255, 255, 0.03);
   --card-hover: rgba(255, 255, 255, 0.055);
   --well: #070910;
   --glass: rgba(10, 12, 18, 0.74);
@@ -269,7 +323,7 @@ const STYLE = `
   --soft: #939bad;
   --faint: #616a7d;
 
-  --line: rgba(255, 255, 255, 0.07);
+  --line: rgba(255, 255, 255, 0.06);
   --line-firm: rgba(255, 255, 255, 0.13);
   --sheen: rgba(255, 255, 255, 0.06);
   --shadow: rgba(0, 0, 0, 0.66);
@@ -278,14 +332,27 @@ const STYLE = `
   --held: #55bd8c;
   --moved: #e2a84f;
   --broke: #ef6a61;
-  --resting: rgba(255, 255, 255, 0.09);
+  --resting: rgba(255, 255, 255, 0.08);
 
   --radius: 20px;
   --radius-sm: 13px;
   --radius-xs: 9px;
 
-  --pad: 16px;
+  --pad: 18px;
   --tint: var(--accent);
+
+  /* The type scale. Nothing on this page is set at a size that is not here. */
+  --t-label: 10px;
+  --t-meta: 10.5px;
+  --t-body: 11.5px;
+  --t-name: 12px;
+  --t-lead: 17px;
+
+  /* One curve. Everything that moves, moves on this. */
+  --ease: cubic-bezier(0.22, 0.72, 0.24, 1);
+  --quick: 170ms;
+  --calm: 260ms;
+  --slow: 320ms;
 }
 /*
  * Light is opt-in, and that is deliberate.
@@ -302,7 +369,7 @@ const STYLE = `
 
   --ground: #e3ded3;
   --lift: #fdfbf7;
-  --card: rgba(255, 255, 255, 0.82);
+  --card: rgba(255, 255, 255, 0.78);
   --card-hover: rgba(255, 255, 255, 1);
   --well: #dad4c8;
   --glass: rgba(231, 226, 217, 0.82);
@@ -311,7 +378,7 @@ const STYLE = `
   --soft: #6b665c;
   --faint: #8b8578;
 
-  --line: rgba(28, 24, 18, 0.1);
+  --line: rgba(28, 24, 18, 0.09);
   --line-firm: rgba(28, 24, 18, 0.19);
   --sheen: rgba(255, 255, 255, 0.85);
   --shadow: rgba(58, 47, 30, 0.34);
@@ -352,7 +419,7 @@ button { font: inherit; color: inherit; }
   background:
     radial-gradient(120% 46% at 50% -8%, color-mix(in srgb, var(--tint) 15%, transparent), transparent 70%),
     radial-gradient(100% 60% at 50% 112%, var(--shadow), transparent 66%);
-  transition: background 500ms ease;
+  transition: background 620ms var(--ease);
 }
 
 .panel {
@@ -364,11 +431,10 @@ button { font: inherit; color: inherit; }
 /* --- header -------------------------------------------------------------- */
 .top {
   flex: 0 0 auto;
-  padding: 15px var(--pad) 14px;
+  padding: 16px var(--pad) 15px;
   background: var(--glass);
   backdrop-filter: blur(22px) saturate(150%);
   -webkit-backdrop-filter: blur(22px) saturate(150%);
-  border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 9px; }
 .badge {
@@ -383,42 +449,50 @@ button { font: inherit; color: inherit; }
 .badge .glyph { width: 15px; height: 15px; }
 .wordmark {
   flex: 1 1 auto; min-width: 0;
-  font-size: 11px; font-weight: 600;
+  font-size: var(--t-label); font-weight: 600;
   letter-spacing: 0.2em; text-transform: uppercase;
   color: var(--soft);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.elapsed { flex: 0 0 auto; font-size: 11.5px; color: var(--faint); }
+.elapsed { flex: 0 0 auto; font-size: var(--t-body); color: var(--faint); }
 
 .target {
   display: flex; align-items: baseline; gap: 6px;
-  margin-top: 12px;
-  font-size: 12px;
+  margin-top: 13px;
+  font-size: var(--t-name);
   white-space: nowrap; overflow: hidden;
 }
 .target .mono { color: var(--ink); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .target .sep { color: var(--faint); flex: 0 0 auto; }
-.target .app { color: var(--faint); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
+.target .app { color: var(--faint); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; font-size: var(--t-body); }
 
 /* The sentence. The largest text on the page after the picture, because it is
    the one thing a person reads from four feet away. */
 .state {
   margin-top: 9px;
-  font-size: 17px; font-weight: 620; line-height: 1.32;
+  font-size: var(--t-lead); font-weight: 620; line-height: 1.32;
   letter-spacing: -0.011em;
   overflow-wrap: anywhere;
-  transition: color 300ms ease;
+  transition: color var(--slow) var(--ease);
 }
 .state.held { color: var(--ink); }
 .state.moved { color: var(--moved); }
 .state.broke { color: var(--broke); }
 .state.wait { color: var(--accent); }
-.note { margin-top: 5px; font-size: 11.5px; color: var(--faint); overflow-wrap: anywhere; }
+/* The verdict arrives rather than appearing: it is the one sentence the whole
+   run was for, and a run that ends by swapping a word looks like a page that
+   was not paying attention. */
+.state.arrive { animation: arrive 340ms var(--ease) both; }
+@keyframes arrive {
+  from { opacity: 0; transform: translateY(7px); filter: blur(4px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+.note { margin-top: 5px; font-size: var(--t-body); color: var(--faint); overflow-wrap: anywhere; }
 
 /* One hairline, not a row of blocks. Each finished check adds its own slice of
    colour to a single continuous line, so progress and outcome are the same
    object and there is one fewer thing on the page. */
-.meter { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.meter { display: flex; align-items: center; gap: 10px; margin-top: 15px; }
 .track {
   flex: 1 1 auto; min-width: 0;
   height: 4px; border-radius: 999px;
@@ -429,7 +503,7 @@ button { font: inherit; color: inherit; }
 .slice {
   min-width: 0; height: 100%;
   background: var(--resting);
-  transition: background 260ms ease, flex-basis 260ms ease;
+  transition: background var(--slow) var(--ease), flex-basis var(--slow) var(--ease);
 }
 .slice.held { background: var(--held); }
 .slice.moved { background: var(--moved); }
@@ -438,10 +512,17 @@ button { font: inherit; color: inherit; }
 .slice.skip { background: color-mix(in srgb, var(--ink) 16%, transparent); }
 .slice.running {
   background: var(--accent);
-  animation: breathe 1.9s ease-in-out infinite;
+  animation: breathe 1.9s var(--ease) infinite;
 }
-@keyframes breathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
-.counts { flex: 0 0 auto; font-size: 10.5px; color: var(--faint); letter-spacing: 0.02em; }
+/* A segment lights as it lands, once, and then it is just a colour. */
+.slice.land { animation: land 520ms var(--ease) 1; }
+@keyframes land { 0% { filter: brightness(2.1); } 100% { filter: none; } }
+@keyframes breathe { 0%, 100% { opacity: 0.42; } 50% { opacity: 1; } }
+.counts {
+  flex: 0 1 auto; min-width: 0; max-width: 66%;
+  font-size: var(--t-meta); color: var(--faint); letter-spacing: 0.02em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* --- the body: one column, or two when there is room --------------------- */
 .body {
@@ -468,10 +549,9 @@ button { font: inherit; color: inherit; }
      could compete with it — only a soft floor shadow and the faintest rim to
      keep a white screenshot from bleeding into a light ground. */
   box-shadow:
-    0 1px 0 0 var(--sheen) inset,
     0 0 0 1px var(--line),
     0 26px 50px -30px var(--shadow);
-  transition: box-shadow 300ms ease;
+  transition: box-shadow var(--slow) var(--ease);
 }
 .shot.empty { cursor: default; }
 .layer {
@@ -479,51 +559,94 @@ button { font: inherit; color: inherit; }
   width: 100%; height: 100%;
   object-fit: contain;
   opacity: 0;
-  transition: opacity 260ms ease;
+  transform: scale(1.014);
+  transition: opacity var(--slow) var(--ease), transform 480ms var(--ease);
 }
-.layer.on { opacity: 1; }
+.layer.on { opacity: 1; transform: none; }
+.layer.out { opacity: 0; transform: scale(0.996); }
 .blank {
   position: relative;
-  color: var(--faint); font-size: 11.5px; line-height: 1.6;
+  color: var(--faint); font-size: var(--t-body); line-height: 1.6;
   text-align: center; padding: 0 30px; max-width: 260px;
 }
 
+/* The shutter, made visible. One pass of soft light across the glass for
+   exactly as long as the app is really being photographed — it starts when the
+   screen starts and it is gone the instant the picture lands, so it is a report
+   of what is happening rather than a decoration that never stops. */
+.sweep {
+  position: absolute; inset: 0;
+  pointer-events: none; opacity: 0;
+  background:
+    linear-gradient(100deg,
+      transparent 4%,
+      color-mix(in srgb, var(--accent) 10%, transparent) 30%,
+      color-mix(in srgb, var(--accent) 34%, transparent) 47%,
+      color-mix(in srgb, var(--accent) 82%, transparent) 50%,
+      color-mix(in srgb, var(--accent) 34%, transparent) 53%,
+      color-mix(in srgb, var(--accent) 10%, transparent) 70%,
+      transparent 96%);
+  transform: translateX(-100%);
+}
+.shot.scanning .sweep { opacity: 1; animation: sweep 1.6s var(--ease) infinite; }
+.shot.scanning {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent),
+    0 26px 50px -30px var(--shadow);
+}
+@keyframes sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+/* Said once, on hover, and never in the way of the picture. */
+.closer {
+  position: absolute; right: 10px; bottom: 10px;
+  font-size: var(--t-label); letter-spacing: 0.02em;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ground) 72%, transparent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  border-radius: 999px; padding: 4px 10px;
+  opacity: 0; transform: translateY(4px);
+  transition: opacity var(--quick) var(--ease), transform var(--quick) var(--ease);
+  pointer-events: none;
+}
+.shot:hover .closer { opacity: 1; transform: none; }
+.shot.empty .closer { display: none; }
+
 .caption {
   display: flex; align-items: baseline; gap: 10px;
-  margin-top: 11px; min-height: 18px;
+  margin-top: 12px; min-height: 18px;
 }
-.shotname { flex: 0 1 auto; font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shotout { flex: 1 1 auto; min-width: 0; font-size: 11.5px; color: var(--soft); text-align: right; overflow-wrap: anywhere; }
+.shotname { flex: 0 1 auto; font-size: var(--t-name); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shotout { flex: 1 1 auto; min-width: 0; font-size: var(--t-body); color: var(--soft); text-align: right; overflow-wrap: anywhere; }
 .shotout.moved { color: var(--moved); }
 .shotout.broke { color: var(--broke); }
 .shotout.wait { color: var(--accent); }
 
-/* Approved / now / difference. One pill, three quiet words — the only control
-   on the page that is ever shown without being asked for, because a screen
-   that moved is the one moment there is a real decision to make. */
-.switch {
-  display: flex; gap: 2px;
-  margin-top: 10px; padding: 2px;
-  border-radius: 999px;
-  background: var(--card);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
+/* Approved / now / difference. Three quiet words with a line that slides
+   between them — no pill, no box, because a screen that moved already has
+   enough asking for the eye. */
+.switch { display: flex; gap: 2px; margin-top: 10px; }
 .switch button {
+  position: relative;
   flex: 1 1 0; min-width: 0;
-  font-size: 11px; letter-spacing: 0.01em;
-  color: var(--soft);
+  font-size: var(--t-body); letter-spacing: 0.01em;
+  color: var(--faint);
   background: transparent; border: 0;
-  border-radius: 999px;
-  padding: 5px 6px; cursor: pointer;
+  padding: 6px 4px 7px; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  transition: color 160ms ease, background 160ms ease;
+  transition: color var(--quick) var(--ease);
 }
-.switch button:hover { color: var(--ink); }
-.switch button.on {
-  color: var(--ink);
-  background: var(--card-hover);
-  box-shadow: 0 1px 2px -1px var(--shadow), inset 0 0 0 1px var(--line);
+.switch button::after {
+  content: ''; position: absolute; left: 50%; right: 50%; bottom: 0; height: 1.5px;
+  border-radius: 2px; background: var(--tone, var(--accent));
+  transition: left var(--calm) var(--ease), right var(--calm) var(--ease), opacity var(--quick) var(--ease);
+  opacity: 0;
 }
+.switch button:hover { color: var(--soft); }
+.switch button.on { color: var(--ink); }
+.switch button.on::after { left: 12%; right: 12%; opacity: 1; }
 
 /* --- the list ------------------------------------------------------------ */
 .scroll {
@@ -532,7 +655,7 @@ button { font: inherit; color: inherit; }
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--soft) 22%, transparent) transparent;
-  padding: 16px 5px 14px 0;
+  padding: 18px 5px 14px 0;
   /* The list slides away under the header rather than being cut off by a box. */
   mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 12px), transparent 100%);
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 12px), transparent 100%);
@@ -544,24 +667,34 @@ button { font: inherit; color: inherit; }
 }
 .scroll::-webkit-scrollbar-track { background: transparent; }
 
-.group + .group { margin-top: 18px; }
+.group + .group { margin-top: 20px; }
 .grouplabel {
   display: flex; align-items: baseline; gap: 9px;
-  padding: 0 6px 8px 4px;
-  font-size: 10px; font-weight: 600;
+  padding: 0 6px 9px 4px;
+  font-size: var(--t-label); font-weight: 600;
   letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--faint);
 }
-.grouplabel .mono { font-size: 10px; letter-spacing: 0.04em; color: color-mix(in srgb, var(--faint) 70%, transparent); }
+.grouplabel .mono { font-size: var(--t-label); letter-spacing: 0.04em; color: color-mix(in srgb, var(--faint) 70%, transparent); }
 
 .items {
   border-radius: var(--radius);
   background: var(--card);
-  box-shadow: inset 0 0 0 1px var(--line), 0 18px 34px -30px var(--shadow);
   overflow: hidden;
 }
 .item + .item { box-shadow: inset 0 1px 0 var(--line); }
+.item {
+  transition: background var(--calm) var(--ease);
+}
 .item.attention { background: color-mix(in srgb, var(--tone, var(--accent)) 5%, transparent); }
+.item.running { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+/* Something broke. It is said once, with weight, and then it sits still — a
+   panel that keeps flashing beside your work is a panel you turn off. */
+.item.alarm { animation: alarm 900ms var(--ease) 1; }
+@keyframes alarm {
+  0% { background: color-mix(in srgb, var(--tone, var(--broke)) 26%, transparent); }
+  100% { background: color-mix(in srgb, var(--tone, var(--broke)) 5%, transparent); }
+}
 
 /* Big, quiet, touch-sized rows. At rest a check is a dot, a name and a time —
    that is the whole of it. */
@@ -572,7 +705,7 @@ button { font: inherit; color: inherit; }
   text-align: left;
   background: transparent; border: 0;
   cursor: pointer;
-  transition: background 160ms ease;
+  transition: background var(--quick) var(--ease);
 }
 .row:hover { background: var(--card-hover); }
 .row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -580,13 +713,18 @@ button { font: inherit; color: inherit; }
 .item.showing .row { box-shadow: inset 2px 0 0 var(--line-firm); }
 .item.showing .rname { color: var(--ink); }
 .item.plain .row:hover { background: transparent; }
-.item.fresh { animation: settle 200ms ease both; }
-@keyframes settle { from { opacity: 0; } to { opacity: 1; } }
+/* Rows settle in rather than appearing, and they do it one after another, which
+   is what makes a list of eleven screens read as one thing arriving. */
+.item.fresh { animation: settle 300ms var(--ease) both; }
+@keyframes settle {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
+}
 
 .dot {
   flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
   background: var(--resting);
-  transition: background 240ms ease, box-shadow 240ms ease;
+  transition: background var(--calm) var(--ease), box-shadow var(--calm) var(--ease);
 }
 .item.held .dot { background: color-mix(in srgb, var(--held) 78%, transparent); }
 .item.moved .dot { background: var(--moved); box-shadow: 0 0 0 4px color-mix(in srgb, var(--moved) 15%, transparent); }
@@ -596,10 +734,10 @@ button { font: inherit; color: inherit; }
 .item.running .dot {
   background: transparent;
   box-shadow: inset 0 0 0 2px var(--accent);
-  animation: ping 1.7s ease-out infinite;
+  animation: ping 1.8s var(--ease) infinite;
 }
 @keyframes ping {
-  0% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  0% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 0 color-mix(in srgb, var(--accent) 42%, transparent); }
   70%, 100% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 7px color-mix(in srgb, var(--accent) 0%, transparent); }
 }
 .item.running .rname { color: var(--ink); }
@@ -608,7 +746,7 @@ button { font: inherit; color: inherit; }
   flex: 1 1 auto; min-width: 0;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
-  font-size: 12px; color: var(--ink);
+  font-size: var(--t-name); color: var(--ink);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .item.pending .rname, .item.skip .rname { color: var(--faint); }
@@ -616,12 +754,12 @@ button { font: inherit; color: inherit; }
   flex: 0 0 auto;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
-  font-size: 10.5px; color: var(--faint);
+  font-size: var(--t-meta); color: var(--faint);
 }
 .row .chev {
   flex: 0 0 auto; width: 14px; height: 14px;
   color: var(--faint); opacity: 0;
-  transition: transform 200ms ease, opacity 160ms ease;
+  transition: transform var(--calm) var(--ease), opacity var(--quick) var(--ease);
 }
 .row:hover .chev, .item.open .chev { opacity: 1; }
 .item.open .chev { transform: rotate(180deg); }
@@ -630,9 +768,11 @@ button { font: inherit; color: inherit; }
 /* Everything a person did not ask for lives here. */
 .detail {
   padding: 0 14px 13px 33px;
-  font-size: 11.5px; line-height: 1.6;
+  font-size: var(--t-body); line-height: 1.6;
   overflow-wrap: anywhere;
 }
+.item.open .detail { animation: unfold 240ms var(--ease) both; }
+@keyframes unfold { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .detail .why { color: var(--soft); }
 .detail .out { color: var(--soft); margin-top: 3px; }
 .detail .out.moved { color: var(--moved); }
@@ -642,20 +782,20 @@ button { font: inherit; color: inherit; }
   margin-top: 9px; padding: 9px 12px;
   border-radius: var(--radius-xs);
   background: var(--well);
-  box-shadow: inset 2px 0 0 var(--broke), inset 0 0 0 1px var(--line);
+  box-shadow: inset 2px 0 0 var(--broke);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px; color: var(--ink);
+  font-size: var(--t-body); color: var(--ink);
 }
 .detail .claim em { font-style: normal; color: var(--faint); }
 .detail .story { margin-top: 7px; color: var(--faint); }
 
-.nothing { padding: 26px 16px; color: var(--faint); font-size: 11.5px; line-height: 1.7; text-align: center; }
+.nothing { padding: 26px 16px; color: var(--faint); font-size: var(--t-body); line-height: 1.7; text-align: center; }
 .nothing .mono { color: var(--soft); }
 
 /* --- where the time went ------------------------------------------------- */
 .timing {
   flex: 0 0 auto;
-  padding: 11px var(--pad) 12px;
+  padding: 12px var(--pad) 13px;
   border-top: 1px solid var(--line);
   background: var(--glass);
   backdrop-filter: blur(22px) saturate(150%);
@@ -669,13 +809,13 @@ button { font: inherit; color: inherit; }
 }
 .tlabel {
   flex: 1 1 auto;
-  font-size: 10px; font-weight: 600;
+  font-size: var(--t-label); font-weight: 600;
   letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--faint);
 }
 .ttotal {
   flex: 0 1 auto; min-width: 0;
-  font-size: 10.5px; color: var(--faint);
+  font-size: var(--t-meta); color: var(--faint);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .ttotal b {
@@ -683,20 +823,20 @@ button { font: inherit; color: inherit; }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
-.tophead .chev { color: var(--faint); width: 13px; height: 13px; transition: transform 200ms ease; }
+.tophead .chev { color: var(--faint); width: 13px; height: 13px; transition: transform var(--calm) var(--ease); }
 .tophead[aria-expanded='true'] .chev { transform: rotate(180deg); }
 .tophead:hover .tlabel, .tophead:hover .ttotal, .tophead:hover .chev { color: var(--soft); }
 
 /* Deliberately not coloured. Where the time went is information, not state,
    and colour on this page only ever means something needs a person. */
 .tbar { display: flex; gap: 1px; height: 6px; border-radius: 999px; overflow: hidden; background: var(--resting); }
-.tpart { min-width: 2px; }
-.tkey { list-style: none; margin: 11px 0 1px; padding: 0; }
-.tkey li { display: flex; align-items: center; gap: 9px; padding: 3px 4px; font-size: 11px; color: var(--soft); }
+.tpart { min-width: 2px; transition: flex-grow var(--slow) var(--ease); }
+.tkey { list-style: none; margin: 12px 0 1px; padding: 0; }
+.tkey li { display: flex; align-items: center; gap: 9px; padding: 3px 4px; font-size: var(--t-body); color: var(--soft); }
 .tkey .tswatch { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 2px; }
 .tkey .tlabelled { flex: 1 1 auto; min-width: 0; }
 .tkey b {
-  flex: 0 0 auto; font-weight: 500; color: var(--ink); font-size: 11px;
+  flex: 0 0 auto; font-weight: 500; color: var(--ink); font-size: var(--t-body);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
@@ -705,27 +845,29 @@ button { font: inherit; color: inherit; }
 .follow {
   position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
   z-index: 4;
-  font-size: 11px;
+  font-size: var(--t-body);
   color: var(--ink);
   background: var(--lift);
   border: 1px solid var(--line-firm); border-radius: 999px;
   padding: 6px 15px; cursor: pointer;
   box-shadow: 0 12px 24px -14px var(--shadow);
-  transition: border-color 160ms ease, color 160ms ease;
+  animation: settle 240ms var(--ease) both;
+  transition: border-color var(--quick) var(--ease), color var(--quick) var(--ease);
 }
 .follow:hover { border-color: var(--accent); color: var(--accent); }
 
 /* --- the one thing left to do ------------------------------------------- */
 .foot {
   flex: 0 0 auto;
-  padding: 13px var(--pad) 15px;
+  padding: 14px var(--pad) 16px;
   background: var(--glass);
   backdrop-filter: blur(22px) saturate(150%);
   -webkit-backdrop-filter: blur(22px) saturate(150%);
   border-top: 1px solid var(--line);
+  animation: arrive 340ms var(--ease) both;
 }
 .nextlabel {
-  font-size: 10px; font-weight: 600;
+  font-size: var(--t-label); font-weight: 600;
   letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--faint);
   margin-bottom: 8px;
@@ -736,8 +878,7 @@ button { font: inherit; color: inherit; }
   display: flex; align-items: center;
   background: var(--well);
   border-radius: var(--radius-xs);
-  box-shadow: inset 0 0 0 1px var(--line-firm);
-  padding: 8px 11px; font-size: 11.5px;
+  padding: 9px 11px; font-size: var(--t-body);
   color: var(--ink);
   overflow-wrap: anywhere;
   user-select: all;
@@ -746,56 +887,181 @@ button { font: inherit; color: inherit; }
 .copy {
   flex: 0 0 auto; width: 36px;
   display: flex; align-items: center; justify-content: center;
-  color: var(--soft); background: transparent;
-  border: 1px solid var(--line-firm); border-radius: var(--radius-xs);
+  color: var(--soft); background: var(--well);
+  border: 0; border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: color 160ms ease, border-color 160ms ease;
+  transition: color var(--quick) var(--ease), background var(--quick) var(--ease);
 }
-.copy:hover { color: var(--ink); border-color: var(--soft); }
-.copy.done { color: var(--held); border-color: color-mix(in srgb, var(--held) 45%, transparent); }
+.copy:hover { color: var(--ink); background: var(--card-hover); }
+.copy.done { color: var(--held); }
 
-/* --- one picture, made big ---------------------------------------------- */
-.lightbox {
-  position: fixed; inset: 0; z-index: 10;
-  background: color-mix(in srgb, var(--ground) 78%, #000);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+/* --------------------------------------------------------------------------
+   The viewer.
+
+   The one screen a person uses to decide whether to approve something, so it
+   gets the whole window, the real file at its real resolution, and — when a
+   screen moved — the approved picture and the new one under a line you drag.
+   Past about two times, the smoothing comes off: somebody zooming in is asking
+   to see the actual pixels, not a guess at what is between them.
+   -------------------------------------------------------------------------- */
+.viewer {
+  position: fixed; inset: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  background: color-mix(in srgb, var(--ground) 92%, #000);
+  animation: viewerin 220ms var(--ease) both;
+}
+@keyframes viewerin { from { opacity: 0; } to { opacity: 1; } }
+
+.vtop {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 12px 11px var(--pad);
+}
+/* Three parts, and the outer two share what is left over, so the words stay in
+   the middle and the way out stays hard right whether there are four pictures
+   to choose between or one. */
+.vname {
+  flex: 1 1 0; min-width: 0;
+  font-size: var(--t-name); color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.vmodes {
+  flex: 0 1 auto; min-width: 0;
+  display: flex; justify-content: center; gap: 3px;
+  overflow-x: auto; scrollbar-width: none;
+}
+.vmodes::-webkit-scrollbar { display: none; }
+.vright { flex: 1 1 0; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.vmodes button {
+  position: relative;
+  font-size: var(--t-body); color: var(--faint);
+  background: transparent; border: 0; cursor: pointer;
+  padding: 5px 9px 6px; white-space: nowrap;
+  transition: color var(--quick) var(--ease);
+}
+.vmodes button::after {
+  content: ''; position: absolute; left: 50%; right: 50%; bottom: 1px; height: 1.5px;
+  border-radius: 2px; background: var(--accent); opacity: 0;
+  transition: left var(--calm) var(--ease), right var(--calm) var(--ease), opacity var(--quick) var(--ease);
+}
+.vmodes button:hover { color: var(--soft); }
+.vmodes button.on { color: var(--ink); }
+.vmodes button.on::after { left: 14%; right: 14%; opacity: 1; }
+.vzoom { flex: 0 0 auto; font-size: var(--t-meta); color: var(--faint); }
+.vclose {
+  flex: 0 0 auto;
   display: flex; align-items: center; justify-content: center;
-  padding: 18px; cursor: zoom-out;
+  width: 28px; height: 28px; border-radius: 8px;
+  color: var(--soft); background: transparent; border: 0; cursor: pointer;
+  transition: color var(--quick) var(--ease), background var(--quick) var(--ease);
 }
-.lightbox img {
-  max-width: 100%; max-height: 100%;
-  border-radius: var(--radius-sm);
-  box-shadow: 0 0 0 1px var(--line-firm), 0 36px 70px -34px #000;
+.vclose:hover { color: var(--ink); background: var(--card-hover); }
+
+.vstage {
+  position: relative;
+  flex: 1 1 auto; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
 }
+.vstage.dragging { cursor: grabbing; }
+.vframe {
+  position: relative;
+  will-change: transform;
+  box-shadow: 0 0 0 1px var(--line-firm), 0 40px 80px -50px #000;
+  /* Opacity only. An animation that also names the transform wins against the
+     inline transform the zoom writes, and the picture would never move again. */
+  animation: viewerpic 260ms var(--ease) both;
+}
+@keyframes viewerpic { from { opacity: 0; } to { opacity: 1; } }
+.vlayer {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  display: none;
+}
+.vlayer.show { display: block; }
+.vframe.sharp .vlayer { image-rendering: pixelated; }
+
+/* The line you drag. It lives in the window rather than in the picture, so it
+   stays one hair wide however far in you have zoomed. */
+.vwipe {
+  position: absolute; top: 0; width: 22px;
+  margin-left: -11px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.vwipe::before {
+  content: ''; position: absolute; top: 0; height: 100%; width: 1.5px;
+  background: color-mix(in srgb, #fff 78%, transparent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.vgrip {
+  position: relative;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: color-mix(in srgb, #fff 88%, transparent);
+  box-shadow: 0 2px 10px -2px rgba(0, 0, 0, 0.7);
+  transition: transform var(--quick) var(--ease);
+}
+.vwipe:hover .vgrip, .vwipe.holding .vgrip { transform: scale(1.14); }
+
+.vfoot {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px var(--pad) 6px;
+}
+.vhelp {
+  flex: 0 0 auto;
+  padding: 10px var(--pad) 15px;
+  text-align: center;
+  font-size: var(--t-label); letter-spacing: 0.03em;
+  color: var(--faint);
+}
+.vside { flex: 0 0 auto; font-size: var(--t-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.vblend {
+  flex: 1 1 auto; min-width: 0;
+  -webkit-appearance: none; appearance: none;
+  height: 3px; border-radius: 999px;
+  background: linear-gradient(to right, var(--moved), var(--accent));
+  outline: none; cursor: pointer;
+}
+.vblend::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 15px; height: 15px; border-radius: 50%;
+  background: var(--ink);
+  box-shadow: 0 2px 8px -2px var(--shadow);
+  transition: transform var(--quick) var(--ease);
+}
+.vblend:active::-webkit-slider-thumb { transform: scale(1.15); }
 
 /* --- the range it has to survive ---------------------------------------- */
 
 /* Dragged narrow. Everything stays, nothing wraps into a mess. */
 @media (max-width: 330px) {
-  :root { --pad: 11px; --radius: 16px; }
-  .state { font-size: 15px; }
+  :root { --pad: 12px; --radius: 16px; --t-lead: 15px; }
   .target .app, .target .sep { display: none; }
   .row { gap: 9px; padding: 9px 11px; }
   .detail { padding: 0 11px 12px 28px; }
   .shot { max-height: 30vh; }
-  .switch button { font-size: 10px; padding: 5px 3px; }
+  .switch button { font-size: var(--t-meta); padding: 6px 2px 7px; }
   .ttotal { display: none; }
   .caption { display: block; }
   .shotname { display: block; white-space: normal; overflow-wrap: anywhere; }
   .shotout { display: block; text-align: left; margin-top: 2px; }
   .timing { padding: 10px var(--pad) 11px; }
+  .vname { display: none; }
 }
 
 /* Pulled wide. Two columns rather than one very long thin one, so the picture
    gets the room and the list stays beside it instead of below the fold. */
 @media (min-width: 720px) {
-  :root { --pad: 22px; }
-  .body { flex-direction: row; gap: 26px; padding-bottom: 4px; }
+  :root { --pad: 24px; --t-lead: 19px; }
+  .body { flex-direction: row; gap: 28px; padding-bottom: 4px; }
   .stage { flex: 1 1 54%; min-width: 0; align-self: center; padding-top: 0; }
-  .scroll { flex: 1 1 46%; min-width: 0; padding-top: 20px; }
+  .scroll { flex: 1 1 46%; min-width: 0; padding-top: 22px; }
   .shot { max-height: 58vh; }
-  .state { font-size: 19px; }
   .timing { margin-top: 22px; }
 }
 
@@ -820,6 +1086,17 @@ const SCRIPT = `
     // still appear one by one as the run reaches them.
   }
 
+  /**
+   * Point an image at a file, or at nothing at all.
+   * @param {HTMLImageElement} img
+   * @param {string|undefined|null} url
+   */
+  function setSource(img, url) {
+    if (!img) return;
+    if (url) img.setAttribute('src', url);
+    else img.removeAttribute('src');
+  }
+
   function el(id) { return document.getElementById(id); }
 
   var ui = {
@@ -834,10 +1111,19 @@ const SCRIPT = `
     timing: el('timing'), thead: el('thead'), ttotal: el('ttotal'), tbar: el('tbar'), tkey: el('tkey'),
     footer: el('footer'), cmd: el('cmd'), copy: el('copy'),
     aura: document.querySelector('.aura'),
-    lightbox: el('lightbox'), lightimg: el('lightimg')
+    viewer: el('viewer'), vname: el('vname'), vmodes: el('vmodes'), vzoom: el('vzoom'),
+    vclose: el('vclose'), vstage: el('vstage'), vframe: el('vframe'),
+    vApproved: el('vApproved'), vNow: el('vNow'), vDiff: el('vDiff'),
+    vwipe: el('vwipe'), vfoot: el('vfoot'), vblend: el('vblend')
   };
 
   var CHEVRON = '<svg class="glyph chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 10.5l3.5 3.5 3.5-3.5"></path></svg>';
+
+  // Somebody who has asked their computer for less movement gets none of it:
+  // the CSS switches every animation off, and everything this file animates in
+  // JavaScript jumps straight to its final value instead.
+  var CALM = false;
+  try { CALM = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { CALM = false; }
 
   // -------------------------------------------------------------------------
   // Words. These match the terminal on purpose — the same run should not be
@@ -918,6 +1204,79 @@ const SCRIPT = `
   }
 
   // -------------------------------------------------------------------------
+  // Numbers count rather than jump.
+  //
+  // A tally that flicks from 3 to 7 has to be re-read; one that counts up to 7
+  // has already been read by the time it stops. Four hundred milliseconds, the
+  // same curve as everything else, and nothing at all for anyone who asked for
+  // less motion.
+  // -------------------------------------------------------------------------
+
+  function tweenTo(node, to, format) {
+    var target = Number(to);
+    if (!isFinite(target)) return;
+    var from = typeof node.__from === 'number' ? node.__from : 0;
+    if (node.__raf) { cancelAnimationFrame(node.__raf); node.__raf = 0; }
+    if (CALM || from === target) {
+      node.__from = target;
+      node.textContent = format(target);
+      return;
+    }
+    var began = performance.now();
+    var span = 420;
+    function step(now) {
+      var k = (now - began) / span;
+      if (k > 1) k = 1;
+      var eased = 1 - Math.pow(1 - k, 3);
+      var value = k === 1 ? target : from + (target - from) * eased;
+      node.__from = value;
+      node.textContent = format(value);
+      if (k < 1) node.__raf = requestAnimationFrame(step);
+      else { node.__raf = 0; node.__from = target; }
+    }
+    node.__raf = requestAnimationFrame(step);
+  }
+
+  // -------------------------------------------------------------------------
+  // Pictures.
+  //
+  // The panel is a local page, so it can load the real PNG the run just wrote
+  // to disk. That is the whole difference between a picture you can look at and
+  // a smudge: the small preview inside the event is 320 pixels wide, and this
+  // window is wider than that before anybody zooms in. So the preview is only
+  // ever what fills the frame for the moment before the file is on disk, and it
+  // is replaced by the real thing the instant that file will load.
+  // -------------------------------------------------------------------------
+
+  var known = Object.create(null);   // src -> 1 loaded, 2 refused
+  var held = [];                     // keep the decoded pictures alive
+
+  function preload(src, then) {
+    if (!src) { if (then) then(false); return; }
+    if (known[src] === 1) { if (then) then(true); return; }
+    if (known[src] === 2) { if (then) then(false); return; }
+    var img = new Image();
+    img.onload = function () { known[src] = 1; if (then) then(true); };
+    img.onerror = function () { known[src] = 2; if (then) then(false); };
+    img.src = src;
+    held.push(img);
+    if (held.length > 24) held.shift();
+  }
+
+  function preloadAll(p) {
+    if (!p) return;
+    preload(p.shotFile);
+    preload(p.approvedFile);
+    preload(p.diffFile);
+  }
+
+  // What to show for each of the three pictures: the real file when there is
+  // one, the preview until then.
+  function nowOf(p) { return (p && (p.shotFile || p.thumbnail)) || ''; }
+  function approvedOf(p) { return (p && (p.approvedFile || p.approvedThumb)) || ''; }
+  function diffOf(p) { return (p && (p.diffFile || p.diffThumb)) || ''; }
+
+  // -------------------------------------------------------------------------
   // The list. One line per check at rest; everything else on request.
   // -------------------------------------------------------------------------
 
@@ -925,12 +1284,23 @@ const SCRIPT = `
   var order = [];
   var outcomes = Object.create(null);
   var expected = { picture: 0, guard: 0 };
+  var seeding = false;
+  var TONES = ['held', 'moved', 'broke', 'wait', 'skip', 'running', 'pending'];
 
   function keyFor(kind, name) { return kind + ':' + name; }
 
   function addItem(kind, name, describe) {
     var root = document.createElement('div');
     root.className = 'item fresh pending';
+    // Rows arrive one after another rather than all at once. Only while the
+    // opening list is being drawn — a row that appears mid-run is on its own
+    // and has nothing to be staggered against.
+    var wait = seeding ? Math.min(order.length, 16) * 24 : 0;
+    if (wait && !CALM) root.style.animationDelay = wait + 'ms';
+    setTimeout(function () {
+      root.classList.remove('fresh');
+      root.style.animationDelay = '';
+    }, 420 + wait);
 
     var row = document.createElement('button');
     row.type = 'button';
@@ -1038,20 +1408,18 @@ const SCRIPT = `
 
   /** Put a screen's pictures back in the hero, with the words that went with them. */
   function recall(entry) {
-    var pics = entry.pics;
-    if (!pics) return;
+    var p = entry.pics;
+    if (!p) return;
     var showed = false;
-    if (pics.status === 'changed') showed = comparePictures(pics);
-    if (!showed && pics.thumbnail) {
-      singlePicture();
-      showShot(pics.thumbnail, 'the picture taken of ' + entry.name);
+    if (p.status === 'changed') showed = comparePictures(p);
+    if (!showed && nowOf(p)) {
+      singlePicture(p, entry.name);
       showed = true;
     }
     if (!showed) return;
     nameTheShot(entry.name);
-    sayOutcome(entry.tone, outcomeShort(pics));
-    for (var i = 0; i < order.length; i++) order[i].root.classList.remove('showing');
-    entry.root.classList.add('showing');
+    sayOutcome(entry.tone, outcomeShort(p));
+    markShowing(entry);
   }
 
   function setOpen(entry, open) {
@@ -1068,21 +1436,20 @@ const SCRIPT = `
 
   function setTone(entry, tone) {
     entry.tone = tone;
-    var classes = ['item'];
-    if (tone) classes.push(tone);
-    if (!tone) classes.push('pending');
-    if (needsPerson(tone)) classes.push('attention');
-    if (entry.open) classes.push('open');
-    if (!entry.hasDetail) classes.push('plain');
-    if (entry.root.classList.contains('showing')) classes.push('showing');
-    entry.root.className = classes.join(' ');
+    var list = entry.root.classList;
+    for (var i = 0; i < TONES.length; i++) list.remove(TONES[i]);
+    list.add(tone || 'pending');
+    list.toggle('attention', needsPerson(tone));
     entry.root.style.setProperty('--tone', tone ? 'var(--' + tone + ')' : 'var(--accent)');
     paintMeter();
   }
 
   // -------------------------------------------------------------------------
-  // The meter: one hairline, sliced by outcome.
+  // The meter: one hairline, sliced by outcome. Each slice lights once as it
+  // lands, in its own colour, and then it is just a colour.
   // -------------------------------------------------------------------------
+
+  var painted = [];
 
   function meterTotal() {
     var planned = (expected.picture || 0) + (expected.guard || 0);
@@ -1103,36 +1470,56 @@ const SCRIPT = `
     }
     for (var i = 0; i < order.length; i++) {
       var tone = order[i].tone || '';
-      slices[i].className = 'slice' + (tone ? ' ' + tone : '');
+      var settled = tone && tone !== 'running';
+      var lands = settled && painted[i] !== tone && !CALM;
+      slices[i].className = 'slice' + (tone ? ' ' + tone : '') + (lands ? ' land' : '');
       slices[i].style.width = width;
+      painted[i] = tone;
     }
   }
 
-  function updateCounts() {
-    var done = 0;
+  var doneTicker = { __from: 0, textContent: '' };
+
+  function tally() {
+    var counted = { done: 0, changed: 0, failed: 0, waiting: 0, skipped: 0 };
     for (var i = 0; i < order.length; i++) {
-      if (outcomes[keyFor(order[i].kind, order[i].name)]) done++;
+      var status = outcomes[keyFor(order[i].kind, order[i].name)];
+      if (!status) continue;
+      counted.done++;
+      if (status === 'moved') counted.changed++;
+      else if (status === 'broke') counted.failed++;
+      else if (status === 'wait') counted.waiting++;
+      else if (status === 'skip') counted.skipped++;
     }
-    var total = meterTotal();
-    // Say what happened, not just how far along it is. "11/11" tells a person the
-    // run finished and nothing else; they still have to read the whole list to find
-    // out whether they can walk away. The tally answers that in four words.
-    var tally = { changed: 0, failed: 0, waiting: 0, skipped: 0 };
-    for (var t = 0; t < order.length; t++) {
-      var st = outcomes[keyFor(order[t].kind, order[t].name)];
-      if (st === 'changed') tally.changed++;
-      else if (st === 'failed' || st === 'missing') tally.failed++;
-      else if (st === 'new') tally.waiting++;
-      else if (st === 'skipped') tally.skipped++;
-    }
+    return counted;
+  }
+
+  // Say what happened, not just how far along it is. "11 of 11" tells a person the
+  // run finished and nothing else; they still have to read the whole list to find
+  // out whether they can walk away. The tally answers that in four words.
+  function countsLine(done, counted, total) {
     var parts = [];
-    if (tally.failed) parts.push(commas(tally.failed) + ' broke');
-    if (tally.changed) parts.push(commas(tally.changed) + ' moved');
-    if (tally.waiting) parts.push(commas(tally.waiting) + ' needs you');
-    if (tally.skipped) parts.push(commas(tally.skipped) + ' skipped');
-    var counted = commas(done) + ' of ' + commas(total);
-    if (done === total && total > 0 && parts.length === 0) counted += ' — all held';
-    ui.counts.textContent = order.length ? counted + (parts.length ? ' · ' + parts.join(' · ') : '') : '';
+    if (counted.failed) parts.push(commas(counted.failed) + ' broke');
+    if (counted.changed) parts.push(commas(counted.changed) + ' moved');
+    if (counted.waiting) parts.push(commas(counted.waiting) + ' needs you');
+    if (counted.skipped) parts.push(commas(counted.skipped) + ' skipped');
+    var line = commas(done) + ' of ' + commas(total);
+    if (counted.done === total && total > 0 && parts.length === 0) line += ' — all held';
+    return line + (parts.length ? ' · ' + parts.join(' · ') : '');
+  }
+
+  function updateCounts() {
+    var counted = tally();
+    var total = meterTotal();
+    if (!order.length) {
+      ui.counts.textContent = '';
+      doneTicker.__from = 0;
+    } else {
+      tweenTo(doneTicker, counted.done, function (value) {
+        ui.counts.textContent = countsLine(Math.round(value), counted, total);
+        return '';
+      });
+    }
     ui.countScreens.textContent = countIn('picture');
     ui.countGuards.textContent = countIn('guard');
     ui.nothing.hidden = order.length > 0;
@@ -1160,7 +1547,7 @@ const SCRIPT = `
   ui.follow.addEventListener('click', function () {
     following = true;
     ui.follow.hidden = true;
-    if (runningItem) runningItem.root.scrollIntoView({ block: 'nearest' });
+    if (runningItem) runningItem.root.scrollIntoView({ block: 'nearest', behavior: CALM ? 'auto' : 'smooth' });
   });
 
   /** Which row the picture on the glass belongs to. */
@@ -1173,33 +1560,63 @@ const SCRIPT = `
   function markRunning(entry) {
     runningItem = entry;
     setTone(entry, 'running');
-    if (following) entry.root.scrollIntoView({ block: 'nearest' });
+    if (following) entry.root.scrollIntoView({ block: 'nearest', behavior: CALM ? 'auto' : 'smooth' });
   }
 
   // -------------------------------------------------------------------------
-  // The picture
+  // The hero
   // -------------------------------------------------------------------------
 
   var frontIsA = false;
-  var lastShot = '';
   var shownSrc = '';
   var shownAlt = '';
+  var showSeq = 0;
 
-  function showShot(src, alt) {
+  // What is on the glass right now, so the viewer opens on the same thing.
+  // Whether the person picked that picture themselves: it is the
+  // difference between continuing what they were looking at and second-guessing
+  // a default the panel chose for them.
+  var onGlass = { pics: null, name: '', mode: 'now', touched: false };
+
+  function paint(src, alt) {
     if (!src) return;
     // A run that turned out to have pictures after all gets its glass back.
     ui.stage.hidden = false;
-    shownSrc = src;
-    shownAlt = alt || '';
     ui.blank.hidden = true;
     ui.shot.classList.remove('empty');
+    shownAlt = alt || '';
+    if (src === shownSrc) return;
+    shownSrc = src;
     var next = frontIsA ? ui.layerB : ui.layerA;
     var current = frontIsA ? ui.layerA : ui.layerB;
+    next.classList.remove('on');
+    next.classList.remove('out');
     next.src = src;
     next.alt = shownAlt;
+    // Read a layout value so the browser starts the fade from where the layer
+    // rests rather than skipping straight to the end of it.
+    void next.offsetWidth;
     next.classList.add('on');
     current.classList.remove('on');
+    current.classList.add('out');
     frontIsA = !frontIsA;
+  }
+
+  /**
+   * Show a picture: the real file if it will load, the small preview until it
+   * does. The swap between the two is the same cross-fade as any other change
+   * of picture, so a screen going from blurred to sharp reads as the panel
+   * finishing a thought rather than as a glitch.
+   */
+  function showPicture(sharp, preview, alt) {
+    var mine = ++showSeq;
+    if (sharp && known[sharp] === 1) { paint(sharp, alt); return; }
+    if (preview) paint(preview, alt);
+    if (!sharp || sharp === preview) return;
+    preload(sharp, function (ok) {
+      if (!ok || mine !== showSeq) return;
+      paint(sharp, alt);
+    });
   }
 
   function nameTheShot(name) {
@@ -1214,14 +1631,26 @@ const SCRIPT = `
     document.documentElement.style.setProperty('--tint', value);
   }
 
+  // The shutter. On while the app is really being photographed, off the instant
+  // the picture lands — never a loop that runs when nothing is happening.
+  function scanning(on) {
+    ui.shot.classList.toggle('scanning', !!on);
+  }
+
   function clearTabs() {
     ui.tabs.hidden = true;
     ui.tabs.textContent = '';
   }
 
-  function singlePicture() {
+  /** One picture, no comparison to make: the one that was just taken. */
+  function singlePicture(p, name) {
     clearTabs();
     ui.shotout.hidden = true;
+    onGlass.pics = p || null;
+    onGlass.name = name || '';
+    onGlass.mode = 'now';
+    onGlass.touched = false;
+    showPicture(p && p.shotFile, p && p.thumbnail, 'the picture taken of ' + (name || 'this screen'));
   }
 
   /**
@@ -1242,30 +1671,37 @@ const SCRIPT = `
   // A screen that moved is the one moment a person has a real decision to make,
   // so all three pictures are one click away and the difference is the one
   // already on screen — that is the picture that answers the question.
-  function comparePictures(ev) {
+  function comparePictures(p) {
     var choices = [];
-    if (ev.approvedThumb) choices.push({ label: 'Approved', src: ev.approvedThumb });
-    var now = ev.thumbnail || lastShot;
-    if (now) choices.push({ label: 'Now', src: now });
-    if (ev.diffThumb) choices.push({ label: 'Difference', src: ev.diffThumb });
+    if (approvedOf(p)) choices.push({ mode: 'approved', label: 'Approved', sharp: p.approvedFile, preview: p.approvedThumb });
+    if (nowOf(p)) choices.push({ mode: 'now', label: 'Now', sharp: p.shotFile, preview: p.thumbnail });
+    if (diffOf(p)) choices.push({ mode: 'diff', label: 'Difference', sharp: p.diffFile, preview: p.diffThumb });
     // Two pictures is the whole point; one on its own says nothing a person
     // could act on, so leave the live picture up instead.
     if (choices.length < 2) return false;
 
+    onGlass.pics = p;
+    onGlass.name = p.name || '';
+    onGlass.touched = false;
     ui.tabs.textContent = '';
+    ui.tabs.style.setProperty('--tone', 'var(--moved)');
+
     var buttons = [];
     function select(index) {
       for (var i = 0; i < buttons.length; i++) {
         buttons[i].className = i === index ? 'on' : '';
         buttons[i].setAttribute('aria-pressed', i === index ? 'true' : 'false');
       }
-      showShot(choices[index].src, choices[index].label.toLowerCase() + ' picture of ' + (ev.name || 'this screen'));
+      var choice = choices[index];
+      onGlass.mode = choice.mode;
+      showPicture(choice.sharp, choice.preview,
+        choice.label.toLowerCase() + ' picture of ' + (p.name || 'this screen'));
     }
     choices.forEach(function (choice, index) {
       var button = document.createElement('button');
       button.type = 'button';
       button.textContent = choice.label;
-      button.addEventListener('click', function () { select(index); });
+      button.addEventListener('click', function () { onGlass.touched = true; select(index); });
       buttons.push(button);
       ui.tabs.appendChild(button);
     });
@@ -1273,22 +1709,314 @@ const SCRIPT = `
 
     var preferred = choices.length - 1;
     for (var i = 0; i < choices.length; i++) {
-      if (choices[i].label === 'Difference') preferred = i;
+      if (choices[i].mode === 'diff') preferred = i;
     }
     select(preferred);
     return true;
   }
 
-  function enlarge(src, alt) {
-    if (!src) return;
-    ui.lightimg.src = src;
-    ui.lightimg.alt = alt || '';
-    ui.lightbox.hidden = false;
+  // -------------------------------------------------------------------------
+  // The viewer.
+  //
+  // The panel is a local page, so this is the real file at its real size. Wheel
+  // or pinch to zoom, drag to move around, double-click to fit, Escape to put
+  // it away. Past about twice the size it fits at, the smoothing comes off —
+  // somebody who has zoomed in is asking to see the pixels themselves.
+  //
+  // For a screen that moved, this is also where the decision gets made, so the
+  // approved picture and the new one sit under one line you can drag across
+  // them, with a fade for the changes a hard edge hides, and the difference is
+  // one word away.
+  // -------------------------------------------------------------------------
+
+  var view = {
+    open: false, mode: '', z: 1, px: 0, py: 0,
+    natW: 0, natH: 0, frameW: 0, frameH: 0, fit: 1,
+    wipe: 50, blend: 100, pics: null, name: ''
+  };
+
+  function viewerSources(p) {
+    return {
+      now: p ? (p.shotFile || p.thumbnail || '') : '',
+      approved: p ? (p.approvedFile || p.approvedThumb || '') : '',
+      diff: p ? (p.diffFile || p.diffThumb || '') : ''
+    };
   }
-  ui.shot.addEventListener('click', function () { enlarge(shownSrc, shownAlt); });
-  ui.lightbox.addEventListener('click', function () { ui.lightbox.hidden = true; });
+
+  var MODE_WORDS = { now: 'Now', approved: 'Approved', compare: 'Before & after', diff: 'Difference' };
+
+  function openViewer(p, name, wanted) {
+    var src = viewerSources(p);
+    if (!src.now && !src.approved && !src.diff) return;
+
+    view.pics = p;
+    view.name = name || '';
+    view.wipe = 50;
+    view.blend = 100;
+    ui.vblend.value = '100';
+    ui.vname.textContent = view.name;
+
+    // An empty src is not "no picture" — the browser resolves it against the page's
+    // own address and fetches the panel document as though it were an image, which
+    // fails and leaves a broken element sitting in the viewer. Take the attribute off.
+    setSource(ui.vApproved, src.approved);
+    setSource(ui.vNow, src.now);
+    setSource(ui.vDiff, src.diff);
+
+    var modes = [];
+    if (src.now) modes.push('now');
+    if (src.approved) modes.push('approved');
+    if (src.approved && src.now) modes.push('compare');
+    if (src.diff) modes.push('diff');
+
+    ui.vmodes.textContent = '';
+    modes.forEach(function (mode) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.mode = mode;
+      button.textContent = MODE_WORDS[mode];
+      button.addEventListener('click', function () { setMode(mode); });
+      ui.vmodes.appendChild(button);
+    });
+    ui.vmodes.hidden = modes.length < 2;
+
+    // The size everything is laid out at: whichever real picture we have.
+    var measuring = src.now || src.approved || src.diff;
+    view.natW = 0; view.natH = 0;
+    var probe = new Image();
+    probe.onload = function () {
+      view.natW = probe.naturalWidth || 0;
+      view.natH = probe.naturalHeight || 0;
+      fitPicture();
+    };
+    probe.onerror = function () { view.natW = 0; view.natH = 0; fitPicture(); };
+    probe.src = measuring;
+
+    view.open = true;
+    ui.viewer.hidden = false;
+
+    var start = wanted && modes.indexOf(wanted) >= 0 ? wanted
+      : (modes.indexOf('compare') >= 0 ? 'compare' : modes[0]);
+    setMode(start);
+    resetZoom(true);
+  }
+
+  function closeViewer() {
+    if (!view.open) return;
+    view.open = false;
+    ui.viewer.hidden = true;
+    ui.vNow.style.clipPath = '';
+    ui.vwipe.hidden = true;
+  }
+
+  function setMode(mode) {
+    view.mode = mode;
+    var buttons = ui.vmodes.children;
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].className = buttons[i].dataset.mode === mode ? 'on' : '';
+    }
+    var comparing = mode === 'compare';
+    ui.vApproved.classList.toggle('show', mode === 'approved' || comparing);
+    ui.vNow.classList.toggle('show', mode === 'now' || comparing);
+    ui.vDiff.classList.toggle('show', mode === 'diff');
+    ui.vwipe.hidden = !comparing;
+    ui.vfoot.hidden = !comparing;
+    ui.vNow.style.opacity = comparing ? String(view.blend / 100) : '1';
+    ui.vNow.style.clipPath = comparing ? 'inset(0 0 0 ' + view.wipe + '%)' : '';
+    placeWipe();
+  }
+
+  /** How big the frame is when the whole picture fits in the window. */
+  function fitPicture() {
+    var wide = ui.vstage.clientWidth;
+    var tall = ui.vstage.clientHeight;
+    var natW = view.natW || 16;
+    var natH = view.natH || 10;
+    var room = 0.94;
+    view.fit = Math.min((wide * room) / natW, (tall * room) / natH);
+    view.frameW = Math.max(1, Math.round(natW * view.fit));
+    view.frameH = Math.max(1, Math.round(natH * view.fit));
+    ui.vframe.style.width = view.frameW + 'px';
+    ui.vframe.style.height = view.frameH + 'px';
+    applyView();
+  }
+
+  function clampPan() {
+    var wide = ui.vstage.clientWidth;
+    var tall = ui.vstage.clientHeight;
+    var w = view.frameW * view.z;
+    var h = view.frameH * view.z;
+    var mx = Math.max(0, (w - wide) / 2) + 20;
+    var my = Math.max(0, (h - tall) / 2) + 20;
+    if (view.px > mx) view.px = mx;
+    if (view.px < -mx) view.px = -mx;
+    if (view.py > my) view.py = my;
+    if (view.py < -my) view.py = -my;
+  }
+
+  function applyView() {
+    clampPan();
+    ui.vframe.style.transform =
+      'translate3d(' + Math.round(view.px) + 'px,' + Math.round(view.py) + 'px,0) scale(' + view.z + ')';
+    ui.vzoom.textContent = view.z.toFixed(1) + '×';
+    // Once one pixel of the picture is covering about two pixels of the screen,
+    // the smoothing comes off and the real pixels show. Not a moment before: a
+    // picture being made SMALLER, which is what a retina screenshot in a narrow
+    // panel is doing even at four times, is wrecked by turning smoothing off.
+    // The screen's own density counts, which is why it is in the sum.
+    var dense = view.fit * view.z * (window.devicePixelRatio || 1);
+    ui.vframe.classList.toggle('sharp', dense >= 1.9);
+    placeWipe();
+  }
+
+  // The line lives in the window rather than in the picture, so it stays one
+  // hair wide however far in somebody has zoomed — which means its position has
+  // to be worked out again every time the picture moves.
+  function placeWipe() {
+    if (ui.vwipe.hidden) return;
+    var wide = ui.vstage.clientWidth;
+    var tall = ui.vstage.clientHeight;
+    var x = wide / 2 + view.px + view.z * (view.frameW * (view.wipe / 100) - view.frameW / 2);
+    ui.vwipe.style.left = Math.round(x) + 'px';
+    // It is only ever as long as the picture is, so it never draws a line
+    // through the empty space above and below one.
+    var height = view.frameH * view.z;
+    var top = tall / 2 + view.py - height / 2;
+    var bottom = top + height;
+    if (top < 0) top = 0;
+    if (bottom > tall) bottom = tall;
+    ui.vwipe.style.top = Math.round(top) + 'px';
+    ui.vwipe.style.height = Math.round(Math.max(0, bottom - top)) + 'px';
+    ui.vNow.style.clipPath = 'inset(0 0 0 ' + view.wipe + '%)';
+  }
+
+  function resetZoom(quiet) {
+    view.z = 1; view.px = 0; view.py = 0;
+    if (!quiet && !CALM) {
+      ui.vframe.style.transition = 'transform 260ms cubic-bezier(0.22,0.72,0.24,1)';
+      setTimeout(function () { ui.vframe.style.transition = ''; }, 300);
+    }
+    applyView();
+  }
+
+  function zoomAt(factor, clientX, clientY) {
+    var rect = ui.vstage.getBoundingClientRect();
+    var cx = clientX - rect.left - rect.width / 2;
+    var cy = clientY - rect.top - rect.height / 2;
+    var next = view.z * factor;
+    if (next < 1) next = 1;
+    if (next > 8) next = 8;
+    if (next === view.z) return;
+    // Keep whatever is under the pointer under the pointer.
+    var fx = (cx - view.px) / view.z;
+    var fy = (cy - view.py) / view.z;
+    view.px = cx - next * fx;
+    view.py = cy - next * fy;
+    view.z = next;
+    applyView();
+  }
+
+  ui.vstage.addEventListener('wheel', function (e) {
+    if (!view.open) return;
+    e.preventDefault();
+    // A trackpad pinch arrives here as a wheel with the control key held, and
+    // it wants a finer touch than a mouse wheel does.
+    var rate = e.ctrlKey ? 0.011 : 0.0026;
+    zoomAt(Math.exp(-e.deltaY * rate), e.clientX, e.clientY);
+  }, { passive: false });
+
+  ui.vstage.addEventListener('dblclick', function () { resetZoom(false); });
+
+  var panning = null;
+  ui.vstage.addEventListener('pointerdown', function (e) {
+    if (!view.open || e.button !== 0) return;
+    if (ui.vwipe.contains(e.target)) return;
+    panning = { x: e.clientX, y: e.clientY, px: view.px, py: view.py, id: e.pointerId };
+    ui.vstage.classList.add('dragging');
+    try { ui.vstage.setPointerCapture(e.pointerId); } catch (err) { /* a pointer we cannot hold is still a pointer we can follow */ }
+  });
+  ui.vstage.addEventListener('pointermove', function (e) {
+    if (!panning || e.pointerId !== panning.id) return;
+    view.px = panning.px + (e.clientX - panning.x);
+    view.py = panning.py + (e.clientY - panning.y);
+    applyView();
+  });
+  function endPan(e) {
+    if (!panning) return;
+    ui.vstage.classList.remove('dragging');
+    try { ui.vstage.releasePointerCapture(panning.id); } catch (err) { /* already gone */ }
+    panning = null;
+  }
+  ui.vstage.addEventListener('pointerup', endPan);
+  ui.vstage.addEventListener('pointercancel', endPan);
+
+  var wiping = null;
+  ui.vwipe.addEventListener('pointerdown', function (e) {
+    e.stopPropagation();
+    wiping = e.pointerId;
+    ui.vwipe.classList.add('holding');
+    try { ui.vwipe.setPointerCapture(e.pointerId); } catch (err) { /* as above */ }
+  });
+  ui.vwipe.addEventListener('pointermove', function (e) {
+    if (wiping === null || e.pointerId !== wiping) return;
+    var rect = ui.vstage.getBoundingClientRect();
+    var cx = e.clientX - rect.left - rect.width / 2;
+    var inFrame = (cx - view.px) / view.z + view.frameW / 2;
+    var pct = (inFrame / view.frameW) * 100;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    view.wipe = pct;
+    placeWipe();
+  });
+  function endWipe(e) {
+    if (wiping === null) return;
+    ui.vwipe.classList.remove('holding');
+    try { ui.vwipe.releasePointerCapture(wiping); } catch (err) { /* already gone */ }
+    wiping = null;
+  }
+  ui.vwipe.addEventListener('pointerup', endWipe);
+  ui.vwipe.addEventListener('pointercancel', endWipe);
+
+  ui.vblend.addEventListener('input', function () {
+    view.blend = Number(ui.vblend.value) || 0;
+    if (view.mode === 'compare') ui.vNow.style.opacity = String(view.blend / 100);
+  });
+
+  ui.vclose.addEventListener('click', closeViewer);
+
+  window.addEventListener('resize', function () {
+    if (view.open) fitPicture();
+  });
+
+  // The picture on the glass opens at the same picture, so clicking it is a
+  // continuation rather than a jump.
+  ui.shot.addEventListener('click', function () {
+    if (ui.shot.classList.contains('empty')) return;
+    if (onGlass.pics) {
+      // A screen that moved opens on the comparison, because that is the
+      // question being asked — unless the person has already chosen which of
+      // the three pictures they wanted to look at, in which case they get that.
+      var wanted = onGlass.mode;
+      if (!onGlass.touched && onGlass.pics.status === 'changed') wanted = 'compare';
+      openViewer(onGlass.pics, onGlass.name, wanted);
+      return;
+    }
+    if (shownSrc) openViewer({ shotFile: shownSrc }, onGlass.name || ui.shotname.textContent, 'now');
+  });
+
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') ui.lightbox.hidden = true;
+    if (!view.open) return;
+    if (e.key === 'Escape') { closeViewer(); return; }
+    if (e.key === '0') { resetZoom(false); return; }
+    if (e.key === '+' || e.key === '=') {
+      var rect = ui.vstage.getBoundingClientRect();
+      zoomAt(1.35, rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return;
+    }
+    if (e.key === '-' || e.key === '_') {
+      var box = ui.vstage.getBoundingClientRect();
+      zoomAt(1 / 1.35, box.left + box.width / 2, box.top + box.height / 2);
+    }
   });
 
   // -------------------------------------------------------------------------
@@ -1296,19 +2024,29 @@ const SCRIPT = `
   // -------------------------------------------------------------------------
 
   var origin = null;
-  var ticking = null;
+  var ticking = 0;
+  var finished = false;
+  var lastPrinted = '';
 
   function startClock(at) {
-    if (origin !== null) return;
+    if (origin !== null || finished) return;
     origin = performance.now() - (Number(at) || 0);
-    ticking = setInterval(function () {
-      ui.clock.textContent = fmt(performance.now() - origin);
-    }, 100);
+    var tick = function () {
+      var text = fmt(performance.now() - origin);
+      if (text !== lastPrinted) { lastPrinted = text; ui.clock.textContent = text; }
+      ticking = requestAnimationFrame(tick);
+    };
+    ticking = requestAnimationFrame(tick);
   }
 
   function stopClock(finalMs) {
-    if (ticking) { clearInterval(ticking); ticking = null; }
-    if (typeof finalMs === 'number' && isFinite(finalMs)) ui.clock.textContent = fmt(finalMs);
+    if (ticking) { cancelAnimationFrame(ticking); ticking = 0; }
+    finished = true;
+    if (typeof finalMs !== 'number' || !isFinite(finalMs)) return;
+    // It counts the last stretch out rather than jumping to the total, which is
+    // what makes the end of a run read as an arrival instead of a cut.
+    ui.clock.__from = origin === null ? finalMs : performance.now() - origin;
+    tweenTo(ui.clock, finalMs, fmt);
   }
 
   // -------------------------------------------------------------------------
@@ -1433,9 +2171,14 @@ const SCRIPT = `
   // The sentence at the top
   // -------------------------------------------------------------------------
 
-  function setState(text, tone) {
+  function setState(text, tone, arriving) {
     ui.state.textContent = text;
     ui.state.className = 'state' + (tone ? ' ' + tone : '');
+    if (!arriving || CALM) return;
+    // Restart the animation rather than letting a second class do nothing.
+    ui.state.classList.remove('arrive');
+    void ui.state.offsetWidth;
+    ui.state.classList.add('arrive');
   }
 
   function countOf(list) { return Array.isArray(list) ? list.length : 0; }
@@ -1489,16 +2232,17 @@ const SCRIPT = `
       // name under the last screen's picture — a caption that lies for a
       // second is worse than one that is a second behind.
       markRunning(ensureItem('picture', String(ev.name || ''), ev.describe));
+      scanning(true);
       return;
     }
 
     if (type === 'screen:shot') {
+      scanning(false);
       var shotRow = ev.name ? ensureItem('picture', String(ev.name), ev.describe) : null;
-      if (ev.thumbnail) {
-        lastShot = ev.thumbnail;
-        if (shotRow) shotRow.pics = { name: ev.name, status: '', thumbnail: ev.thumbnail };
-        singlePicture();
-        showShot(ev.thumbnail, 'the picture just taken of ' + (ev.name || 'this screen'));
+      if (ev.thumbnail || ev.shotFile) {
+        var taken = { name: ev.name, status: '', thumbnail: ev.thumbnail || '', shotFile: ev.shotFile || '' };
+        if (shotRow) shotRow.pics = taken;
+        singlePicture(taken, String(ev.name || ''));
       }
       if (ev.name) nameTheShot(ev.name);
       markShowing(shotRow);
@@ -1506,25 +2250,21 @@ const SCRIPT = `
     }
 
     if (type === 'screen:done') {
+      scanning(false);
       var done = ensureItem('picture', String(ev.name || ''), ev.describe);
       var tone = finish(done, 'picture', ev);
-      if (ev.thumbnail) lastShot = ev.thumbnail;
       // The name, the caption and the light behind the glass all move together
       // with the picture, or none of them move. A screen that could not be
       // photographed leaves the last real one up, correctly labelled, rather
       // than putting its own name under someone else's picture.
       var showed = false;
-      if (ev.status === 'changed') {
-        showed = comparePictures(ev);
-        if (!showed && ev.thumbnail) {
-          singlePicture();
-          showShot(ev.thumbnail, 'the picture just taken of ' + (ev.name || 'this screen'));
+      var p = done.pics;
+      if (p) {
+        if (ev.status === 'changed') showed = comparePictures(p);
+        if (!showed && nowOf(p)) {
+          singlePicture(p, String(ev.name || ''));
           showed = true;
         }
-      } else if (ev.thumbnail) {
-        singlePicture();
-        showShot(ev.thumbnail, 'the picture just taken of ' + (ev.name || 'this screen'));
-        showed = true;
       }
       if (showed) {
         markShowing(done);
@@ -1558,11 +2298,12 @@ const SCRIPT = `
     if (type === 'run:done') {
       runningItem = null;
       ui.follow.hidden = true;
+      scanning(false);
       var summary = ev.summary || null;
       stopClock(typeof ev.at === 'number' ? ev.at : (summary && summary.durationMs));
       var verdict = ev.verdict || fallbackVerdict();
       var worst = worstTone();
-      setState(verdict, worst);
+      setState(verdict, worst, true);
       tint(worst);
       showTiming(ev.timings || (summary && summary.timings));
       showNextStep(summary);
@@ -1573,7 +2314,7 @@ const SCRIPT = `
           for (var i = 0; i < order.length && !first; i++) {
             if (needsPerson(order[i].tone)) first = order[i];
           }
-          if (first) first.root.scrollIntoView({ block: 'center' });
+          if (first) first.root.scrollIntoView({ block: 'center', behavior: CALM ? 'auto' : 'smooth' });
           else ui.scroll.scrollTop = 0;
         });
       }
@@ -1586,25 +2327,48 @@ const SCRIPT = `
   function finish(entry, kind, ev) {
     var tone = toneOf(ev.status);
     if (kind === 'picture') {
+      var before = entry.pics || {};
       entry.pics = {
         name: ev.name, status: ev.status,
-        thumbnail: ev.thumbnail || (entry.pics && entry.pics.thumbnail) || '',
+        thumbnail: ev.thumbnail || before.thumbnail || '',
+        shotFile: ev.shotFile || before.shotFile || '',
         approvedThumb: ev.approvedThumb || '',
+        approvedFile: ev.approvedFile || '',
         diffThumb: ev.diffThumb || '',
+        diffFile: ev.diffFile || '',
         diffPixels: ev.diffPixels, message: ev.message
       };
-      if (!entry.pics.thumbnail && !entry.pics.approvedThumb && !entry.pics.diffThumb) entry.pics = null;
+      if (!nowOf(entry.pics) && !approvedOf(entry.pics) && !diffOf(entry.pics)) entry.pics = null;
+      // Everything this screen owns is fetched now, so the viewer opens on a
+      // picture that is already decoded and the swap never flashes.
+      preloadAll(entry.pics);
     }
     entry.outText = outcomeText(kind, ev);
     entry.failedAt = (kind === 'guard' && ev.status === 'failed' && ev.failedAt) ? ev.failedAt : '';
     entry.story = (kind === 'guard' && ev.status === 'failed' && ev.because) ? ev.because : '';
-    if (typeof ev.durationMs === 'number') entry.time.textContent = fmt(ev.durationMs);
+    if (typeof ev.durationMs === 'number') tweenTo(entry.time, ev.durationMs, fmt);
     entry.tone = tone;
     redraw(entry);
     setTone(entry, tone);
     // Only the checks that want a person open themselves. Everything else stays
-    // one line, which is what keeps a clean run quiet.
-    if (needsPerson(tone)) setOpen(entry, true);
+    // one line, which is what keeps a clean run quiet. A row that has just
+    // opened is worth seeing all of, so the list makes room for it — unless the
+    // person has taken hold of the list, in which case nothing moves.
+    if (needsPerson(tone)) {
+      setOpen(entry, true);
+      if (following) {
+        requestAnimationFrame(function () {
+          entry.root.scrollIntoView({ block: 'nearest', behavior: CALM ? 'auto' : 'smooth' });
+        });
+      }
+    }
+    // Something that broke says so once, with weight, and then sits still.
+    if (tone === 'broke' && !CALM) {
+      entry.root.classList.remove('alarm');
+      void entry.root.offsetWidth;
+      entry.root.classList.add('alarm');
+      setTimeout(function () { entry.root.classList.remove('alarm'); }, 1000);
+    }
     outcomes[keyFor(entry.kind, entry.name)] = tone || 'held';
     updateCounts();
     return tone;
@@ -1655,6 +2419,7 @@ const SCRIPT = `
   // forever next to a result that is already final.
   window.__staysfixed_detach = function () {
     stopClock();
+    scanning(false);
     runningItem = null;
   };
 
@@ -1662,12 +2427,14 @@ const SCRIPT = `
   // at from the first frame instead of appearing empty.
   (function seed() {
     var i;
+    seeding = true;
     for (i = 0; i < (plan.screens || []).length; i++) {
       addItem('picture', plan.screens[i].name, plan.screens[i].describe);
     }
     for (i = 0; i < (plan.guards || []).length; i++) {
       addItem('guard', plan.guards[i].name, plan.guards[i].describe);
     }
+    seeding = false;
     updateCounts();
     if (!order.length) ui.shot.classList.add('empty');
     // Guards only: there will never be a picture, so the panel does not hold a

@@ -495,7 +495,14 @@ export {};
  * @property {string} [message]
  * @property {string} [failedAt]              The plain-language expectation that failed.
  * @property {string} [because]               Why a guard exists.
- * @property {string} [thumbnail]             A small JPEG as a data: URI, for watching.
+ * @property {string} [thumbnail]             A small JPEG as a data: URI — an instant preview, shown
+ *                                          while the real file is still being written.
+ * @property {string} [shotFile]              file:// URL of the FULL-RESOLUTION picture just taken.
+ *                                          The watch panel is itself a local page, so it can load the
+ *                                          real PNG off disk and zoom into actual pixels — a scaled-up
+ *                                          thumbnail is unreadable, which is the whole point of looking.
+ * @property {string} [approvedFile]          file:// URL of the approved picture.
+ * @property {string} [diffFile]              file:// URL of the difference image.
  * @property {string} [approvedThumb]
  * @property {string} [diffThumb]
  * @property {RunSummary} [summary]           Only on 'run:done'.

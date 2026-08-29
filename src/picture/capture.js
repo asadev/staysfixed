@@ -53,7 +53,8 @@ const KNOWN_KEYS = new Set([...ACTION_ORDER, 'text', 'note']);
  * }} settings
  * @param {{fixturesDir: string, record?: boolean, timeoutMs?: number, thumbnail?: boolean}} ctx
  *   `thumbnail` is asked for only while somebody is watching the run happen; it costs a
- *   decode of the picture that was just taken, so it is off unless it is wanted.
+ *   decode of the picture that was just taken (skipped when the masks already decoded it)
+ *   plus about forty milliseconds of shrinking, so it is off unless it is wanted.
  * @returns {Promise<import('../types.js').CaptureReport & {
  *   masks: import('../types.js').MaskRect[],
  *   timings: {steps: number, prepare: number, settle: number},
@@ -134,7 +135,12 @@ export async function captureScreen(page, screen, settings, ctx) {
     spent.settle = since(startedSettle, clock());
 
     const rects = await resolveMasks(page, settings.masks ?? [], { deviceScaleFactor });
-    const png = rects.length > 0 ? paintInto(held.png, rects) : held.png;
+    // Masks force us to decode the picture; hold on to those pixels. The preview a
+    // watcher is shown is made from the very same ones — the picture that gets
+    // compared, blackout boxes and all — so a masked screen decodes a retina
+    // screenshot once instead of twice, which is about eighty milliseconds a screen.
+    const painted = rects.length > 0 ? paintInto(held.png, rects) : null;
+    const png = painted ? painted.png : held.png;
     const size = pngSize(png);
 
     // The picture is taken; now put the app back if this screen asked us to.
@@ -164,7 +170,7 @@ export async function captureScreen(page, screen, settings, ctx) {
       spent,
     };
     if (ctx.thumbnail === true) {
-      const small = await thumbnailOf(png);
+      const small = await thumbnailOf(painted ? painted.image : png);
       if (small) report.thumbnail = small;
     }
     return report;
@@ -190,14 +196,19 @@ function since(from, to) {
 
 /**
  * Paint the masks into a screenshot and re-encode it.
+ *
+ * Hands back the decoded picture as well as the bytes. Whoever wants a preview of this
+ * screen would otherwise decode the very same megapixels a second time, and on a retina
+ * screenshot that is the most expensive thing either of them does.
+ *
  * @param {Buffer} buffer
  * @param {import('../types.js').MaskRect[]} rects
- * @returns {Buffer}
+ * @returns {{png: Buffer, image: import('pngjs').PNG}}
  */
 function paintInto(buffer, rects) {
   const image = PNG.sync.read(buffer);
   paintMasks(image, rects);
-  return PNG.sync.write(image);
+  return { png: PNG.sync.write(image), image };
 }
 
 /**

@@ -16,7 +16,7 @@ import { settingsForScreen } from '../core/config.js';
 import { gitInfo } from '../core/git.js';
 import { StaysFixedError, messageOf } from '../core/errors.js';
 import { safeName } from '../core/paths.js';
-import { emitEvent } from '../core/events.js';
+import { emitEvent, fileUrl } from '../core/events.js';
 
 /**
  * Progress handed to `opts.onStep`, once when a step starts and once when it is done.
@@ -87,7 +87,7 @@ export async function walkApp(project, app, opts = {}) {
       total: chosen.length,
     });
 
-    /** @type {{shot?: string}} */
+    /** @type {{shot?: string, shotFile?: string}} */
     const thumbs = {};
     const step = await walkOneStep(page, screen, {
       index,
@@ -112,6 +112,9 @@ export async function walkApp(project, app, opts = {}) {
       durationMs: step.durationMs,
       message: stepMessage(step),
       thumbnail: thumbs.shot,
+      // The real photo of this step, at full resolution. A walk has nothing to compare
+      // against, so there is no approved picture and no difference to point at.
+      shotFile: thumbs.shotFile,
     });
 
     opts.onStep?.({
@@ -151,7 +154,7 @@ export async function walkApp(project, app, opts = {}) {
  *   record: boolean,
  *   events?: import('../types.js').RunEvents,
  *   thumbnail?: boolean,
- *   thumbs?: {shot?: string},
+ *   thumbs?: {shot?: string, shotFile?: string},
  *   timings?: ReturnType<typeof import('../core/events.js').makeTimings>,
  * }} ctx
  * @returns {Promise<import('../types.js').WalkStep>}
@@ -180,10 +183,7 @@ async function walkOneStep(page, screen, ctx) {
     await fsp.writeFile(target, shot.png);
     file = target;
     consoleErrors = shot.consoleErrors;
-    if (shot.thumbnail) {
-      if (ctx.thumbs) ctx.thumbs.shot = shot.thumbnail;
-      emitEvent(ctx.events, { type: 'screen:shot', name: screen.name, thumbnail: shot.thumbnail });
-    }
+    announceShot(ctx, screen.name, target, shot.thumbnail);
   } catch (cause) {
     error = messageOf(cause);
     consoleErrors = readConsole(page);
@@ -193,6 +193,10 @@ async function walkOneStep(page, screen, ctx) {
     try {
       await fsp.writeFile(target, await page.shoot());
       file = target;
+      // No preview for this one: the picture was taken by hand after the capture
+      // broke, so nothing shrank it. The panel loads the real file instead, which is
+      // the one a person needs to see anyway.
+      announceShot(ctx, screen.name, target, undefined);
     } catch {
       file = '';
     }
@@ -215,6 +219,29 @@ async function walkOneStep(page, screen, ctx) {
   if (title) step.title = title;
 
   return step;
+}
+
+/**
+ * Tell anyone watching that this step has a picture now.
+ *
+ * Called only once the photo is ON DISK. The watch panel loads the real file so a
+ * person can zoom into true pixels, and an <img> pointed at a file that does not exist
+ * yet draws a torn page and never tries again — so the address is never announced early.
+ * The shrunken preview rides along on the same event and covers the moment the real
+ * file takes to load.
+ *
+ * @param {{events?: import('../types.js').RunEvents, thumbs?: {shot?: string, shotFile?: string}}} ctx
+ * @param {string} name
+ * @param {string} file      Absolute path to the photo, already written.
+ * @param {string|undefined} thumbnail
+ * @returns {void}
+ */
+function announceShot(ctx, name, file, thumbnail) {
+  if (ctx.thumbs) {
+    if (thumbnail) ctx.thumbs.shot = thumbnail;
+    ctx.thumbs.shotFile = fileUrl(file);
+  }
+  emitEvent(ctx.events, { type: 'screen:shot', name, thumbnail, shotFile: fileUrl(file) });
 }
 
 /**

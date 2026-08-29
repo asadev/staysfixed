@@ -21,7 +21,7 @@ import { resetWindow } from '../drive/launch.js';
 import { gitInfo } from '../core/git.js';
 import { messageOf } from '../core/errors.js';
 import { detail } from '../core/log.js';
-import { emitEvent } from '../core/events.js';
+import { emitEvent, fileUrl } from '../core/events.js';
 
 /**
  * A picture result plus the one extra fact the flake register needs: whether it
@@ -30,16 +30,26 @@ import { emitEvent } from '../core/events.js';
  */
 
 /**
- * The small pictures a watcher is shown, filled in as a screen is worked on.
+ * What a watcher is shown of one screen, filled in as it is worked on.
  *
- * They are kept apart from the result on purpose. A result is written to disk and
+ * Two kinds of thing, for two different moments. The `file://` addresses are the real
+ * full-resolution pictures this run wrote, and they are what a person actually looks
+ * at and zooms into; they cost nothing to fill in, so they are always filled in. The
+ * base64 previews are the instant stand-in for the fraction of a second before a file
+ * loads, they cost real milliseconds to make, and they are only made when a window is
+ * open to show them in.
+ *
+ * All of it is kept apart from the result on purpose. A result is written to disk and
  * read back by `approve` and `status`, and a base64 picture in there would bloat
  * every saved run for the sake of a panel that was only open for a minute.
  *
  * @typedef {object} Thumbs
- * @property {string} [shot]        The picture just taken.
- * @property {string} [approved]    The approved picture, when this screen changed.
- * @property {string} [diff]        What moved, when this screen changed.
+ * @property {string} [shot]         Instant preview of the picture just taken.
+ * @property {string} [approved]     Instant preview of the approved picture, when this screen changed.
+ * @property {string} [diff]         Instant preview of what moved, when this screen changed.
+ * @property {string} [shotFile]     The picture just taken, on disk.
+ * @property {string} [approvedFile] The approved picture, on disk, when there is one.
+ * @property {string} [diffFile]     The difference picture, on disk, when one was written.
  */
 
 /**
@@ -153,6 +163,12 @@ function emitDone(events, result, thumbs) {
     thumbnail: thumbs.shot,
     approvedThumb: thumbs.approved,
     diffThumb: thumbs.diff,
+    // The real pictures. Only ever set for a file that was written or read a moment
+    // ago, so anything that arrives here can be opened; a screen that was skipped, or
+    // one that could not be photographed at all, sends none of them.
+    shotFile: thumbs.shotFile,
+    approvedFile: thumbs.approvedFile,
+    diffFile: thumbs.diffFile,
   });
 }
 
@@ -194,6 +210,11 @@ async function runOneScreen(project, page, screen, ctx) {
   const approved = await readApproved(paths, screen.name);
   const platformNote = platformWarning(approved?.meta?.platform, ctx.here);
 
+  // We have just read it, so it is certainly there. Pointed out even for a screen that
+  // ends up matching: "show me what this is supposed to look like" is a fair question
+  // about a screen that passed, and answering it costs one string.
+  if (approved && ctx.thumbs) ctx.thumbs.approvedFile = fileUrl(approvedPaths.png);
+
   /** @type {string[]} */
   let consoleErrors = [];
   /** @type {{width: number, height: number}|undefined} */
@@ -225,17 +246,26 @@ async function runOneScreen(project, page, screen, ctx) {
       consoleErrors = shot.consoleErrors;
       size = { width: shot.width, height: shot.height };
 
-      // Said out loud the moment the shutter fires, before anything is compared,
-      // so a person watching sees the picture appear while the run is still
-      // deciding what it thinks of it.
-      if (shot.thumbnail) {
-        if (ctx.thumbs) ctx.thumbs.shot = shot.thumbnail;
-        emitEvent(ctx.events, { type: 'screen:shot', name: screen.name, thumbnail: shot.thumbnail });
-      }
-
-      await writeResult(paths, screen.name, shot.png, {
+      const shotFile = await writeResult(paths, screen.name, shot.png, {
         deviceScaleFactor: settings.viewport.deviceScaleFactor,
         describe: screen.describe,
+      });
+
+      // Said out loud before anything is compared, so a person watching sees the
+      // picture appear while the run is still deciding what it thinks of it — but
+      // AFTER the PNG is on disk, not the instant the shutter fires. The panel opens
+      // the real file to show true pixels, and an <img> pointed at a file that does
+      // not exist yet draws a torn page and never retries. The preview travels on the
+      // same event and covers the moment the file takes to load.
+      if (ctx.thumbs) {
+        if (shot.thumbnail) ctx.thumbs.shot = shot.thumbnail;
+        ctx.thumbs.shotFile = fileUrl(shotFile);
+      }
+      emitEvent(ctx.events, {
+        type: 'screen:shot',
+        name: screen.name,
+        thumbnail: shot.thumbnail,
+        shotFile: fileUrl(shotFile),
       });
 
       if (!approved) break;
@@ -287,6 +317,8 @@ async function runOneScreen(project, page, screen, ctx) {
         describe: screen.describe,
         deviceScaleFactor: settings.viewport.deviceScaleFactor,
       });
+      // It exists now, because that call is what wrote it.
+      if (ctx.thumbs) ctx.thumbs.approvedFile = fileUrl(approvedPaths.png);
       return finish(ctx, {
         ...base,
         status: 'new',
@@ -340,11 +372,23 @@ async function runOneScreen(project, page, screen, ctx) {
 
   /** @type {string|undefined} */
   let diffPath;
-  if (compare.diffPng) diffPath = await writeDiff(paths, screen.name, compare.diffPng);
+  if (compare.diffPng) {
+    diffPath = await writeDiff(paths, screen.name, compare.diffPng);
+    // Set only inside this branch: a screen that matched has no difference picture, and
+    // a stale one from a previous run is deleted before every run for exactly that
+    // reason. Pointing at one that is not there is how a panel starts lying.
+    if (ctx.thumbs) ctx.thumbs.diffFile = fileUrl(diffPath);
+  }
 
   // Only for a screen that actually moved, and only when somebody is watching:
   // this is the one moment a person wants the approved picture and the difference
   // side by side with the new one.
+  //
+  // Both are made at the same size as the new picture's preview, because a person
+  // comparing three pictures must not be shown one sharp one and two blurred ones.
+  // Each costs a decode plus a shrink — about an eighth of a second on a retina
+  // screenshot — so this stays behind both gates, and behind `changed`. A run where
+  // everything held pays none of it.
   if (ctx.thumbnail === true && ctx.thumbs) {
     ctx.thumbs.approved = (await thumbnailOf(approved.png)) ?? undefined;
     if (compare.diffPng) ctx.thumbs.diff = (await thumbnailOf(compare.diffPng)) ?? undefined;

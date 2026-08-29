@@ -13,6 +13,7 @@
  * run and still draw the screens that were photographed before it opened.
  */
 
+import { pathToFileURL } from 'node:url';
 import { detail } from './log.js';
 import { messageOf } from './errors.js';
 
@@ -109,6 +110,33 @@ export function makeEvents() {
 export function emitEvent(events, event) {
   if (!events) return;
   events.emit(/** @type {RunEvent} */ (event));
+}
+
+/**
+ * A file on disk, as an address a local page can load.
+ *
+ * The watch panel is itself a local `file://` page, which means it can open the real
+ * full-resolution PNGs this run just wrote instead of a shrunken copy pasted into the
+ * event. That is the difference between a picture you can zoom into and a picture you
+ * cannot read — and it costs nothing to send, because the address is a few dozen
+ * characters and the pixels never move.
+ *
+ * Hands back `undefined` rather than a broken address for anything that is not a real
+ * path: an <img> pointed at a file that is not there draws the browser's torn-page
+ * icon, which looks like the tool is broken. Nothing at all looks like nothing at all.
+ *
+ * @param {string|undefined|null} file  An absolute path to a file that EXISTS. Callers
+ *   pass the path they have just written, or one they have just read — this function
+ *   does not touch the disk, so it cannot tell the difference itself.
+ * @returns {string|undefined}
+ */
+export function fileUrl(file) {
+  if (typeof file !== 'string' || file === '') return undefined;
+  try {
+    return pathToFileURL(file).href;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
