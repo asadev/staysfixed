@@ -344,9 +344,15 @@ async function runSelfCheck(ctx, asJson) {
   const { selfcheck } = await import('./selfcheck.js');
   const result = await selfcheck({ only: ctx.list('only') });
 
+  // Three outcomes, not two. "Every break was caught", "a break got through", and "one case
+  // behaved on the second run and not the first, so nobody knows" are different facts, and
+  // the third one has to be able to say so instead of being rounded to either neighbour.
+  const untellable = result.cases.filter((one) => one.verdict === 'could not tell');
+  const reallyWrong = result.cases.filter((one) => !one.caught && one.verdict !== 'could not tell');
+
   if (asJson) {
     process.stdout.write(JSON.stringify(result) + '\n');
-    return result.passed ? EXIT.ok : EXIT.failed;
+    return result.passed ? EXIT.ok : reallyWrong.length > 0 ? EXIT.failed : EXIT.error;
   }
 
   heading('Stays Fixed — checking that it can still catch things');
@@ -379,8 +385,15 @@ async function runSelfCheck(ctx, asJson) {
     ok(`All ${result.cases.length} of them behaved: every break caught, every clean pair silent.`);
     return EXIT.ok;
   }
-  const wrong = result.cases.filter((one) => !one.caught).length;
-  fail(`It got ${wrong} of ${result.cases.length} wrong. Until that is fixed, a clean check means nothing.`);
+  if (reallyWrong.length === 0) {
+    fail(
+      `${untellable.length} of ${result.cases.length} could not be told either way: ${untellable.length === 1 ? 'it' : 'they'} behaved on the second run and not on the first. ` +
+        'That is not a pass and not a failure — it is no answer. Run it again on a machine that is not busy.',
+    );
+    return EXIT.error;
+  }
+  fail(`It got ${reallyWrong.length} of ${result.cases.length} wrong, twice in a row each. Until that is fixed, a clean check means nothing.`);
+  if (untellable.length > 0) fail(`${untellable.length} more could not be told either way.`);
   return EXIT.failed;
 }
 

@@ -40,7 +40,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
-  defineAdapter, joinPath, notCovered, observation, sizeBucket, timeBucket,
+  defineAdapter, howLongItTook, joinPath, notCovered, observation, sizeBucket,
   trimForStorage, undoOurFootprint,
 } from './contract.js';
 
@@ -768,9 +768,17 @@ export async function describeRun(input) {
       value: kept.text,
       says: text === ''
         ? `"${journey.describe}" ${nothing}.`
-        : `What "${journey.describe}" ${sentence}${kept.truncated ? `, with the middle left out — the whole of it is ${sizeBucket(kept.bytes)}` : ''}.`,
+        : `What "${journey.describe}" ${sentence}${
+            kept.truncated
+              ? `. It is ${sizeBucket(kept.bytes)}, so only the two ends were kept and compared. A change confined to the middle that does not change its length would NOT be seen here; the whole of it is in the evidence file`
+              : ''
+          }.`,
       evidence,
       journey: id,
+      // Truncation is missing coverage and has to be counted as such. Left unsaid, a break
+      // buried in the middle of a big output is a silence that reads like an all-clear.
+      covered: kept.truncated ? false : undefined,
+      reason: kept.truncated ? 'too big' : undefined,
     }));
   }
 
@@ -852,12 +860,15 @@ export async function describeRun(input) {
     }));
   }
 
-  // ---- how long, coarsely
-  out.push(observation({
+  // ---- how long. Recorded, never compared. See howLongItTook in contract.js for the
+  // measurement that settled this: on an idle machine these fixtures run 48-96ms against a
+  // rung boundary at 100ms, so any load at all crossed it and invented a difference.
+  out.push(howLongItTook({
     channel: 'counters',
     path: joinPath('count', id, 'duration'),
-    value: timeBucket(result.ms),
-    says: `"${journey.describe}" took ${timeBucket(result.ms)}. Deliberately rough: exact timings differ on every run and would drown everything else.`,
+    ms: result.ms,
+    what: `"${journey.describe}"`,
+    journey: id,
   }));
 
   return out;

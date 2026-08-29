@@ -27,7 +27,8 @@ import fsp from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import { StaysFixedError, messageOf } from '../core/errors.js';
@@ -270,6 +271,7 @@ export async function check(options = {}) {
       product: project.product,
       candidate: project.candidate,
       journeys: project.journeys,
+      gaps: project.gaps,
       walk: project.walk,
       cwd: project.root,
       bootReference: project.bootReference,
@@ -695,6 +697,10 @@ function short(value) {
  * @property {BuildFingerprint} candidate
  * @property {string} [against]   The reference build's own id, once a name has been resolved.
  * @property {Journey[]} journeys
+ * @property {CoverageGap[]} gaps   Holes found while working out WHAT to walk, before a
+ *   single journey ran. An adapter that fell over listing its journeys belongs here, and it
+ *   has to reach the verdict: a channel that silently dropped out is the worst thing this
+ *   tool can do.
  * @property {import('./run.js').Walker} walk
  * @property {(reference: BuildFingerprint, ctx: {events?: CheckEvents, signal?: AbortSignal}) => Promise<LiveBuild|null>} bootReference
  * @property {(capture: Capture) => Capture} normalise
@@ -732,17 +738,11 @@ async function openProject(options) {
   const evidenceDir = path.join(scratch, 'evidence');
   await fsp.mkdir(evidenceDir, { recursive: true });
 
-  const candidate = await fingerprintWorkingTree(root, product);
-  await saveBuild(store, candidate);
-
-  // A name like "HEAD", "v0.13.0" or a branch is what a person types; the store only knows
-  // builds. Turning the name into a commit here, and putting that commit in the store, is
-  // what lets a check be aimed at any point in history without every commit having been
-  // walked before. Without it "HEAD" matches nothing and the check reports itself blocked.
-  const reference = options.against ? await fingerprintCommit(root, product, options.against) : null;
-  if (reference) await saveBuild(store, reference);
-
-  const journeys = narrowToTarget(await gatherJourneys({ root, config, options }), aim);
+  // Working out what there is to walk comes FIRST, before anything is asked of git. Somebody
+  // standing in a folder they have not set up yet should be told to run `init`, not told
+  // about a git requirement they have no reason to care about yet.
+  const gathered = await gatherJourneys({ root, config, options });
+  const journeys = narrowToTarget(gathered.journeys, aim);
   if (journeys.length === 0) {
     await fsp.rm(scratch, { recursive: true, force: true });
     // Two different situations wear the same symptom, and the difference is the
@@ -761,6 +761,16 @@ async function openProject(options) {
         'or point the check at a journeys file with --journeys <file>.',
     });
   }
+
+  const candidate = await fingerprintWorkingTree(root, product);
+  await saveBuild(store, candidate);
+
+  // A name like "HEAD", "v0.13.0" or a branch is what a person types; the store only knows
+  // builds. Turning the name into a commit here, and putting that commit in the store, is
+  // what lets a check be aimed at any point in history without every commit having been
+  // walked before. Without it "HEAD" matches nothing and the check reports itself blocked.
+  const reference = options.against ? await fingerprintCommit(root, product, options.against) : null;
+  if (reference) await saveBuild(store, reference);
 
   const rules = mergeRules(DEFAULT_RULES, [
     ...machineRules({ root, home: os.homedir(), tmp: os.tmpdir() }),
@@ -793,6 +803,7 @@ async function openProject(options) {
     candidate,
     against: reference ? reference.id : options.against,
     journeys,
+    gaps: gathered.gaps,
     walk,
     bootReference,
     normalise,
@@ -1063,11 +1074,13 @@ function adapterFor(journey) {
  * all, and it is the only channel that sees a door nobody has ever walked through.
  *
  * @param {{root: string, config: Record<string, any>, options: CheckOptions}} a
- * @returns {Promise<Journey[]>}
+ * @returns {Promise<{journeys: Journey[], gaps: CoverageGap[]}>}
  */
 async function gatherJourneys({ root, config, options }) {
   /** @type {Journey[]} */
   const journeys = [];
+  /** @type {CoverageGap[]} */
+  const gaps = [];
 
   const named = options.journeys && options.journeys !== 'code' && options.journeys !== 'config' ? options.journeys : null;
   if (named) journeys.push(...(await readJourneyFile(path.resolve(root, named))));
@@ -1082,21 +1095,44 @@ async function gatherJourneys({ root, config, options }) {
     let detection;
     try {
       detection = await adapter.detect(project);
-    } catch {
+    } catch (e) {
+      // BOTH of these used to be swallowed without a word, and that is the same shape of
+      // failure as the source reader skipping a 3.5MB bundle: a whole channel drops out of
+      // the run, nothing is walked, and the verdict says "nothing that worked has changed".
+      // An adapter that FALLS OVER is a hole. An adapter that says "this is not my kind of
+      // project" is not, which is why only the throw is recorded here.
+      gaps.push({
+        what: `Nothing was checked through the "${adapter.name}" adapter, because it could not even work out whether it applies to this project.`,
+        why: messageOf(e),
+        unlockedBy: `Run \`staysfixed doctor\` to see what the ${adapter.name} adapter needs here. Until then, anything only it can see is not being watched.`,
+      });
       continue;
     }
     if (!detection.applies) continue;
     if (adapter !== sourceAdapter && named) continue;
     try {
       journeys.push(...(await adapter.journeys(project)));
-    } catch {
-      // An adapter that cannot list its journeys contributes none. It is not a reason to
-      // throw away the ones that could.
+    } catch (e) {
+      gaps.push({
+        what: `The "${adapter.name}" adapter applies to this project and could not say what it would walk, so it walked nothing.`,
+        why: messageOf(e),
+        unlockedBy: `Fix what it is complaining about, or name the steps yourself in a journeys file. This is a hole, not a pass.`,
+      });
     }
   }
 
   const only = options.only ?? [];
   const chosen = only.length > 0 ? journeys.filter((j) => only.some((n) => j.name === n || j.name.includes(n))) : journeys;
+  if (only.length > 0) {
+    for (const wanted of only) {
+      if (chosen.some((j) => j.name === wanted || j.name.includes(wanted))) continue;
+      gaps.push({
+        what: `You asked for the journey "${wanted}" and there is no journey by that name, so it was not walked.`,
+        why: 'A name that matches nothing narrows the run to nothing rather than to what you meant.',
+        unlockedBy: `The journeys this project has are: ${journeys.map((j) => j.name).slice(0, 12).join(', ') || 'none'}.`,
+      });
+    }
+  }
 
   // Two journeys with one name would write into one another's records.
   /** @type {Journey[]} */
@@ -1107,7 +1143,7 @@ async function gatherJourneys({ root, config, options }) {
     seen.add(j.name);
     out.push(j);
   }
-  return out;
+  return { journeys: out, gaps };
 }
 
 /**
@@ -1188,19 +1224,46 @@ async function readConfig(configFile) {
  */
 async function fingerprintWorkingTree(root, product) {
   const sha = await git(root, ['rev-parse', 'HEAD']);
-  const diff = (await git(root, ['diff', 'HEAD'])) ?? '';
-  const untracked = (await git(root, ['ls-files', '--others', '--exclude-standard'])) ?? '';
-  const dirty = diff.trim() !== '' || untracked.trim() !== '';
+  if (!sha) {
+    // REFUSING IS THE ONLY HONEST ANSWER HERE, and the alternative is the worst bug this
+    // tool could have. Without git there is nothing to tell one build from another, so every
+    // run would be fingerprinted identically, the build you just changed would carry the same
+    // id as the build you were happy with, and comparing a build against itself produces zero
+    // differences — a permanent, confident, completely false all-clear.
+    throw new StaysFixedError(
+      'This folder is not a git repository with a commit in it, and Stays Fixed tells one build from another by what git says is in it.',
+      {
+        hint:
+          'Run it inside your project (or `git init && git commit` first). Without git every run would look like the same build, ' +
+          'and a check that compares a build against itself always comes back clean — which would be a lie, so it is refused instead.',
+      },
+    );
+  }
+  // Streamed into a hash rather than read into a string. `git diff` used to go through a
+  // buffer with a 32MB ceiling, and a diff over the ceiling made the git call FAIL — which
+  // was caught, treated as an empty diff, and the working tree was then declared clean. A
+  // big uncommitted change therefore got the id of the commit it sat on top of; if that
+  // commit was the reference, the check compared the build against itself and reported that
+  // nothing had changed. Nothing about a diff's size may ever decide whether a change exists.
+  const diff = await gitDigest(root, ['diff', 'HEAD']);
+  const untracked = await gitDigest(root, ['ls-files', '--others', '--exclude-standard']);
+  if (!diff.ok || !untracked.ok) {
+    throw new StaysFixedError(
+      `Git could not say what has changed in this working tree, so there is no way to tell this build apart from the last one. ${diff.why ?? untracked.why ?? ''}`.trim(),
+      { hint: 'Fix that and run again. Guessing "nothing has changed" here would make every later answer worthless.' },
+    );
+  }
+  const dirty = !diff.empty || !untracked.empty;
   const version = await packageVersion(root);
 
   /** @type {BuildFingerprint} */
   const build = {
-    id: dirty ? `work-${sha256(`${sha ?? ''}\n${diff}\n${untracked}`).slice(0, 12)}` : `git-${(sha ?? 'unknown').slice(0, 12)}`,
+    id: dirty ? `work-${sha256(`${sha}\n${diff.digest}\n${untracked.digest}`).slice(0, 12)}` : `git-${sha.slice(0, 12)}`,
     product,
     platform: `${process.platform}-${process.arch}`,
     builtAt: new Date().toISOString(),
   };
-  if (sha) build.gitSha = sha;
+  build.gitSha = sha;
   if (version) build.version = dirty ? `${version} with uncommitted changes` : version;
   if (dirty) build.dirty = true;
   const branch = await git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -1275,6 +1338,41 @@ async function exportBuild(root, reference, scratch) {
 // ---------------------------------------------------------------------------
 // Small things
 // ---------------------------------------------------------------------------
+
+/**
+ * Run a git command and hash its output as it arrives, without ever holding it in memory.
+ *
+ * This exists because of a specific failure: reading `git diff` into a string through a
+ * buffer with a ceiling turns "your change is enormous" into "the command failed", and the
+ * caller then has to guess. A hash costs nothing, has no ceiling, and answers the only two
+ * questions the fingerprint asks — was there anything, and was it the same thing as last time.
+ *
+ * @param {string} cwd
+ * @param {string[]} args
+ * @returns {Promise<{ok: boolean, empty: boolean, digest: string, why?: string}>}
+ */
+function gitDigest(cwd, args) {
+  return new Promise((resolve) => {
+    const hash = createHash('sha256');
+    let bytes = 0;
+    /** @type {string[]} */
+    const complaints = [];
+    const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (chunk) => {
+      bytes += chunk.length;
+      hash.update(chunk);
+    });
+    child.stderr.on('data', (chunk) => complaints.push(String(chunk)));
+    child.on('error', (e) => resolve({ ok: false, empty: true, digest: '', why: messageOf(e) }));
+    child.on('close', (code) => {
+      if (code !== 0) {
+        resolve({ ok: false, empty: true, digest: '', why: complaints.join(' ').trim() || `git exited with ${code}` });
+        return;
+      }
+      resolve({ ok: true, empty: bytes === 0, digest: hash.digest('hex') });
+    });
+  });
+}
 
 /**
  * @param {string} cwd

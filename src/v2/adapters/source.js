@@ -771,6 +771,12 @@ export async function readContract(opts) {
     filesRead: 0, filesSkipped: found.skipped, testFiles: 0, lexRecoveries: 0,
     typesStripped: 0, unnamed: 0, viaConstant: 0, duplicates: 0, problems: [], counts: {},
   };
+  for (const where of found.unreadable) {
+    report.problems.push(`${where} could not be opened, so any door behind it is invisible to this run.`);
+  }
+  for (const big of found.tooBig) {
+    report.problems.push(`${big} is bigger than the ${Math.round(maxFileBytes / (1024 * 1024))}MB this reader will open, so its doors were not read.`);
+  }
 
   for (const rel of found.files) {
     let text;
@@ -860,6 +866,8 @@ function describeError(error) {
 async function collectFiles(root, folders, maxFileBytes) {
   /** @type {string[]} Files skipped for size, named so the gap can be reported. */
   const tooBig = [];
+  /** @type {string[]} A folder that could not be opened at all, named for the same reason. */
+  const unreadable = [];
   /** @type {string[]} */
   const files = [];
   let skipped = 0;
@@ -870,7 +878,12 @@ async function collectFiles(root, folders, maxFileBytes) {
     let entries;
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
+    } catch (e) {
+      // A folder that will not open — a permission, a broken mount, a case-clash — used to
+      // vanish without a word, and every door behind it vanished with it. That is the same
+      // bug as the 2MB file limit wearing a different hat: fewer doors reported, and nothing
+      // anywhere saying so. Name it.
+      unreadable.push(`${path.relative(root, dir) || '.'} (${describeError(e)})`);
       return;
     }
     for (const entry of entries) {
@@ -893,7 +906,8 @@ async function collectFiles(root, folders, maxFileBytes) {
           tooBig.push(path.relative(root, full));
           continue;
         }
-      } catch {
+      } catch (e) {
+        unreadable.push(`${path.relative(root, full)} (${describeError(e)})`);
         continue;
       }
       files.push(path.relative(root, full));
@@ -903,7 +917,11 @@ async function collectFiles(root, folders, maxFileBytes) {
   const roots = folders.map((f) => path.join(root, f)).filter((d) => fs.existsSync(d));
   for (const dir of roots.length > 0 ? roots : [root]) await walk(dir);
   files.sort();
-  return { files, skipped, tooBig };
+  // A source folder that was asked for and is not there at all is worth saying too: a typo in
+  // "folders" reads exactly like a project with no code in it.
+  const asked = folders.map((f) => path.join(root, f));
+  const present = asked.filter((d) => fs.existsSync(d));
+  return { files, skipped, tooBig, unreadable, lookedIn: present.length > 0 ? present.map((d) => path.relative(root, d)) : ['the whole project folder'] };
 }
 
 // ---------------------------------------------------------------------------

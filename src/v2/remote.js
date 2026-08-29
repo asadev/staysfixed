@@ -38,7 +38,7 @@
 
 import { spawn } from 'node:child_process';
 import { StaysFixedError } from '../core/errors.js';
-import { joinPath, notCovered, observation, sizeBucket, timeBucket, trimForStorage } from './adapters/contract.js';
+import { howLongItTook, joinPath, notCovered, observation, sizeBucket, timeBucket, trimForStorage } from './adapters/contract.js';
 
 /** @typedef {import('./types.js').Observation} Observation */
 /** @typedef {import('./types.js').Journey} Journey */
@@ -629,13 +629,12 @@ export function remoteRunner(opts) {
             journey: journey.name,
             surface,
           }));
-          seen.push(observation({
+          seen.push(howLongItTook({
             channel: 'counters',
             path: joinPath('remote', host, journey.name, String(index), 'took'),
-            value: timeBucket(result.ms),
-            says: `On ${host}, "${label}" took ${timeBucket(result.ms)}.`,
+            ms: result.ms,
+            what: `On ${host}, "${label}"`,
             journey: journey.name,
-            surface,
           }));
         } catch (error) {
           // The link went. Everything from here on is unchecked, and it says so.

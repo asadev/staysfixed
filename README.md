@@ -149,7 +149,7 @@ pretend otherwise.
 | The coverage ledger — every door counted, the unopened ones named, and the sentence saying so on every reply | **Works.** See [what it did not check](#what-it-did-not-check). |
 | Aiming a check at one kind of product, and refusing by name rather than checking something else | **Works.** |
 | Android APKs on an emulator | **The adapter is here.** It reads everything the APK declares with nothing installed and no Java, and where there is an emulator it installs one build at a time and walks it. Whether *this* machine can run one is a separate question, and `doctor` asks the adapter itself rather than keeping a second opinion — most of what it wants installs with a command; accepting Google's licence, once, needs a person. Two emulator snapshots restoring byte-identically is unproven, so Android compares against the stored record and says which mode it used. |
-| The iOS simulator | Not yet. `doctor` says so rather than reporting a green run that never touched the phone. |
+| The iOS simulator | **The adapter is here.** It reads what the app bundle declares with nothing running, and where Xcode and a simulator runtime are present it installs one build at a time, boots it and reads what is on the screen. It is new. Paired running costs two `xcodebuild` passes, so it is for before a release rather than for every edit, and like Android it compares against the stored record and says which mode it used. Ask `doctor` what it is actually covering on your machine before trusting a clean run. |
 | Native Windows GUI (a real Win32 app, not an Electron one) | **The probe is here**, driven over ssh to any machine that reaches a Windows desktop — a WSL shell on one counts, and nothing is installed on it. Windows shows one desktop, so two builds can never run at once: the comparison is genuinely weaker here than anywhere else. |
 
 `staysfixed check` is the front door for both. Version 1's flags still mean
@@ -210,7 +210,7 @@ evidence for something another channel already found.
 | `complaints` | What the product complained about: console messages, errors, crashes, the code it exited with. |
 | `results` | What the product gave back: what it printed, what it answered, what it offers other code. |
 | `contract` | The doors the source says exist: routes, exported functions, message channels. Read without running anything. Free, and exact. |
-| `counters` | Rough counts and rough timings. Deliberately rough — precise timing is noise, not information. |
+| `counters` | Rough counts — files written, calls made, doors answered. Compared exactly. How long something took is **recorded and never compared**: see [what it will never do](#what-it-will-never-do). |
 | `pixels` | What it looked like. Used to show a person a problem another channel already found. |
 
 An address reads left to right, widest thing first:
@@ -320,6 +320,22 @@ the new build, nothing on record from the old one, zero differences found, and a
 verdict reading *nothing that worked has changed*. It is arithmetically true and
 it would let a real regression through. That run comes back as **`NOTHING WAS
 ACTUALLY COMPARED`**, it is not a pass, and it exits non-zero.
+
+### The silences that were found and closed
+
+Every one of these produced a clean-looking run while something was invisible.
+They are listed because a tool like this earns trust by naming the ways it has
+been wrong, not by claiming it never was. All five were found on 2026-08-29 and
+2026-08-30 by reading the whole engine looking for the same shape as the first
+one, and each has a case in the corpus or a test holding it shut.
+
+| It used to | Now |
+| --- | --- |
+| Skip any source file over 2MB **without a word**, then report that it had found no source at all — so a desktop app whose main process is one 3.5MB bundle had all 452 of its message channels silently unread | Reads up to 24MB, and names any file it still cannot open |
+| Skip a folder it could not open, and every door behind it, silently | Names the folder and the reason, as missing coverage |
+| Keep the two ends of a huge output and a **rough** size, so a break in the discarded middle left a byte-identical record | Keeps the exact byte count, and says out loud that only the ends were compared |
+| Drop a whole adapter's journeys when it threw while listing them — a surface disappears and the verdict reads "nothing has changed" | Records it as a hole, by name, in the coverage |
+| Treat a `git diff` too big to read as **no diff**, so a large uncommitted change was fingerprinted as a clean checkout — and if that commit was the reference, the check compared the build against itself and could only ever come back clean | Streams the diff into a hash with no ceiling, and refuses outright rather than guessing. A folder with no git in it is refused for the same reason |
 
 ---
 
@@ -601,10 +617,27 @@ of it is in [docs/how-v2-works.md](docs/how-v2-works.md).
 A tool that reports "nothing changed" looks exactly like a tool that is broken,
 and there is no way to tell the two apart from the outside. So:
 
-**It has to prove it still catches things.** `staysfixed check --selfcheck` runs
-a corpus of deliberately broken builds and requires the engine to catch every
-one. If it misses any, it says so, and until that is fixed a clean check means
-nothing.
+**It has to prove it still catches things.** `staysfixed check --selfcheck`
+builds eleven tiny products — each a real repository with a working commit and an
+uncommitted change on top, which is the shape an agent actually points this tool
+at — and requires the engine to behave on every one. Eight are breaks it must
+catch. Three are the other half of the same promise: pairs that must produce **no
+findings at all**, because a tool that cries wolf gets switched off, and a tool
+that is switched off catches nothing.
+
+**And it has to be honest when it cannot tell.** A case that misbehaves is built
+again from scratch and run again before that becomes an accusation. Fail twice
+and it is reported as a real failure. Behave the second time and it is reported
+as *could not tell* — not a pass, not a failure, exit code 2, with the machine's
+load printed beside it. This exists because the corpus once came back "1 of 9
+wrong" with a test suite running alongside it and then passed five times in a row
+on a quiet machine, and a corpus that can be perturbed by a busy laptop is worth
+nothing on a busy laptop. The cause was found and removed — see
+[what it will never do](#what-it-will-never-do) — and the re-run stayed, so that
+the next machine-shaped thing to creep in lands as "nobody knows" rather than as
+a false accusation people learn to ignore. Measured on 2026-08-30: eleven of
+eleven, three times running, with the project's own suite running in parallel and
+the machine's load average between 227 and 334.
 
 **The unstable app.** `fixtures/unstable-app` is a page built to be impossible to
 observe consistently: a clock ticking ten times a second, an endless spinner, a
@@ -633,6 +666,20 @@ Honestly, so you know before you invest an afternoon.
   by design and permanently. A refusal is reported as a gap in coverage, never as
   a pass.
 - **A migration that destroys data is refused, not run twice.**
+- **It will not tell you your product got slower.** How long something took is
+  recorded and shown to you, and it is never compared. A stopwatch on a shared
+  machine measures how busy the machine is at least as much as it measures the
+  product: measured here, thirty runs of the same one-line program on an idle Mac
+  took between 48ms and 96ms, against a bucket boundary at 100ms. Comparing that
+  invents a slowdown nobody caused every time the machine is busy, and a tool that
+  cries wolf gets switched off. A build that **hangs** is still caught — it gets
+  stopped for taking too long, and how it finished is compared exactly.
+- **A change buried in the middle of a huge output can be missed.** Anything a
+  product prints over 64KB has its two ends kept and compared, plus the exact
+  number of bytes thrown away — so a middle that grew or shrank is caught. A
+  middle that changed without changing its length is not, the whole text is
+  written to the evidence folder either way, and the run says out loud that it
+  only compared the ends.
 - **A race that already existed will not show.** Subtracting the wobble floor
   actively hides intermittent bugs. Running the new build twice recovers half of
   this by flagging anything newly unstable. Only half. That is the sharpest

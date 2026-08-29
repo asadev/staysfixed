@@ -32,7 +32,7 @@ import { existsSync, accessSync, readFileSync, readdirSync, constants as fsConst
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { findConfigFile } from '../core/paths.js';
+import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { platformTag } from '../drive/find.js';
 import { isRepo } from '../core/git.js';
 import { surveyBrowsers, INSTALL_COMMAND, PORT_NEVER_USE } from './browsers.js';
@@ -174,7 +174,12 @@ export async function capabilities(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const offline = opts.offline === true || process.env.STAYSFIXED_OFFLINE !== undefined;
   const configFile = opts.configFile ? path.resolve(cwd, opts.configFile) : findConfigFile(cwd);
-  const root = configFile ? path.dirname(configFile) : cwd;
+  // rootForConfig, never path.dirname: a config kept at `.staysfixed/config.json` — one of
+  // the six names this tool looks for — would otherwise make the project root the
+  // `.staysfixed` folder itself, and every adapter would be asked about an empty directory.
+  // Measured on Terminal Deck: doctor reported "a built APK is still missing" with the APK
+  // sitting two folders up, and told the agent to go and build one that was already there.
+  const root = configFile ? rootForConfig(configFile) : cwd;
 
   // The browser survey comes first because three different answers below depend
   // on it, and asking this machine the same question three times would be both
@@ -258,6 +263,8 @@ const PERMANENT_LIMITS = [
   'It checks the journeys it has. It cannot enumerate every possible state, and the coverage ledger names the doors it has never opened rather than pretending they are covered.',
   'Two builds of a real phone in your hand cannot be run side by side. Real devices fall back to comparing against the stored record, and say so.',
   'If the old build can no longer be compiled, comparison falls back to the stored record from the last time it ran. That is genuinely weaker and announces itself on every run.',
+  'It will not tell you your product got slower. How long something took is recorded and printed, and never compared: a stopwatch on a shared machine measures how busy the machine is at least as much as it measures the product, so comparing it invents a slowdown every time the machine is busy. A build that HANGS is still caught, because it is stopped for taking too long and how it finished is compared exactly.',
+  'A change buried in the middle of an output larger than 64KB can be missed. The two ends are kept and compared along with the exact number of bytes discarded, so a middle that grew or shrank shows up; one that changed without changing length does not. The whole text is written to the evidence folder and the run says it only compared the ends.',
 ];
 
 /**
@@ -658,7 +665,12 @@ function findDesktopApp(cwd) {
     }
   }
 
-  const root = configFile ? path.dirname(configFile) : cwd;
+  // rootForConfig, never path.dirname: a config kept at `.staysfixed/config.json` — one of
+  // the six names this tool looks for — would otherwise make the project root the
+  // `.staysfixed` folder itself, and every adapter would be asked about an empty directory.
+  // Measured on Terminal Deck: doctor reported "a built APK is still missing" with the APK
+  // sitting two folders up, and told the agent to go and build one that was already there.
+  const root = configFile ? rootForConfig(configFile) : cwd;
   const ext = process.platform === 'darwin' ? '.app' : process.platform === 'win32' ? '.exe' : '.AppImage';
   for (const folder of ['dist', 'out', 'release', 'build']) {
     const dir = path.join(root, folder);

@@ -211,6 +211,46 @@ export const CASES = [
   },
 
   {
+    name: 'a break buried in the middle of a huge output',
+    breaks:
+      'A program prints more than the tool will store, and the thing that broke is in the middle — past the head it keeps and before the tail it keeps. This is the case the tool used to be blind to: it kept the two ends and a COARSE size, so a change in the discarded middle left a byte-identical record and the run reported that nothing had changed. Exactly the shape of failure this whole thing exists to prevent, and it survived until 2026-08-30.',
+    expect: 'a finding',
+    // The marker in the middle is what has to have caught it. If some other part of the value
+    // reported instead, this case has stopped testing what it was written to test.
+    mustSay: [/bytes left out of the middle/],
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': [
+        "console.log('report begins');",
+        'for (let i = 0; i < 6000; i += 1) {',
+        broken
+          ? "  console.log(i === 3000 ? `row ${i}: could not be loaded at all` : `row ${i}: ok`);"
+          : '  console.log(`row ${i}: ok`);',
+        '}',
+        "console.log('report ends');",
+        '',
+      ].join('\n'),
+    }),
+  },
+
+  {
+    name: 'a build that takes ten times longer stays silent',
+    breaks:
+      'Nothing, and the product is markedly slower. How long something took is recorded and never compared, because a stopwatch on a shared machine measures the machine as much as the product — and comparing it is what made this corpus fail one case out of nine on a busy laptop while passing five times in a row on a quiet one. This case exists so that decision cannot be quietly undone: put timing back into the comparison and this goes red.',
+    expect: 'nothing',
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': [
+        // A sleep, deliberately, and never a busy loop. Loading the machine to test timing
+        // is how you take four other things down with you.
+        `await new Promise((done) => setTimeout(done, ${broken ? 900 : 40}));`,
+        "console.log('total 10.005');",
+        '',
+      ].join('\n'),
+    }),
+  },
+
+  {
     name: 'a value that used to be steady is now random',
     breaks:
       'A value that was the same on every single run is now different every run. Nothing is obviously broken, which is exactly why this class of bug survives for months.',
@@ -237,7 +277,7 @@ export const CASES = [
  * @property {string} name
  * @property {boolean} caught      True when the case behaved: the break was found, or the clean pair stayed silent.
  * @property {string} [why]        Why it did not, in one plain sentence.
- * @property {'caught'|'quiet'|'escaped'|'false alarm'|'could not run'} verdict
+ * @property {'caught'|'quiet'|'escaped'|'false alarm'|'could not run'|'could not tell'} verdict
  */
 
 /**
@@ -245,6 +285,8 @@ export const CASES = [
  * @property {boolean} passed
  * @property {CaseResult[]} cases
  * @property {boolean} ran         False when the engine could not be driven at all.
+ * @property {boolean} [certain]   False when at least one case could not be told either way.
+ *                                 A run that is not certain is NOT a pass and NOT a failure.
  * @property {string} [why]        Why it could not run.
  * @property {string} [workDir]
  */
@@ -287,46 +329,106 @@ export async function selfcheck(opts = {}) {
   const cases = [];
 
   for (const c of wanted) {
-    const dir = path.join(workDir, safe(c.name));
-    /** @type {string} */
-    let working;
-    try {
-      working = await plant(dir, c);
-    } catch (e) {
-      cases.push({ name: c.name, caught: false, verdict: 'could not run', why: `the product could not be built: ${why(e)}` });
+    const first = await runOne(check, workDir, c, 1);
+    if (first.caught) {
+      cases.push(first);
       continue;
     }
 
-    /** @type {any} */
-    let result;
-    try {
-      // Exactly the call an agent makes, with exactly the arguments an agent
-      // sends. A corpus that reached past the front door would prove the engine
-      // works when driven in a way nobody drives it.
-      result = await check({
-        cwd: dir,
-        configFile: undefined,
-        against: working,
-        paired: true,
-        journeys: path.join(dir, 'journeys.json'),
-        only: [],
-      });
-    } catch (e) {
-      cases.push({ name: c.name, caught: false, verdict: 'could not run', why: `the engine threw: ${why(e)}` });
+    // IT FAILED. Before that becomes an accusation, it has to reproduce.
+    //
+    // This is the same rule the engine itself lives by, turned on the corpus: a difference
+    // that will not happen twice is not a difference. On the night of 2026-08-29 this corpus
+    // came back "1 of 9 wrong" while the test suite was running beside it and then passed
+    // five times in a row on a quiet machine — and a corpus that can be perturbed by a busy
+    // laptop is worth nothing on a busy laptop, because nobody can tell its noise from its
+    // signal. The cause was found and removed (see howLongItTook in adapters/contract.js),
+    // and this stays anyway, because the next machine-shaped thing to creep in should land
+    // as "I could not tell" rather than as a false accusation somebody learns to ignore.
+    //
+    // A second run that agrees is a real failure and is reported as one. A second run that
+    // disagrees is filed as UNTELLABLE, which is not a pass: the exit code is 2, the same
+    // one used for "the corpus could not be run at all", because both mean no answer.
+    const second = await runOne(check, workDir, c, 2);
+    if (!second.caught) {
+      cases.push({ ...second, why: `${second.why ?? 'it did not behave'} (it did this twice in a row, so it is real)` });
       continue;
     }
-
-    cases.push(judge(c, result));
+    cases.push({
+      name: c.name,
+      caught: false,
+      verdict: 'could not tell',
+      why:
+        `it behaved on the second run and not on the first, so this says nothing either way. ` +
+        `The first time: ${first.why ?? 'it did not behave'}. ` +
+        `This machine's load was ${loadNow()} — something that comes and goes with how busy the machine is is not evidence about the engine. ` +
+        `Run it again on a quiet machine before believing either answer.`,
+    });
   }
 
   if (!opts.keep) await fsp.rm(workDir, { recursive: true, force: true });
 
+  const untellable = cases.some((r) => r.verdict === 'could not tell');
   return {
     passed: cases.length > 0 && cases.every((r) => r.caught),
     ran: true,
+    certain: !untellable,
     cases,
     ...(opts.keep ? { workDir } : {}),
   };
+}
+
+/**
+ * Build one case fresh and put the engine through it once.
+ *
+ * A fresh folder every attempt, deliberately. Re-running inside the same folder would leave
+ * the first attempt's stored captures sitting there, and the second attempt would be
+ * comparing against those rather than against the build that works.
+ *
+ * @param {any} check
+ * @param {string} workDir
+ * @param {Case} c
+ * @param {number} attempt
+ * @returns {Promise<CaseResult>}
+ */
+async function runOne(check, workDir, c, attempt) {
+  const dir = path.join(workDir, `${safe(c.name)}${attempt > 1 ? `-again-${attempt}` : ''}`);
+  /** @type {string} */
+  let working;
+  try {
+    working = await plant(dir, c);
+  } catch (e) {
+    return { name: c.name, caught: false, verdict: 'could not run', why: `the product could not be built: ${why(e)}` };
+  }
+
+  /** @type {any} */
+  let result;
+  try {
+    // Exactly the call an agent makes, with exactly the arguments an agent
+    // sends. A corpus that reached past the front door would prove the engine
+    // works when driven in a way nobody drives it.
+    result = await check({
+      cwd: dir,
+      configFile: undefined,
+      against: working,
+      paired: true,
+      journeys: path.join(dir, 'journeys.json'),
+      only: [],
+    });
+  } catch (e) {
+    return { name: c.name, caught: false, verdict: 'could not run', why: `the engine threw: ${why(e)}` };
+  }
+
+  return judge(c, result);
+}
+
+/** How busy this machine is, in words, so an untellable result can name the likely reason. */
+function loadNow() {
+  const [one] = os.loadavg();
+  const cores = os.cpus().length || 1;
+  const per = one / cores;
+  const how = per < 0.4 ? 'quiet' : per < 0.9 ? 'busy' : 'very busy';
+  return `${one.toFixed(1)} across ${cores} cores, which is ${how}`;
 }
 
 /**
@@ -351,7 +453,13 @@ function judge(c, result) {
 
   if (c.expect === 'nothing') {
     if (findings.length === 0 && unstable.length === 0) return { name: c.name, caught: true, verdict: 'quiet' };
-    const what = findings.length ? `${findings.length} finding${findings.length === 1 ? '' : 's'}: ${describe(findings[0])}` : `${unstable.length} newly unpredictable address${unstable.length === 1 ? '' : 'es'}: ${unstable[0]}`;
+    // `unstable` holds WobbleEntry objects, not strings. Interpolating one printed
+    // "[object Object]" and turned the most important line in a failure report — the one
+    // saying WHAT went wrong — into nothing at all.
+    const named = unstable.map((/** @type {any} */ u) => (typeof u === 'string' ? u : `${u?.path ?? 'an address'} (was ${JSON.stringify(u?.a)}, then ${JSON.stringify(u?.b)})`));
+    const what = findings.length
+      ? `${findings.length} finding${findings.length === 1 ? '' : 's'}: ${describe(findings[0])}`
+      : `${unstable.length} newly unpredictable address${unstable.length === 1 ? '' : 'es'}: ${named.slice(0, 3).join('; ')}`;
     return { name: c.name, caught: false, verdict: 'false alarm', why: `two builds that should have looked the same produced ${what}` };
   }
 
@@ -532,13 +640,16 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (json) {
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-    return result.passed ? 0 : result.ran ? 1 : 2;
+    if (result.passed) return 0;
+    if (!result.ran) return 2;
+    return result.certain === false && result.cases.every((r) => r.caught || r.verdict === 'could not tell') ? 2 : 1;
   }
 
   if (!result.ran) {
     process.stderr.write(`Could not run the self-check.\n${result.why ?? ''}\n`);
     return 2;
   }
+  const untellable = result.cases.filter((r) => r.verdict === 'could not tell');
 
   /** @type {string[]} */
   const out = ['Stays Fixed - checking that it can still catch things', ''];
@@ -549,14 +660,26 @@ export async function main(argv = process.argv.slice(2)) {
   out.push('');
   if (result.passed) {
     out.push(`All ${result.cases.length} behaved: every break was caught, and every pair that should have been silent was silent.`);
+  } else if (untellable.length > 0 && untellable.length === result.cases.filter((r) => !r.caught).length) {
+    // Nothing failed twice. Saying "wrong" here would be an accusation the evidence does not
+    // support, and saying "fine" would be worse.
+    out.push(
+      `${untellable.length} of ${result.cases.length} could not be told either way — ${untellable.length === 1 ? 'it' : 'they'} behaved on the second run and not on the first. ` +
+        'That is not a pass and not a failure. Run it again on a quiet machine.',
+    );
   } else {
-    const bad = result.cases.filter((r) => !r.caught);
-    out.push(`${bad.length} of ${result.cases.length} did not behave. Until that is fixed, a clean check from this tool does not mean what it says.`);
+    const bad = result.cases.filter((r) => !r.caught && r.verdict !== 'could not tell');
+    out.push(`${bad.length} of ${result.cases.length} did not behave, twice in a row each. Until that is fixed, a clean check from this tool does not mean what it says.`);
+    if (untellable.length > 0) out.push(`${untellable.length} more could not be told either way.`);
   }
   if (result.workDir) out.push(`The products were left in ${result.workDir}.`);
 
   process.stdout.write(out.join('\n') + '\n');
-  return result.passed ? 0 : 1;
+  if (result.passed) return 0;
+  // "I could not test this" is exit 2 and never exit 0, and it is not exit 1 either: one of
+  // those says the engine is broken and the other says nobody knows, and they need different
+  // reactions from whoever is reading.
+  return result.certain === false && result.cases.every((r) => r.caught || r.verdict === 'could not tell') ? 2 : 1;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

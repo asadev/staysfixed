@@ -212,7 +212,12 @@ watch it notice. There is a built-in version of the same idea:
 staysfixed check --selfcheck
 ```
 
-which runs a corpus of deliberately broken builds and proves the engine still catches them.
+which builds eleven deliberately broken products and proves the engine still behaves on every
+one — eight breaks it must catch, three clean pairs it must stay silent about. A case that
+misbehaves is built again and run again before that counts: fail twice and it is a real
+failure; behave the second time and it comes back as **could not tell**, which is exit code 2
+and is not a pass. That exists because a corpus that can be perturbed by a busy machine is
+worth nothing on a busy machine.
 
 ---
 
@@ -234,7 +239,7 @@ Every one of these is a designed answer, not a fault. Repeat the reason; do not 
 
 ---
 
-## Three things this tool will never see
+## Five things this tool will never see
 
 Say these once, when someone asks how much it covers. They are permanent, they are in
 `doctor`'s `limits`, and pretending otherwise is worse than the gap itself.
@@ -248,6 +253,16 @@ Say these once, when someone asks how much it covers. They are permanent, they a
 3. **States no journey reaches.** It checks the journeys it has, and `coverage.gaps` names the
    doors it has never opened. It cannot enumerate every possible state, and anything claiming
    to is lying.
+4. **Whether your product got slower.** How long something took is recorded, printed in the
+   sentence beside it, and never compared. A stopwatch on a shared machine measures how busy
+   the machine is at least as much as it measures the product — thirty runs of the same
+   one-line program on an idle Mac spread from 48ms to 96ms against a bucket at 100ms — so
+   comparing it invents a slowdown every time the machine is busy. A build that *hangs* is
+   still caught: it is stopped for taking too long, and how it finished is compared.
+5. **A change buried in the middle of an output over 64KB.** The two ends are kept and
+   compared, along with the exact number of bytes discarded, so a middle that grew or shrank
+   shows up. One that changed without changing length does not. The whole text is written to
+   the evidence folder, and the run says it only compared the ends.
 
 ---
 

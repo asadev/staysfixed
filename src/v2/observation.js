@@ -807,6 +807,12 @@ export function mergeWobble(wobbles) {
  */
 export function subtractWobble(differences, wobble, opts = {}) {
   const unstableNow = new Set(wobble.unstable);
+  // NOT symmetric, and that is deliberate. Subtracting the OLD build's wobble as well was
+  // tried on 2026-08-30 and taken straight back out: a path the old build answered randomly
+  // and the new build now answers the same way every time is a REAL change — somebody made
+  // something deterministic, or hard-coded what used to vary — and subtracting the old
+  // build's wobble is exactly what would hide it. Where both builds wobble at a path, the
+  // candidate's own wobble already covers it, so nothing is lost by leaving this alone.
 
   /** @type {Difference[]} */
   const real = [];

@@ -51,8 +51,8 @@ import { connect } from '../../drive/cdp.js';
 import { resolveElectronBinary } from '../../drive/find.js';
 import { splitPath } from '../observation.js';
 import {
-  countBucket, defineAdapter, joinPath, notCovered, observation, sizeBucket, timeBucket,
-  trimForStorage, undoOurFootprint,
+  countBucket, defineAdapter, howLongItTook, joinPath, notCovered, observation, sizeBucket,
+  timeBucket, trimForStorage, undoOurFootprint,
 } from './contract.js';
 import { compareTrees, snapshotTree } from './process.js';
 import {
@@ -1172,11 +1172,11 @@ export function describeApp(input) {
       : `What this journey did, in order: ${did.join('; ')}.`,
     journey: id,
   }));
-  out.push(observation({
+  out.push(howLongItTook({
     channel: 'counters',
     path: joinPath('count', id, 'time to open'),
-    value: timeBucket(app.openedInMs),
-    says: `The app took ${timeBucket(app.openedInMs)} to open and show a window. Deliberately rough: exact timings differ every run.`,
+    ms: app.openedInMs,
+    what: 'Opening the app and getting a window on screen',
     journey: id,
   }));
   if (reading?.helpers) {

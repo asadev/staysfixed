@@ -42,8 +42,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 import {
-  countBucket, defineAdapter, joinPath, notCovered, observation, sizeBucket, timeBucket,
-  trimForStorage, undoOurFootprint,
+  countBucket, defineAdapter, howLongItTook, joinPath, notCovered, observation, sizeBucket,
+  timeBucket, trimForStorage, undoOurFootprint,
 } from './contract.js';
 import { copyForScratch, frozenEnvironment } from './process.js';
 import { freePort, looksDestructive, waitForServer } from './http.js';
@@ -624,13 +624,13 @@ export const webAdapter = defineAdapter({
       out.push(...describeComplaints(journey, handle.consoleErrors()));
 
       out.push(
-        observation({
+        howLongItTook({
           channel: 'counters',
           path: joinPath('count', journey.name, 'how long the steps took'),
-          value: timeBucket(Date.now() - started),
-          says: `Walking the steps of "${journey.name}" took ${timeBucket(Date.now() - started)}, not counting opening the browser, which is our time and not the app's. Deliberately rough: exact timings differ on every run and would drown everything else.`,
+          ms: Date.now() - started,
+          what: `Walking the steps of "${journey.name}"`,
+          andAlso: 'This does not count opening the browser, which is our time and not the app\'s.',
           journey: journey.name,
-          surface: 'web',
         }),
       );
 

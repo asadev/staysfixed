@@ -104,6 +104,9 @@ const VERSION = /** @type {{version?: string}} */ (require('../../package.json')
  * @property {string} product              One repo can build five products. This names one.
  * @property {BuildFingerprint} candidate  The build you just made.
  * @property {Journey[]} journeys
+ * @property {CoverageGap[]} [gaps]      Holes found before any journey ran — an adapter that
+ *                                       fell over while listing what it would walk, a name
+ *                                       that matched nothing. They belong in the coverage.
  * @property {Walker} walk
  * @property {string} cwd                  Project root — where the working diff is read.
  * @property {(candidate: BuildFingerprint, ctx: {events?: CheckEvents, signal?: AbortSignal}) => Promise<LiveBuild|null>} [bootReference]
@@ -178,7 +181,7 @@ export async function runCheck(opts) {
 
   const journeys = (opts.journeys ?? []).filter((j) => !j.skip);
   /** @type {CoverageGap[]} */
-  const gaps = [];
+  const gaps = [...(opts.gaps ?? [])];
   for (const skipped of (opts.journeys ?? []).filter((j) => j.skip)) {
     // A switched-off journey is missing coverage, never a pass. Anything else
     // lets a product go quiet by having its checks turned off one at a time.
@@ -279,6 +282,21 @@ export async function runCheck(opts) {
         continue;
       }
       before.set(journey.name, stored.capture);
+      // The rules stamp exists so a run can notice this, and until 2026-08-30 nothing ever
+      // read it. A stored capture normalised under one set of rules compared against a fresh
+      // one normalised under another produces differences that are about the RULES — either a
+      // wall of noise that reads like a regression, or, when the change was to add a rule,
+      // quiet where there should not be any. Either way the reader has to be told.
+      if (stored.capture.rules && a.rules && stored.capture.rules !== a.rules) {
+        gaps.push({
+          what: `"${journey.describe || journey.name}" is being compared across a change to the normalisation rules.`,
+          why:
+            `The stored record of the old build was tidied up by rule set ${stored.capture.rules} and this run used ${a.rules}. ` +
+            'Some of what you see may be the rules changing rather than the product, and a rule that was added since could be covering something up.',
+          unlockedBy: 'Run a paired check, which walks the old build live under today\'s rules, or ship again to cut a fresh reference.',
+          surface: journey.surface,
+        });
+      }
       if (stored.wobble) steadyInReference.push(...steadyPaths(stored.capture, stored.wobble));
       else referenceWobbleMeasured = false;
     }
@@ -569,7 +587,28 @@ async function walkOnce(opts, journey, build, run, which, live, events) {
 export function proveAgainstLive(suspicions, live, now) {
   /** @type {Map<string, Map<string, Observation>>} */
   const liveIndex = new Map();
-  for (const [name, capture] of live) liveIndex.set(name, indexByPath(capture.observations));
+  for (const [name, capture] of live) {
+    // A capture that came back with nothing it could actually observe is NOT a walk of the
+    // old build, and treating it as one is the worst mistake this function can make: every
+    // stored before-value is thrown away, every difference is relabelled 'appeared' with no
+    // before-value at all, and the whole lot is stamped proven, which the report then reads
+    // out as "re-checked against the old build booted live, so none of it is drift".
+    //
+    // Measured on Terminal Deck's Android app on 2026-08-30. The old build is exported with
+    // `git archive`, an APK is a build output and is gitignored, so the exported checkout has
+    // no APK in it, prepare gives up, and the adapter correctly returns one uncovered
+    // observation saying so. A control that went from greyed out to usable — the exact
+    // regression the run was meant to catch — was reported as a control that had appeared out
+    // of nowhere, with `false` never mentioned. Any platform whose artifact is built rather
+    // than committed hits this, not only phones.
+    // `covered` is the ADAPTER's word for this and it does not survive onto an Observation:
+    // `observation()` in adapters/contract.js turns `covered: false` into `meta.refused`.
+    // Filtering on `o.covered` therefore matched everything and did nothing at all — the
+    // fix above was written correctly and then read the wrong field.
+    const walked = capture.observations.filter((o) => o.meta?.refused !== true);
+    if (walked.length === 0) continue;
+    liveIndex.set(name, indexByPath(walked));
+  }
   /** @type {Map<string, Map<string, Observation>>} */
   const nowIndex = new Map();
   for (const [name, pair] of now) nowIndex.set(name, indexByPath(pair.a.observations));

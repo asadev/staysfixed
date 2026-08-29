@@ -46,7 +46,7 @@ export { CHANNELS };
  * Why a thing was not observed. Short vocabulary on purpose: the engine counts these and
  * reports them as holes, and a free-text reason cannot be counted.
  *
- * @typedef {'irreversible'|'missing tool'|'refused'|'too big'|'timed out'|'not supported here'|'crashed'|'needs a sample'} NotCoveredReason
+ * @typedef {'irreversible'|'missing tool'|'refused'|'too big'|'timed out'|'not supported here'|'crashed'|'needs a sample'|'measures the machine'} NotCoveredReason
  */
 
 /** @type {Record<NotCoveredReason, string>} */
@@ -59,6 +59,8 @@ export const NOT_COVERED_MEANING = Object.freeze({
   'not supported here': 'this platform cannot be observed this way, and saying so is the honest answer',
   crashed: 'the thing being observed fell over before it could be read',
   'needs a sample': 'a real value has to be supplied before this can be tried at all',
+  'measures the machine':
+    'a stopwatch measures how busy this machine was at least as much as it measures the product, so the number is recorded and never compared',
 });
 
 // ---------------------------------------------------------------------------
@@ -466,6 +468,61 @@ export function timeBucket(ms) {
 }
 
 /**
+ * How long something took, recorded and DELIBERATELY NOT COMPARED.
+ *
+ * This used to be an ordinary observation whose value was the bucket the run landed in, and
+ * it was the single worst thing in the tool, for a reason that is arithmetic rather than
+ * theoretical. A wall clock on a shared machine measures how busy the machine is at least as
+ * much as it measures the product. Two runs of identical code, one while a test suite is
+ * running and one on a quiet laptop, land on different rungs of any ladder you care to draw
+ * — and the tool then reported a difference nobody caused, or worse, reported the address as
+ * "newly unpredictable", which is its sharpest accusation.
+ *
+ * Measured on this Mac on 2026-08-30, on the self-check corpus's own fixture: thirty runs of
+ * the same one-line program, machine idle, ran 48ms to 96ms — with the first rung boundary at
+ * 100ms. Four milliseconds of headroom. Anything at all happening on the machine crosses it,
+ * and that is exactly what happened the night the self-check came back "1 of 9 wrong" while
+ * the test suite ran alongside it, and passed five times in a row afterwards.
+ *
+ * The fix is not a wider bucket — every ladder has a boundary and every boundary has this
+ * problem — and it is certainly not a tolerance, which this tool does not have and will not
+ * grow. It is to stop claiming something a stopwatch cannot tell you. The number is still
+ * recorded, in the sentence, where a person can read it. It is never differenced.
+ *
+ * WHAT THIS GIVES UP, said plainly: Stays Fixed will not tell you your product got slower.
+ * WHAT IT DOES NOT GIVE UP: a build that hangs is still caught, because it gets killed for
+ * taking too long and how it finished IS compared; and every counter that comes from the
+ * product rather than from the clock — files written, calls made, doors answered — is still
+ * compared exactly.
+ *
+ * @param {object} spec
+ * @param {Channel} spec.channel
+ * @param {string|(string|number)[]} spec.path
+ * @param {number} spec.ms                What it actually took, for the sentence.
+ * @param {string} spec.what              What was being timed, in the reader's words.
+ * @param {string} [spec.andAlso]         Anything else worth saying in the same breath.
+ * @param {string} [spec.journey]
+ * @returns {Observation}
+ */
+export function howLongItTook(spec) {
+  return observation({
+    channel: spec.channel,
+    path: spec.path,
+    // One fixed string, so this address is identical in every capture of every build and can
+    // never become a difference. The measurement lives in the sentence, which is never compared.
+    value: `not compared — ${NOT_COVERED_MEANING['measures the machine']}`,
+    says:
+      `${spec.what} took ${timeBucket(spec.ms)}. That is recorded and NOT compared: a stopwatch on a shared machine ` +
+      `measures the machine as much as the product, so a busy laptop would otherwise invent a slowdown that nobody caused. ` +
+      `A build that hangs is still caught — it gets stopped for taking too long, and how it finished is compared.` +
+      (spec.andAlso ? ` ${spec.andAlso}` : ''),
+    covered: false,
+    reason: 'measures the machine',
+    journey: spec.journey,
+  });
+}
+
+/**
  * Sizes, on the same principle as time. A response body that grew by two bytes is not news;
  * one that doubled is.
  * @param {number} bytes
@@ -542,10 +599,12 @@ export function undoOurFootprint(text, footprint) {
 /**
  * Keep a piece of text at a size worth storing.
  *
- * Anything longer gets its head and tail kept — the two ends are where the interesting
- * lines are — plus a fingerprint of the whole, so a change in the middle still shows as a
- * difference even though the middle itself was never stored. The caller writes the full
- * text to the evidence folder and points at it.
+ * Anything longer gets its head and tail kept — the two ends are where the interesting lines
+ * are — plus the EXACT number of bytes left out, so a middle that grew or shrank still shows
+ * as a difference. A middle that changed without changing length does NOT, and that hole is
+ * stated rather than hidden: the caller marks the observation as not fully covered and writes
+ * the whole text to the evidence folder. See the comment in the body for why a digest of the
+ * whole text cannot be used here.
  *
  * @param {string} text
  * @param {number} [limit] bytes
@@ -557,8 +616,27 @@ export function trimForStorage(text, limit = 64 * 1024) {
   const keep = Math.floor(limit / 2);
   const head = text.slice(0, keep);
   const tail = text.slice(-keep);
+  // The marker used to carry a COARSE size bucket, and the doc above it claimed a fingerprint
+  // of the whole that was never actually computed. Both halves of that were wrong, and the
+  // result was the worst thing this tool can produce: a change that happened entirely in the
+  // discarded middle of a large output left a byte-identical stored value, so the comparison
+  // saw nothing and the run reported that nothing had changed. A silence that reads like an
+  // all-clear.
+  //
+  // The exact byte count goes in instead. A digest of the whole text would be strictly
+  // better AND IT CANNOT GO HERE: normalisation runs after the adapter, on the head and the
+  // tail, so a digest taken now would include every timestamp and every id the rules exist to
+  // rub out — the address would then disagree with itself on every run, be measured as wobble,
+  // and get subtracted, which would switch off the comparison of large outputs altogether.
+  // An exact length survives normalisation, because almost everything volatile (a timestamp,
+  // a uuid, a hex id) has a fixed width.
+  //
+  // What is left uncovered is real and it is named rather than hidden: a change confined to
+  // the middle that keeps the length identical is not seen. The caller marks the observation
+  // as not fully covered, the coverage ledger states the hole, and the whole text is written
+  // to the evidence folder so anybody can look.
   return {
-    text: `${head}\n... ${sizeBucket(bytes - keep * 2)} left out of the middle ...\n${tail}`,
+    text: `${head}\n... exactly ${bytes - keep * 2} bytes left out of the middle of ${bytes} ...\n${tail}`,
     truncated: true,
     bytes,
   };

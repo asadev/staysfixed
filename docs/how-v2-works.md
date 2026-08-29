@@ -79,7 +79,7 @@ value**. One comparison engine then serves every platform.
 | `complaints` | What the product complained about: console messages, errors, crashes, the code it exited with. |
 | `results` | What the product gave back: what it printed, what it answered, what it offers other code. |
 | `contract` | The doors the source code says exist: routes, exported functions, message channels. Read without running anything. Free, and exact. |
-| `counters` | Rough counts and rough timings. Deliberately rough — precise timing is noise, not information. |
+| `counters` | Rough counts — files written, calls made, doors answered, names exported. Compared exactly. |
 | `pixels` | What it looked like. Used to show a person a problem another channel already found. |
 
 ### The address space
@@ -95,6 +95,17 @@ cli.build.exit
 ipc.session:create.registered
 screen.home.tree.button:Save.enabled
 ```
+
+**How long something took is deliberately NOT in this address space.** It is
+recorded, it is printed in the sentence a person reads beside the address, and it
+is never differenced. A stopwatch on a shared machine measures how busy the
+machine is at least as much as it measures the product — measured here, thirty
+runs of the same one-line program on an idle Mac spread from 48ms to 96ms against
+a bucket boundary at 100ms, so any load at all crossed it and invented a
+difference nobody caused. Every duration goes out through `howLongItTook()` in
+`src/v2/adapters/contract.js`, carries a fixed value on every run, and counts as
+missing coverage rather than as a pass. A build that *hangs* is still caught: it
+is stopped for taking too long, and how it finished is compared exactly.
 
 A dot inside one segment is written `%2E` and a literal percent `%25` — use
 `joinPath()` and you never have to think about it. Escaping rather than

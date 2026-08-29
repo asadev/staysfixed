@@ -34,7 +34,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
   defineAdapter, joinPath, notCovered, observation, sizeBucket, stableValue,
-  timeBucket, trimForStorage, undoOurFootprint,
+  howLongItTook, timeBucket, trimForStorage, undoOurFootprint,
 } from './contract.js';
 import {
   compareTrees, copyForScratch, frozenEnvironment, readWatcher, snapshotTree, watcherScript,
@@ -722,11 +722,12 @@ export function describeRequest(input) {
     }));
   }
 
-  out.push(observation({
+  out.push(howLongItTook({
     channel: 'counters',
     path: joinPath('count', id, 'duration'),
-    value: timeBucket(ms),
-    says: `${asked} took ${timeBucket(ms)}. Deliberately rough: exact timings differ on every run and would drown everything else.`,
+    ms,
+    what: asked,
+    journey: id,
   }));
 
   return out;
