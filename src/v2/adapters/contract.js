@@ -88,8 +88,11 @@ export const NOT_COVERED_MEANING = Object.freeze({
  * @property {string} root                Where the walkable copy lives. Scratch, always.
  * @property {boolean} ready              False means prepare gave up; `why` says so in English.
  * @property {string} why                 Plain English, always filled in — including on success.
- * @property {Record<string, string|number|boolean>} [facts]
+ * @property {Record<string, string|number|boolean|undefined>} [facts]
  *                                        Anything a journey needs: a port, a binary path, a pid.
+ *                                        A fact may be undefined: a web app read at a fixed address
+ *                                        has no port of its own, and an adapter should be able to
+ *                                        say so rather than invent a value to satisfy a type.
  * @property {() => Promise<void>} dispose  Undo just this build's preparation.
  */
 

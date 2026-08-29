@@ -43,6 +43,8 @@ import { whatChanged } from './rank.js';
 import { processAdapter } from './adapters/process.js';
 import { sourceAdapter } from './adapters/source.js';
 import { httpAdapter } from './adapters/http.js';
+import { webAdapter } from './adapters/web.js';
+import { electronAdapter } from './adapters/electron.js';
 
 const exec = promisify(execFile);
 
@@ -89,15 +91,19 @@ const exec = promisify(execFile);
  */
 
 /** The adapters, in the order the engine trusts them. Reading the code is free, so it is first. */
-const ADAPTERS = [sourceAdapter, processAdapter, httpAdapter];
+const ADAPTERS = [sourceAdapter, processAdapter, httpAdapter, webAdapter, electronAdapter];
 
 /** Which adapter owns a journey, by the surface it says it walks. */
 const ADAPTER_FOR_SURFACE = {
   cli: 'process',
   library: 'process',
   server: 'http',
-  web: 'http',
-  electron: 'process',
+  // These two were pointed at the wrong adapters while the real ones were being
+  // built. A web journey handed to the http adapter never opens a browser, and an
+  // Electron journey handed to the process adapter never opens the app — both
+  // would have walked nothing and reported it as covered.
+  web: 'web',
+  electron: 'electron',
   android: 'process',
   ios: 'process',
   windows: 'process',

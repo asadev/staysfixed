@@ -28,13 +28,14 @@
 import os from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
-import { existsSync, accessSync, readFileSync, constants as fsConstants } from 'node:fs';
+import { existsSync, accessSync, readFileSync, readdirSync, constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { findConfigFile } from '../core/paths.js';
-import { findChrome, platformTag } from '../drive/find.js';
+import { platformTag } from '../drive/find.js';
 import { isRepo } from '../core/git.js';
+import { surveyBrowsers, INSTALL_COMMAND, PORT_NEVER_USE } from './browsers.js';
 import { messageOf, EXIT } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, mark, shortPath, setLogLevel } from '../core/log.js';
 
@@ -128,6 +129,8 @@ export const CHANNELS = [
  * @property {{platform: string, arch: string, release: string, node: string, cpus: number, memoryGb: number, tag: string}} machine
  * @property {{root: string, configFile: string|null, isGitRepo: boolean, hasReference: boolean, referenceNote: string}} project
  * @property {SurfaceReport[]} surfaces
+ * @property {Covers} covers
+ * @property {{willOpen: import('./browsers.js').BrowserFound|null, borrowingYourOwn: boolean, note: string, install: string|null, found: import('./browsers.js').BrowserFound[], neverTouches: string[], leftovers: string}} browsers
  * @property {{id: string, name: string, what: string, availableOn: string[]}[]} channels
  * @property {ToolReport[]} tools
  * @property {HostReport[]} hosts
@@ -152,14 +155,20 @@ export async function capabilities(opts = {}) {
   const configFile = opts.configFile ? path.resolve(cwd, opts.configFile) : findConfigFile(cwd);
   const root = configFile ? path.dirname(configFile) : cwd;
 
+  // The browser survey comes first because three different answers below depend
+  // on it, and asking this machine the same question three times would be both
+  // slow and a way for the three answers to disagree.
+  const browsers = await surveyBrowsers().catch(() => /** @type {import('./browsers.js').BrowserSurvey} */ ({ found: [], chosen: null, borrowingHis: false, note: 'The browsers on this machine could not be checked, so nothing here says whether a web page can be opened.', install: INSTALL_COMMAND }));
+  const desktopApp = findDesktopApp(cwd);
+
   const [tools, hosts, repo, reference] = await Promise.all([
-    findTools(cwd),
+    findTools(cwd, browsers),
     offline ? Promise.resolve(/** @type {HostReport[]} */ ([])) : reachableHosts(),
     isRepo(root).catch(() => false),
     findReference(root),
   ]);
 
-  const surfaces = describeSurfaces(tools, hosts, configFile !== null);
+  const surfaces = describeSurfaces(tools, hosts, configFile !== null, browsers, desktopApp);
 
   /** @type {Capabilities} */
   const caps = {
@@ -181,6 +190,21 @@ export async function capabilities(opts = {}) {
       referenceNote: reference.note,
     },
     surfaces,
+    covers: whatThisRunActuallyCovers(surfaces),
+    browsers: {
+      willOpen: browsers.chosen,
+      borrowingYourOwn: browsers.borrowingHis,
+      note: browsers.note,
+      install: browsers.install,
+      found: browsers.found,
+      neverTouches: [
+        'It never opens your browser profile. Every run gets a throwaway one, and it is deleted afterwards.',
+        `It never takes port ${PORT_NEVER_USE}, which another session on this machine already owns. It asks the operating system for a free one instead.`,
+        'It never quits a browser it did not start. Anything it stops had to be running from a scratch profile this tool created.',
+        'Nothing it opened outlives the run — not on a clean finish, not on an error, not on Ctrl-C.',
+      ],
+      leftovers: 'staysfixed browsers --clean quits anything an interrupted run left running, and only ever something started by this tool.',
+    },
     channels: CHANNELS.map((channel) => ({
       ...channel,
       availableOn: surfaces.filter((s) => s.canCheck.includes(channel.id)).map((s) => s.id),
@@ -340,9 +364,11 @@ function versionIn(text) {
  * Everything on this machine that could widen what the tool is able to watch.
  *
  * @param {string} cwd
+ * @param {import('./browsers.js').BrowserSurvey} browsers   Already taken, because
+ *        the browser question is asked in three places and must be answered once.
  * @returns {Promise<ToolReport[]>}
  */
-async function findTools(cwd) {
+async function findTools(cwd, browsers) {
   /** @type {ToolReport[]} */
   const reports = [];
 
@@ -372,20 +398,21 @@ async function findTools(cwd) {
     })(),
 
     (async () => {
-      let browser = null;
-      try {
-        browser = findChrome(process.env.STAYSFIXED_CHROME);
-      } catch {
-        browser = null;
-      }
+      // One entry, not two. Whether the browser found is one we may open is a
+      // real and separate question, but it belongs to the web surface and to the
+      // browsers block, where it can be said in a sentence — a second row in a
+      // flat list of tool names would read as two browsers rather than one fact
+      // about the one we have.
+      const chosen = browsers.chosen;
       add({
         id: 'browser',
-        name: 'a Chromium browser',
-        found: browser !== null,
-        where: browser ?? undefined,
-        why: 'Drives web pages and Electron windows, and is the only way to reach the meaning tree of a screen.',
-        fix: browser ? undefined : 'Install Google Chrome, Chromium, Edge or Brave, or set STAYSFIXED_CHROME to one you already have.',
-        automatic: false,
+        name: 'a browser to drive pages with',
+        found: chosen !== null,
+        where: chosen?.binary,
+        version: chosen?.version,
+        why: 'Opens a web page so what the screen says each control is and does can be read off it.',
+        fix: chosen ? undefined : `${INSTALL_COMMAND}  — nothing to sign up for and nobody to ask.`,
+        automatic: true,
       });
     })(),
 
@@ -394,30 +421,31 @@ async function findTools(cwd) {
       // The browsers Playwright downloads live outside any project and survive
       // every reinstall, so finding them means half the work is already done and
       // telling somebody to download them again would be wrong.
-      const browsers = playwrightBrowsersDir();
+      const downloaded = playwrightBrowsersDir();
       add({
         id: 'playwright',
         name: 'Playwright',
         found: installed,
-        where: browsers ?? undefined,
-        why: 'Reads a page’s meaning tree properly, and reaches Firefox and WebKit as well as Chromium.',
+        where: downloaded ?? undefined,
+        why: 'Reads a page’s meaning tree properly, and brings a browser of its own so yours is left alone.',
         fix: installed
           ? undefined
-          : browsers
-            ? `Its browsers are already downloaded in ${browsers}, so only the package is missing: npm install --save-dev playwright`
-            : 'npm install --save-dev playwright && npx playwright install chromium',
+          : downloaded
+            ? `Its browsers are already downloaded in ${downloaded}, so only the package is missing: npm install --save-dev playwright`
+            : INSTALL_COMMAND,
         automatic: true,
       });
     })(),
 
     (async () => {
-      const installed = hasModule(cwd, 'electron');
+      const app = findDesktopApp(cwd);
       add({
         id: 'electron',
-        name: 'Electron',
-        found: installed,
-        why: 'Lets the tool attach to a desktop app that is already running, over its debug port.',
-        fix: installed ? undefined : 'Only needed if the product you are watching is an Electron desktop app.',
+        name: 'a desktop app to check',
+        found: app !== null,
+        where: app?.where,
+        why: 'A desktop app is driven straight over its own debugging port, so no browser is needed for it — only the app itself.',
+        fix: app ? undefined : 'Only needed if the product you are watching is a desktop app. If it is, name the built app in your settings under app.binary.',
         automatic: false,
       });
     })(),
@@ -601,6 +629,66 @@ function hasModule(cwd, name) {
 }
 
 /**
+ * Is there a desktop app in this project to check?
+ *
+ * Asked without running anything and without importing the project's settings.
+ * A settings file may be JavaScript, and doctor must never execute a person's
+ * code to answer a question about their machine — so the file is READ as text
+ * and looked at, never loaded.
+ *
+ * Three answers count, in order of how sure they make us: settings that name an
+ * app, a built app sitting in the usual output folder, and Electron in the
+ * project's dependencies.
+ *
+ * @param {string} cwd
+ * @returns {{where: string, how: string}|null}
+ */
+function findDesktopApp(cwd) {
+  const configFile = findConfigFile(cwd);
+  if (configFile) {
+    try {
+      const text = readFileSync(configFile, 'utf8');
+      const named = /["']?binary["']?\s*:\s*["'`]([^"'`]+)["'`]/.exec(text);
+      if (named) return { where: named[1], how: 'your settings name it under app.binary' };
+      if (/["']?kind["']?\s*:\s*["'`]electron["'`]/.test(text)) {
+        return { where: configFile, how: 'your settings say this project is a desktop app' };
+      }
+    } catch {
+      // Unreadable settings are not an answer either way; keep looking.
+    }
+  }
+
+  const root = configFile ? path.dirname(configFile) : cwd;
+  const ext = process.platform === 'darwin' ? '.app' : process.platform === 'win32' ? '.exe' : '.AppImage';
+  for (const folder of ['dist', 'out', 'release', 'build']) {
+    const dir = path.join(root, folder);
+    let entries = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.endsWith(ext)) return { where: path.join(dir, entry.name), how: 'it is built and sitting in ' + folder + '/' };
+      // electron-builder puts the app one level down, in a per-platform folder.
+      if (!entry.isDirectory()) continue;
+      try {
+        for (const inner of readdirSync(path.join(dir, entry.name))) {
+          if (inner.endsWith(ext)) return { where: path.join(dir, entry.name, inner), how: 'it is built and sitting in ' + folder + '/' + entry.name + '/' };
+        }
+      } catch {
+        // Not readable. Not an answer.
+      }
+    }
+  }
+
+  if (hasModule(cwd, 'electron')) {
+    return { where: root, how: 'this project depends on Electron, so it makes one — but nothing says where the built app is' };
+  }
+  return null;
+}
+
+/**
  * Where Playwright keeps the browsers it downloaded, if it has downloaded any.
  * @returns {string|null}
  */
@@ -768,12 +856,15 @@ async function findReference(root) {
  * @param {ToolReport[]} tools
  * @param {HostReport[]} hosts
  * @param {boolean} configured
+ * @param {import('./browsers.js').BrowserSurvey} browsers
+ * @param {{where: string, how: string}|null} desktopApp
  * @returns {SurfaceReport[]}
  */
-function describeSurfaces(tools, hosts, configured) {
+function describeSurfaces(tools, hosts, configured, browsers, desktopApp) {
   /** @param {string} id */
   const have = (id) => tools.some((t) => t.id === id && t.found);
-  const browser = have('browser') || have('playwright');
+  const browser = browsers.chosen !== null;
+  const ownBrowser = browsers.chosen !== null && !browsers.chosen.everyday;
   const windowsHost = hosts.find((h) => h.reachable && h.windows === true);
 
   /** Every channel that needs no driver at all — a child process is enough. */
@@ -813,42 +904,64 @@ function describeSurfaces(tools, hosts, configured) {
   surfaces.push({
     id: 'web',
     name: 'web apps and sites',
-    status: browser ? 'ready' : 'unavailable',
-    summary: browser
-      ? 'Covered, including what the screen says each control is and does.'
-      : 'Cannot run here: there is no browser to open the page with.',
+    // A machine with only the person's own browser CAN check a website, so this is
+    // not "unavailable" — but it is not "ready" either, because running it borrows
+    // the browser they use. Calling that ready is how a tool ends up making somebody's
+    // machine worse and reporting a clean run while it does.
+    status: ownBrowser ? 'ready' : browser ? 'partial' : 'unavailable',
+    summary: ownBrowser
+      ? `Covered, including what the screen says each control is and does. It opens ${browsers.chosen?.name}, which is a separate application from the browser you use.`
+      : browser
+        ? 'Can be checked, but only by opening the browser you use yourself. It runs invisibly on a throwaway profile, so your settings and tabs are safe — but on a Mac it shares an application slot with your browser, so clicking your browser icon during a check may wake the hidden copy instead of opening your window.'
+        : 'Cannot run here: there is no browser on this machine that will open a page.',
     canCheck: browser ? [...withoutADriver, 'meaning', 'pixels'] : [],
     cannotCheck: browser ? [] : CHANNELS.map((c) => c.id),
-    needs: browser
+    needs: ownBrowser
       ? []
-      : [{ what: 'a Chromium browser', why: 'A page has to actually open before anything can be read off it.', fix: 'Install Google Chrome, or run: npm install --save-dev playwright && npx playwright install chromium', automatic: true }],
+      : [
+          {
+            what: browser ? 'a browser of its own, so yours is left alone' : 'a browser to open pages with',
+            why: browser
+              ? 'Two copies of one browser share a single slot on a Mac. Its own browser is what stops a check in the background answering when you click your browser icon.'
+              : 'A page has to actually open before anything can be read off it.',
+            fix: INSTALL_COMMAND,
+            automatic: true,
+          },
+        ],
   });
 
+  // A desktop app needs NO browser. It is its own Chromium and it opens its own
+  // debugging port; the tool speaks to that port directly. Version 1's doctor said
+  // otherwise and it was simply wrong — it would have told somebody with a perfectly
+  // checkable Electron app to go and install Chrome.
+  const namedApp = configured && desktopApp !== null && desktopApp.how.startsWith('your settings');
   surfaces.push({
     id: 'electron',
     name: 'Electron desktop apps',
-    status: browser ? (configured ? 'ready' : 'partial') : 'unavailable',
-    summary: browser
-      ? configured
-        ? 'Covered. It attaches to the app over its debug port, and reads the IPC channels straight out of the source.'
-        : 'Ready as soon as the settings say which app to open.'
-      : 'Cannot run here: Electron is driven the same way a browser is, and there is none.',
-    canCheck: browser ? [...withoutADriver, 'meaning', 'pixels'] : [],
-    cannotCheck: browser ? [] : CHANNELS.map((c) => c.id),
-    needs: [
-      ...(browser
+    status: desktopApp === null ? 'unavailable' : namedApp ? 'ready' : 'partial',
+    summary:
+      desktopApp === null
+        ? 'Nothing to check: no desktop app was found in this project, and the settings do not name one.'
+        : namedApp
+          ? `Covered. It opens ${desktopApp.where} with its own scratch data folder, drives it over its own debugging port — no browser involved — and reads the IPC channels straight out of the source.`
+          : `A desktop app was found (${desktopApp.how}), but nothing says which built app to open, so a check would have to guess.`,
+    canCheck: desktopApp === null ? [] : [...withoutADriver, 'meaning', 'pixels'],
+    cannotCheck: desktopApp === null ? CHANNELS.map((c) => c.id) : [],
+    needs:
+      desktopApp === null || namedApp
         ? []
         : [
             {
-              what: 'a Chromium browser or the app’s own Electron',
-              why: 'The debug port speaks the same protocol either way, so anything Chromium-shaped will do.',
-              fix: 'npm install --save-dev playwright && npx playwright install chromium',
+              what: 'settings naming the built app',
+              why: 'Two builds of one desktop app fight over its single-instance lock and its data folder, so the tool has to know exactly which file to open and give each run its own folder.',
+              fix: `Run \`staysfixed init\`, or set app.binary to ${desktopApp.where}.`,
               automatic: true,
             },
-          ]),
-      ...(configured ? [] : [{ what: 'settings naming the app', why: 'It has to be told which binary to open.', fix: 'Run `staysfixed init` and answer the questions.', automatic: true }]),
-    ],
+          ],
   });
+  if (desktopApp === null) {
+    impossible.set('electron', 'This project has no desktop app in it. If yours is built somewhere else, name the built app in your settings under app.binary and this becomes available — nothing else is needed, and no browser is needed for it at all.');
+  }
 
   const androidMissing = ['java', 'adb', 'emulator', 'appium'].filter((id) => !have(id));
   surfaces.push({
@@ -927,6 +1040,84 @@ function describeSurfaces(tools, hosts, configured) {
     const instead = impossible.get(surface.id);
     return instead ? { ...surface, state: stateOf(surface, true), instead } : { ...surface, state: stateOf(surface, false) };
   });
+}
+
+/**
+ * What a green run on this machine would and would not actually mean.
+ *
+ * @typedef {object} Covers
+ * @property {string} short          A short paragraph, safe to repeat to a person word for word.
+ * @property {string[]} covered      Kinds of product a check here looks at in full.
+ * @property {{name: string, why: string}[]} partly   Looked at, but not completely, and why.
+ * @property {{name: string, why: string, whoFixes: SurfaceState}[]} notCovered
+ * @property {boolean} everything    True only when nothing at all is left out.
+ */
+
+/**
+ * The honest-degradation sentence, and the whole reason it exists.
+ *
+ * A project where only the web adapter works is still useful. What it must never
+ * do is report a clean run that quietly means less than it looks like. So the
+ * capabilities object carries, in one place, the words to say instead: this
+ * covers your website; your iPhone app is not being checked, and here is why.
+ *
+ * @param {SurfaceReport[]} surfaces
+ * @returns {Covers}
+ */
+function whatThisRunActuallyCovers(surfaces) {
+  // Three buckets, not two. Folding "partly" into "covered" is exactly the
+  // over-claim this function exists to stop: an iPhone app whose screens cannot
+  // be read is not a covered iPhone app.
+  const full = surfaces.filter((s) => s.status === 'ready');
+  const some = surfaces.filter((s) => s.status === 'partial');
+  const missing = surfaces.filter((s) => s.status === 'unavailable');
+
+  /** @type {Covers} */
+  const out = {
+    short: '',
+    covered: full.map((s) => s.name),
+    partly: some.map((s) => ({ name: s.name, why: s.summary })),
+    notCovered: missing.map((s) => ({ name: s.name, why: s.instead ?? s.summary, whoFixes: s.state })),
+    everything: missing.length === 0 && some.length === 0,
+  };
+
+  if (full.length === 0 && some.length === 0) {
+    out.short = 'Nothing on this machine can be checked yet, so a run here would prove nothing at all about your product.';
+    return out;
+  }
+
+  /** @type {string[]} */
+  const parts = [];
+  parts.push(full.length > 0 ? `A check here covers ${plainList(out.covered)} in full.` : 'A check here covers nothing in full.');
+  if (some.length > 0) parts.push(`It covers ${plainList(some.map((s) => s.name))} only partly — read the summary for each before treating a clean result as proof.`);
+  if (missing.length > 0) {
+    parts.push(`It does NOT check ${plainList(missing.map((s) => s.name))} at all, so a clean result says nothing whatever about ${missing.length === 1 ? 'that' : 'those'}.`);
+    // Naming who can fix it is what turns a limitation into an action. The agent
+    // clears its own list without mentioning it; only the rest reaches a person.
+    const fixable = missing.filter((s) => s.state === 'the agent can fix this').map((s) => s.name);
+    const needsPerson = missing.filter((s) => s.state === 'only a person can do this').map((s) => s.name);
+    const never = missing.filter((s) => s.state === 'not possible here').map((s) => s.name);
+    if (fixable.length) parts.push(`${plainList(fixable, true)} could be added here without asking anybody — the commands are in nextSteps.`);
+    if (needsPerson.length) parts.push(`${plainList(needsPerson, true)} needs a person to do something first, and what that is is written out in full.`);
+    // "here" rather than "on this machine", because sometimes it is the project
+    // and not the machine — a project with no desktop app in it needs no runner,
+    // and telling somebody their Mac cannot do it would be false.
+    if (never.length) parts.push(`${plainList(never, true)} cannot be done here at all, and the reason for each is in notCovered.`);
+  }
+  if (out.everything) parts.push('Nothing is being left out on this machine.');
+  out.short = parts.join(' ');
+  return out;
+}
+
+/**
+ * "a, b and c" — because a comma-separated list reads like a machine wrote it.
+ * @param {string[]} items
+ * @param {boolean} [capitalise]
+ * @returns {string}
+ */
+function plainList(items, capitalise = false) {
+  const list = items.length <= 1 ? (items[0] ?? 'nothing') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+  return capitalise ? list.charAt(0).toUpperCase() + list.slice(1) : list;
 }
 
 /**
@@ -1014,6 +1205,18 @@ export function describeCapabilities(caps) {
   if (partial.length > 0) lines.push(`Partly: ${partial.join('; ')}.`);
   if (out.length > 0) lines.push(`Not here: ${out.join('; ')}.`);
   lines.push('');
+  // What a clean run would actually mean. This is the one paragraph that must
+  // never be dropped: without it, "nothing changed" reads as "your product is
+  // fine" on a machine that never opened half of it.
+  if (caps.covers?.short) {
+    lines.push('WHAT A CLEAN RUN HERE WOULD MEAN');
+    lines.push(caps.covers.short);
+    lines.push('');
+  }
+  if (caps.browsers) {
+    lines.push(caps.browsers.note);
+    lines.push('');
+  }
 
   // Who has to act. The whole point of splitting these out is that the first
   // list is nobody's problem — the agent just does it and never mentions it —
@@ -1028,7 +1231,10 @@ export function describeCapabilities(caps) {
     lines.push(`These need a person, and only for the steps listed further down: ${byPerson.join('; ')}.`);
   }
   for (const surface of never) {
-    lines.push(`Not possible on this machine: ${surface.name}. ${surface.instead ?? surface.summary}`);
+    // "here" rather than "on this machine": sometimes it is the machine, and
+    // sometimes it is this project — a project with no desktop app in it needs
+    // no Electron runner, and telling somebody their Mac cannot do it would be wrong.
+    lines.push(`Not possible here: ${surface.name}. ${surface.instead ?? surface.summary}`);
   }
   if (byAgent.length > 0 || byPerson.length > 0 || never.length > 0) lines.push('');
 
@@ -1093,6 +1299,15 @@ export async function run(ctx) {
       say(paint.grey(`    ${mark.info} ${need.what} — ${need.automatic ? 'the tool can do this itself: ' : 'somebody has to: '}${need.fix}`));
     }
   }
+
+  blank();
+  if (caps.covers?.short) {
+    say(paint.grey(`  ${mark.info} ${caps.covers.short}`));
+    blank();
+  }
+  if (caps.browsers?.borrowingYourOwn) warn(caps.browsers.note);
+  else if (caps.browsers?.willOpen) ok(caps.browsers.note);
+  else if (caps.browsers) fail(caps.browsers.note);
 
   blank();
   const found = caps.tools.filter((t) => t.found);

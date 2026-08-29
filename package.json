@@ -44,19 +44,23 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test --test-concurrency=1 \"test/*.test.js\" \"test/v2/*.test.js\"",
+    "test": "node --input-type=module -e \"try { const b = await import('./src/v2/browsers.js'); const s = await b.surveyBrowsers({ headless: false }); const own = s.found.find((x) => x.usable && !x.everyday); if (own) process.env.STAYSFIXED_CHROME = own.binary;} catch (e) { console.error('Could not pick a browser of our own, so the tests will use whatever they find: ' + e.message);} const { spawnSync } = await import('node:child_process'); process.exitCode = spawnSync(process.execPath, ['--test', '--test-concurrency=1', 'test/*.test.js', 'test/v2/*.test.js'], { stdio: 'inherit' }).status ?? 1;\"",
+    "test:in-your-browser": "node --test --test-concurrency=1 \"test/*.test.js\" \"test/v2/*.test.js\"",
     "test:determinism": "node --test test/determinism.test.js",
     "test:selfcheck": "node src/v2/selfcheck.js",
+    "browsers": "node --input-type=module -e \"const m = await import('./src/v2/browsers.js'); process.exitCode = await m.runBrowsersCommand({ bool: (n) => process.argv.slice(1).includes('--' + n) });\" --",
     "check": "npm run typecheck && npm test",
     "staysfixed": "node bin/staysfixed.js"
   },
   "dependencies": {
     "pixelmatch": "^7.2.0",
-    "pngjs": "^7.0.0"
+    "pngjs": "^7.0.0",
+    "playwright": "^1.62.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/pngjs": "^6.0.5",
+    "playwright": "^1.62.1",
     "typescript": "^5.9.0"
   }
 }

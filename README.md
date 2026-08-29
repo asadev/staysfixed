@@ -61,6 +61,43 @@ and the exact command that would fix each gap — and it never suggests setting 
 something that already works, because everything it lists as missing failed a
 real check first.
 
+### What a fresh install downloads, and what it does not
+
+`npm install staysfixed` pulls **two small packages and nothing else** —
+`pixelmatch` and `pngjs`, under a megabyte together. No browser, no runtime,
+nothing that takes minutes.
+
+Checking a **website** needs a browser. Rather than make everybody who only
+wanted to check a command-line tool wait for one, that is a separate step you
+take when you need it:
+
+```
+npm install --save-dev playwright && npx playwright install chromium
+```
+
+Measured on a Mac in August 2026, that is about **18MB of packages** in your
+project and about **570MB of browser** in a shared cache outside it — 371MB for
+Chrome for Testing and 196MB for its headless shell — downloaded once per
+machine, not once per project. `doctor` tells you when you need it, and it is one
+of the things an agent can simply do without asking you.
+
+Checking a **desktop app** needs no browser at all and no download: the app is
+its own Chromium, and the tool drives it over its own debugging port.
+
+**Checks never open the browser you use.** Given the choice they open Chrome for
+Testing or Chromium — a separate application — because on a Mac two copies of one
+browser share a single slot, and a check running in the background can end up
+answering when you click your own browser icon. If your machine has nothing but
+your everyday browser, it is used, invisibly and on a throwaway profile, and
+every run says so out loud rather than borrowing it quietly. Nothing it opens
+uses your profile, nothing it opens survives the run, and nothing it did not
+start is ever closed:
+
+```
+npx staysfixed browsers            # which browser checks open, and why
+npx staysfixed browsers --clean    # clear up after a run that was interrupted
+```
+
 ---
 
 ## What is real today

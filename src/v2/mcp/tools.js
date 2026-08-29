@@ -476,6 +476,16 @@ export function toolDefinitions() {
             description: 'Boot the old build live and walk it from the start instead of trusting the stored record. Slower and much stronger. Use it before a release, and on the first run of a product with no stored record.',
           },
           journeys: { type: 'string', description: "Where the steps come from: 'suite', 'code', 'recorded', or a path to a journeys file." },
+          surface: {
+            type: 'string',
+            enum: ['auto', 'cli', 'server', 'web', 'electron'],
+            description:
+              "What kind of product to aim at. Default 'auto', which uses the settings. 'web' opens the page in a browser of the tool's own — never yours — and reads what the screen says each control is and does. 'electron' opens the desktop app with its own scratch data folder and drives it over its own debugging port.",
+          },
+          at: {
+            type: 'string',
+            description: "What to aim at: a URL for 'web' (http://localhost:3000), or the path to the built app for 'electron'. Leave it out to use whatever the settings name.",
+          },
           limit: { type: 'number', description: `How many findings to return in full. Default ${DEFAULT_LIMIT}; the rest are counted and named.` },
           offset: { type: 'number', description: 'Skip this many findings. Pages through the last run without running anything again.' },
           format: { type: 'string', enum: ['text', 'json'], description: "'json' returns the whole result as machine-readable JSON and no prose." },
@@ -633,6 +643,12 @@ async function toolCapabilities(ctx, input) {
       engine: { loaded: engine.loaded, missing: engine.missing },
       machine: caps,
       machineError: capsError,
+      // Pulled up out of `machine` on purpose. These two are the answers an agent
+      // acts on — what a clean run would actually mean, and which browser gets
+      // opened — and burying them inside the machine survey is how they get skipped.
+      covers: caps?.covers ?? null,
+      browsers: caps?.browsers ?? null,
+      aiming: AIMING,
       selfCheck: 'staysfixed check --selfcheck',
     };
     return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], structuredContent: payload };
@@ -659,6 +675,18 @@ async function toolCapabilities(ctx, input) {
   if (engine.missing.length) {
     out.push('');
     out.push(`NOT BUILT IN THIS COPY: ${engine.missing.join(', ')}. Those calls refuse rather than pretend. Everything else works.`);
+  }
+
+  out.push('');
+  out.push('AIMING A CHECK AT ONE KIND OF PRODUCT');
+  for (const line of AIMING) out.push(`- ${line}`);
+
+  if (caps?.browsers) {
+    out.push('');
+    out.push('WHAT IT DOES TO THIS MACHINE WHILE IT RUNS');
+    out.push(`- ${caps.browsers.note}`);
+    for (const promise of caps.browsers.neverTouches ?? []) out.push(`- ${promise}`);
+    out.push(`- ${caps.browsers.leftovers}`);
   }
 
   out.push('');
@@ -691,6 +719,19 @@ async function toolCapabilities(ctx, input) {
 
   return { content: [{ type: 'text', text: out.join('\n') }] };
 }
+
+/**
+ * How to point a check at one kind of product. Said once, here, because it is the
+ * part of the surface that changed when web and desktop apps arrived and an agent
+ * that has to guess at it will guess wrong.
+ */
+const AIMING = [
+  "staysfixed_check { surface: 'web', at: 'http://localhost:3000' } — opens the page in a browser of the tool's own, never yours, and reads what the screen says each control is and does. Start your dev server yourself first; the tool will not guess at a command that might build over what you have running.",
+  "staysfixed_check { surface: 'electron', at: '/path/to/YourApp.app' } — opens the built desktop app with its own scratch data folder and its own debugging port, so it can never fight your own copy of it over a lock, a data folder or a relay slot.",
+  "staysfixed_check { surface: 'cli' } or { surface: 'server' } — the same engine on a command-line tool or an HTTP server.",
+  'Leave both out and it uses the settings. If you aim it and the result does not confirm it went there, the reply says so at the top and nothing below it is about what you asked for.',
+  'Both builds are opened one after the other, never at once. Two copies of one app fight over ports, single-instance locks and data folders, and a tool that caused that would be causing the bug it exists to catch.',
+];
 
 /** The loop, said once, in the one place an agent reads it. */
 const LOOP_STEPS = [
@@ -796,6 +837,10 @@ async function toolCheck(ctx, input) {
   const limit = positive(input.limit) ?? DEFAULT_LIMIT;
   const offset = positive(input.offset) ?? 0;
 
+  const surface = text(input.surface);
+  const at = text(input.at);
+  const aimed = (surface !== null && surface !== 'auto') || at !== null;
+
   /** @type {CheckResult} */
   const result = await run({
     cwd: ctx.root,
@@ -804,7 +849,15 @@ async function toolCheck(ctx, input) {
     paired: input.paired === true,
     journeys: text(input.journeys) ?? undefined,
     only: stringList(input.only) ?? [],
+    surface: surface && surface !== 'auto' ? surface : undefined,
+    at: at ?? undefined,
   });
+
+  // A run that was AIMED at something has to confirm it went there. An engine
+  // that quietly ignores an unknown option would hand back a perfectly clean
+  // result about something else entirely, and the agent would read it as proof
+  // about the thing it named. So the confirmation is required, not assumed.
+  const missedTheTarget = aimed ? aimingNote(surface, at, /** @type {any} */ (result).target) : null;
 
   const stamp = referenceStamp(ctx.root);
   const waivers = await readWaivers(ctx.root);
@@ -852,12 +905,14 @@ async function toolCheck(ctx, input) {
       unaccounted: unaccounted.length,
       accountedFor: { waived: waived.length, expiredWaivers: expired },
       findings: page,
+      aimedAt: aimed ? { surface: surface ?? 'auto', at: at ?? null, confirmed: missedTheTarget === null } : null,
+      aimingWarning: missedTheTarget,
     };
     return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], structuredContent: payload, isError: !clean };
   }
 
   const intent = await readIntent(ctx.root);
-  const body = renderCheck({ result, unaccounted, page, offset, limit, waived: waived.length, expired, newlyUnstable, intent, clean });
+  const body = renderCheck({ result, unaccounted, page, offset, limit, waived: waived.length, expired, newlyUnstable, intent, clean, missedTheTarget });
 
   // A difference is reported as an error result on purpose. Protocol-wise the
   // call succeeded, but `isError` is the flag every client puts in front of the
@@ -878,9 +933,10 @@ async function toolCheck(ctx, input) {
  * @param {string[]} a.newlyUnstable
  * @param {Intent|null} a.intent
  * @param {boolean} a.clean
+ * @param {string|null} a.missedTheTarget
  * @returns {string}
  */
-function renderCheck({ result, unaccounted, page, offset, limit, waived, expired, newlyUnstable, intent, clean }) {
+function renderCheck({ result, unaccounted, page, offset, limit, waived, expired, newlyUnstable, intent, clean, missedTheTarget }) {
   /** @type {string[]} */
   const out = [];
 
@@ -911,6 +967,8 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
   if (!result?.coverage) {
     out.push('This run did not report what it covered, so how thorough it was is unknown. Treat a clean result with suspicion until it does, and call staysfixed_coverage.');
   }
+
+  if (missedTheTarget) out.push(missedTheTarget);
 
   if (result?.mode === 'stored-record') {
     out.push(
@@ -951,6 +1009,41 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
   }
 
   return out.join('\n');
+}
+
+/**
+ * Did the run go where it was aimed?
+ *
+ * An engine that does not understand `surface` or `at` will not fail — it will
+ * ignore them and check whatever it was going to check anyway, and hand back a
+ * clean result. That result is true, and it is about the wrong thing, and it is
+ * the most dangerous shape a reply can have. So a run that was aimed must come
+ * back saying where it went, and when it does not, the reply says so before it
+ * says anything else.
+ *
+ * Exported only so a test can hold the exact refusal wording to account. It is
+ * the sentence that stands between an agent and a clean result about the wrong
+ * product, and a sentence that important should not be provable only by running
+ * a whole check.
+ *
+ * @param {string|null} surface
+ * @param {string|null} at
+ * @param {unknown} confirmation   `target` off the result: what the engine says it aimed at.
+ * @returns {string|null} the warning, or null when the run went where it was told
+ */
+export function aimingNote(surface, at, confirmation) {
+  const said = /** @type {{surface?: string, at?: string}} */ (confirmation && typeof confirmation === 'object' ? confirmation : {});
+  const wanted = surface && surface !== 'auto' ? surface : null;
+  const okSurface = !wanted || said.surface === wanted;
+  const okAt = !at || said.at === at;
+  if (okSurface && okAt) return null;
+
+  const asked = [wanted ? `the ${wanted} target` : null, at ? `"${at}"` : null].filter(Boolean).join(' at ');
+  return (
+    `THIS RUN DID NOT CONFIRM IT WENT WHERE YOU AIMED IT. You asked for ${asked}, and the result does not say it went there` +
+    `${said.surface || said.at ? ` — it says it checked ${said.surface ?? 'something else'}${said.at ? ` at "${said.at}"` : ''}` : ' — it says nothing about a target at all'}. ` +
+    'Treat everything below as saying NOTHING about what you aimed at. Call staysfixed_capabilities to see whether that kind of product can be checked on this machine at all.'
+  );
 }
 
 /**
@@ -1357,6 +1450,7 @@ async function toolCoverage(ctx, input) {
   if (input.format === 'json') {
     const payload = {
       lastCheckAt: last?.at ?? null,
+      covers: caps?.covers ?? null,
       walked: coverage?.journeys ?? null,
       unopened: (coverage?.gaps ?? []).map((g) => g.what),
       surfacesOutOfReach: unreachable.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary, needs: s.needs })),
@@ -1370,6 +1464,12 @@ async function toolCoverage(ctx, input) {
   const out = [];
   out.push('WHAT WAS NOT CHECKED');
   out.push('');
+  // The machine's honest statement goes first, because it is the half that
+  // survives even when no check has ever run here.
+  if (caps?.covers?.short) {
+    out.push(caps.covers.short);
+    out.push('');
+  }
 
   if (!last) {
     out.push('No check has run in this copy yet, so nothing at all has been covered.');
