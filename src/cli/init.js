@@ -298,8 +298,10 @@ function snippetFor(root, pkg) {
     command = 'npx';
     args = ['staysfixed', 'mcp'];
   } else if (bin.includes(`${path.sep}_npx${path.sep}`)) {
+    // Run through npx and it was almost certainly fetched from npm, so tell people the
+    // short form rather than the path of a temporary folder that will not exist tomorrow.
     command = 'npx';
-    args = ['github:asadev/staysfixed', 'mcp'];
+    args = ['staysfixed', 'mcp'];
   }
   return mcpConfigSnippet({ command, args, cwd: root });
 }

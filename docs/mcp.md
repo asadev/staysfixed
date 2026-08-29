@@ -22,7 +22,7 @@ success — and the safety net you installed has become a rubber stamp.
 The server runs over stdin and stdout:
 
 ```
-npx -y github:asadev/staysfixed mcp
+npx -y staysfixed mcp
 ```
 
 It reads your `staysfixed.config.js` from the working directory it is started
@@ -32,7 +32,7 @@ the server somewhere else, set `cwd` in the config block.
 ### Claude Code
 
 ```
-claude mcp add staysfixed -- npx -y github:asadev/staysfixed mcp
+claude mcp add staysfixed -- npx -y staysfixed mcp
 ```
 
 Add `-s project` to write it into the repository's `.mcp.json` so everybody on
@@ -47,7 +47,7 @@ the team gets it, instead of only you.
   "mcpServers": {
     "staysfixed": {
       "command": "npx",
-      "args": ["-y", "github:asadev/staysfixed", "mcp"],
+      "args": ["-y", "staysfixed", "mcp"],
       "cwd": "/absolute/path/to/your/project"
     }
   }
@@ -64,7 +64,7 @@ project):
   "mcpServers": {
     "staysfixed": {
       "command": "npx",
-      "args": ["-y", "github:asadev/staysfixed", "mcp"],
+      "args": ["-y", "staysfixed", "mcp"],
       "cwd": "/absolute/path/to/your/project"
     }
   }
@@ -78,7 +78,7 @@ Codex keeps the same fields in TOML, in `~/.codex/config.toml`:
 ```toml
 [mcp_servers.staysfixed]
 command = "npx"
-args = ["-y", "github:asadev/staysfixed", "mcp"]
+args = ["-y", "staysfixed", "mcp"]
 cwd = "/absolute/path/to/your/project"
 ```
 

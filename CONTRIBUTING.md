@@ -14,7 +14,7 @@ npm test              # the suite
 npm run check         # both, in that order
 ```
 
-There is no build step and there never will be one. `npx github:asadev/staysfixed`
+There is no build step and there never will be one. `npx staysfixed`
 has to work straight from a checkout, so the source you edit is the source that
 runs. Types are written as JSDoc comments and checked by `tsc` with `checkJs`
 and `strict` on; if `npm run typecheck` is clean, the types are done.

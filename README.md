@@ -28,12 +28,13 @@ can check. Only a human can approve.**
 
 ## Install and first run
 
-**It is not on npm yet.** Run it from GitHub — that is the way to use it today:
+```
+npx staysfixed init
+npx staysfixed check
+```
 
-```
-npx github:asadev/staysfixed init
-npx github:asadev/staysfixed check
-```
+No install, no account, no sign-up. It works in any project, in any language —
+it only needs to be able to open your app.
 
 `init` asks what your app is, writes a `staysfixed.config.js` you can read, makes
 the `.staysfixed/` folder and adds the two lines to your `.gitignore` that keep
@@ -44,15 +45,15 @@ nobody has approved any of them yet. Look at them, and approve the ones that are
 right:
 
 ```
-npx github:asadev/staysfixed approve --all
+npx staysfixed approve --all
 ```
 
 From then on, `check` is silent unless something actually moved.
 
 Requirements: **Node 22 or newer**, and a Chromium-based browser on the machine
 (Chrome, Chromium, Edge or Brave — or, for a desktop app, the Chromium already
-inside your Electron build). `npx github:asadev/staysfixed doctor` tells you what
-it found and what it is missing.
+inside your Electron build). `npx staysfixed doctor` tells you what it
+found and what it is missing.
 
 Two runtime dependencies, `pngjs` and `pixelmatch`. No build step: the JavaScript
 in the repository is the JavaScript that runs.
@@ -270,7 +271,7 @@ wired in, it can check before it tells you it is done.
 Claude Code:
 
 ```
-claude mcp add staysfixed -- npx -y github:asadev/staysfixed mcp
+claude mcp add staysfixed -- npx -y staysfixed mcp
 ```
 
 Cursor, Gemini CLI, and most other clients take the same block —
@@ -281,7 +282,7 @@ Cursor, Gemini CLI, and most other clients take the same block —
   "mcpServers": {
     "staysfixed": {
       "command": "npx",
-      "args": ["-y", "github:asadev/staysfixed", "mcp"],
+      "args": ["-y", "staysfixed", "mcp"],
       "cwd": "/absolute/path/to/your/project"
     }
   }
@@ -293,7 +294,7 @@ Codex keeps the same fields in TOML, in `~/.codex/config.toml`:
 ```toml
 [mcp_servers.staysfixed]
 command = "npx"
-args = ["-y", "github:asadev/staysfixed", "mcp"]
+args = ["-y", "staysfixed", "mcp"]
 cwd = "/absolute/path/to/your/project"
 ```
 
@@ -501,7 +502,6 @@ That rule applies to the tool's own checks too.
 
 Honestly, so you know before you invest an afternoon:
 
-- **Not on npm yet.** Run it from GitHub: `npx github:asadev/staysfixed`.
 - **No hosted service, no dashboard, no accounts, no teams, nothing paid.** It is
   a command and a folder of files in your repository. There is no server
   anywhere, and nothing is uploaded.

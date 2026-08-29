@@ -48,7 +48,7 @@ not been used by many people yet.
 
 ### Known limits
 
-- Not published to npm yet. Run it from GitHub: `npx github:asadev/staysfixed`.
+- Not published to npm yet. Run it from GitHub: `npx staysfixed`.
 - Approved pictures are tied to the operating system that took them. A picture
   approved on macOS will not match on Linux.
 - Untested on Windows.
