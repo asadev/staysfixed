@@ -1,24 +1,38 @@
 /**
- * The page inside the watch window.
+ * The page inside the watch window — the calm companion.
  *
  * This builds one self-contained HTML document as a string. It is written to a
- * temp file and opened over `file://`, so it can fetch nothing: no fonts, no
- * CDN, no framework, no build step. Everything it will ever need is in the
- * string this file returns — including the one icon, which is drawn here in
- * SVG rather than downloaded from anywhere.
+ * temp file and opened over a local file address, so it can fetch nothing: no
+ * fonts, no CDN, no framework, no build step. Everything it will ever need is
+ * in the string this file returns, including every icon, which are drawn here
+ * in SVG rather than downloaded from anywhere.
  *
  * It is fed one `RunEvent` at a time by `window.__staysfixed_push`, which the
  * run calls over the debugging connection as things happen. The page keeps no
  * state of its own beyond what those events tell it, so a panel that opens late
  * and is handed the whole history catches up by replaying it.
  *
- * The look is deliberate, and it is not the report's. The report is a document
- * you read once and send to someone; this sits pinned against the app all day
- * while a person works, so it is dark, it is quiet, and it is built to be
- * recognised at a glance as a piece of equipment rather than mistaken for
- * another page of the app it is watching. Colour is the only thing that carries
- * meaning here: green held, amber moved, red broke, blue is waiting for a
- * person. Nothing else is coloured, and nothing else animates.
+ * The design brief, in one line: this thing is pinned against a person's work
+ * all day, so it must be pleasant to have open and never once demand attention
+ * it has not earned. That gives three rules the whole layout follows.
+ *
+ *   1. The picture is the hero. It is the only large thing on the page, and
+ *      everything else is sized to defer to it. A watch panel that shows you a
+ *      photograph of your own app the instant the shutter fires is alive; a
+ *      watch panel that shows you a list of names is a log file with a border.
+ *
+ *   2. Nothing is said twice, and detail is earned. At rest every check is one
+ *      quiet line — a dot, a name, a time. The description, the outcome, the
+ *      claim that failed and the story of why a guard exists all live one click
+ *      away, and open by themselves only for the checks that need a person. A
+ *      run where everything held is therefore almost silent, which is exactly
+ *      how often it deserves to be read.
+ *
+ *   3. Colour is state and nothing else. One accent (blue: something is
+ *      happening, or someone is needed), one green (held), one amber (moved),
+ *      one red (broke). The timing breakdown, which is information rather than
+ *      state, is drawn in shades of the text colour — so a screenful of colour
+ *      always means a screenful of things to look at.
  */
 
 import { escapeHtml } from '../report/html.js';
@@ -42,8 +56,8 @@ import { escapeHtml } from '../report/html.js';
  */
 
 /**
- * JSON safe to sit inside a `<script>` tag. `</script>` inside a string would
- * end the tag early and leave half the plan on the page as text, so the one
+ * JSON safe to sit inside a script tag. A closing tag inside a string would end
+ * the tag early and leave half the plan on the page as text, so the one
  * character that can do that never survives.
  * @param {unknown} value
  * @returns {string}
@@ -56,7 +70,10 @@ function embedJson(value) {
 /**
  * Keep only what the page uses. A screen config carries steps, masks and
  * tolerances; none of that belongs in a window that is only drawing a list.
- * @param {PanelRow[]|undefined} list
+ * A caller who has counted rather than listed hands us a number, which is not
+ * a list and is not an error either — it becomes an empty list here, and the
+ * counts arrive separately on `run:start`.
+ * @param {PanelRow[]|number|undefined} list
  * @returns {{name: string, describe: string}[]}
  */
 function tidyRows(list) {
@@ -78,15 +95,32 @@ function tidyRows(list) {
  * the thing that was already fixed is still shut. Monoline, drawn on the 24
  * grid, inheriting its colour so it can never fight the theme.
  *
- * It carries no `xmlns`: inline SVG in an HTML document does not need one, and
- * the panel is not allowed to name an address of any kind.
+ * It carries no namespace attribute: inline SVG in an HTML document does not
+ * need one, and the panel is not allowed to name an address of any kind.
  */
 const MARK = [
-  '<svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor"',
-  ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
-  '<rect x="4.2" y="10" width="15.6" height="10.4" rx="3.4"></rect>',
+  '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor"',
+  ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+  '<rect x="4.2" y="10" width="15.6" height="10.4" rx="3.6"></rect>',
   '<path d="M8.1 10V7.9a3.9 3.9 0 0 1 7.8 0V10"></path>',
   '<path d="M9.7 15.2l1.8 1.9 2.9-3.5"></path>',
+  '</svg>',
+].join('');
+
+/** A chevron, used for every "there is more underneath this" control. */
+const CHEVRON = [
+  '<svg class="glyph chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"',
+  ' stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+  '<path d="M8.5 10.5l3.5 3.5 3.5-3.5"></path>',
+  '</svg>',
+].join('');
+
+/** Two stacked sheets: copy. */
+const COPY = [
+  '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor"',
+  ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+  '<rect x="9" y="9" width="11" height="11" rx="3"></rect>',
+  '<path d="M15 6.2A2.2 2.2 0 0 0 12.8 4H7a3 3 0 0 0-3 3v5.8A2.2 2.2 0 0 0 6.2 15"></path>',
   '</svg>',
 ].join('');
 
@@ -98,8 +132,8 @@ const MARK = [
 export function panelHtml(plan = {}) {
   const project = String(plan.project ?? '').trim() || 'this project';
   const app = String(plan.app ?? '').trim();
-  const screens = tidyRows(plan.screens);
-  const guards = tidyRows(plan.guards);
+  const screens = tidyRows(/** @type {any} */ (plan.screens));
+  const guards = tidyRows(/** @type {any} */ (plan.guards));
 
   // Dark unless somebody asks otherwise — see the note above the light palette.
   const wanted = String(plan.theme ?? 'dark');
@@ -113,60 +147,90 @@ export function panelHtml(plan = {}) {
     '<head>',
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    `<title>${escapeHtml(project)} — Stays Fixed</title>`,
+    // Just the name of the thing, because this string IS the window's title bar.
+    // "tdproof — Stays Fixed" reads as a browser tab; "Stays Fixed" reads as an
+    // application. What is being watched is said inside the panel, under the mark.
+    '<title>Stays Fixed</title>',
     `<style>${STYLE}</style>`,
     '</head>',
     '<body>',
-    '<div class="glowfield" aria-hidden="true"></div>',
+    '<div class="aura" aria-hidden="true"></div>',
     '<div class="panel">',
 
-    // --- masthead: the part that answers "whose window is this?" -----------
-    '<header class="head">',
-    '<div class="masthead">',
-    `<span class="marker">${MARK}</span>`,
+    // --- the header: whose window this is, and where the run has got to -----
+    '<header class="top">',
+    '<div class="brand">',
+    `<span class="badge">${MARK}</span>`,
     '<span class="wordmark">Stays Fixed</span>',
-    '<span class="clock mono" id="clock">0.0s</span>',
+    '<span class="elapsed mono" id="clock">0.0s</span>',
     '</div>',
-    '<div class="watching">',
-    `<span class="watchlabel">watching</span><span class="project mono" id="project">${escapeHtml(project)}</span>`,
-    '</div>',
-    `<p class="what" id="app"${app ? '' : ' hidden'}>${escapeHtml(app)}</p>`,
+    `<p class="target" id="target"><span class="mono" id="project">${escapeHtml(project)}</span>`,
+    `<span class="sep"${app ? '' : ' hidden'} id="targetsep">&#183;</span>`,
+    `<span class="app" id="app"${app ? '' : ' hidden'}>${escapeHtml(app)}</span></p>`,
     '<p class="state" id="state">getting ready</p>',
     '<p class="note" id="note" hidden></p>',
-    '<div class="progress" id="progress"></div>',
-    '<p class="counts mono" id="counts"></p>',
+    '<div class="meter">',
+    '<div class="track" id="track"><div class="fill" id="fill"></div></div>',
+    '<span class="counts mono" id="counts"></span>',
+    '</div>',
     '</header>',
 
-    // --- the live picture --------------------------------------------------
+    // --- the two columns. One on a narrow panel, two on a wide one. ---------
+    '<div class="body">',
+
+    // --- the hero: the picture that was just taken -------------------------
     '<section class="stage" id="stage">',
-    '<div class="frame" id="frame">',
+    '<div class="shot" id="shot">',
     '<img class="layer" id="layerA" alt="">',
     '<img class="layer" id="layerB" alt="">',
-    '<p class="empty" id="empty">The first picture appears here the moment it is taken.</p>',
-    '<span class="bezel" aria-hidden="true"></span>',
+    '<p class="blank" id="blank">The first picture appears the moment it is taken.</p>',
     '</div>',
-    '<div class="tabs" id="tabs" hidden></div>',
-    '<p class="shotname mono" id="shotname"></p>',
-    '<p class="shotdesc" id="shotdesc"></p>',
-    '<p class="shotout" id="shotout" hidden></p>',
+    '<div class="caption" id="caption">',
+    '<span class="shotname mono" id="shotname"></span>',
+    '<span class="shotout" id="shotout" hidden></span>',
+    '</div>',
+    '<div class="switch" id="tabs" hidden></div>',
     '</section>',
 
-    // --- every check, in order ---------------------------------------------
-    '<div class="rail" id="rail">',
-    '<div class="list" id="list">',
-    '<p class="listempty" id="listempty" hidden>Nothing is set up to be checked yet. Run <span class="mono">staysfixed init</span> to pick the screens worth watching.</p>',
+    // --- every check, one quiet line each ----------------------------------
+    '<div class="scroll" id="scroll">',
+    '<section class="group" id="groupScreens" hidden>',
+    '<p class="grouplabel">Screens<span class="mono" id="countScreens"></span></p>',
+    '<div class="items" id="listScreens"></div>',
+    '</section>',
+    '<section class="group" id="groupGuards" hidden>',
+    '<p class="grouplabel">Guards<span class="mono" id="countGuards"></span></p>',
+    '<div class="items" id="listGuards"></div>',
+    '</section>',
+    '<p class="nothing" id="nothing" hidden>Nothing is set up to be checked yet.<br>Run <span class="mono">staysfixed init</span> to pick the screens worth watching.</p>',
     '</div>',
+
+    '</div>',
+
+    '<button class="follow" id="follow" type="button" hidden>Follow the run</button>',
+
+    // --- where the time went. One folded line, so it is always in sight and
+    //     never in the way. ------------------------------------------------
     '<section class="timing" id="timing" hidden>',
-    '<h2>Where the time went</h2>',
+    '<button class="tophead" id="thead" type="button" aria-expanded="false">',
+    '<span class="tlabel">Where the time went</span>',
+    '<span class="ttotal" id="ttotal"></span>',
+    `${CHEVRON}`,
+    '</button>',
     '<div class="tbar" id="tbar"></div>',
-    '<ul class="tkey" id="tkey"></ul>',
+    '<ul class="tkey" id="tkey" hidden></ul>',
     '</section>',
-    '</div>',
-    '<button class="follow" id="follow" type="button" hidden>Follow the running check</button>',
 
+    // --- the one thing left to do ------------------------------------------
     '<footer class="foot" id="footer" hidden>',
-    '<p class="footverdict" id="footlead"></p>',
-    '<p class="cmd" id="cmdrow" hidden><code class="mono" id="cmd"></code><button class="copy" id="copy" type="button">copy</button></p>',
+    '<p class="nextlabel" id="nextlabel">Your turn</p>',
+    '<div class="cmd">',
+    // The prompt mark is not decoration: it is what tells a person at a glance that
+    // this line is something to type, not something to read. It is never copied.
+    '<span class="prompt mono" aria-hidden="true">$</span>',
+    '<code class="mono" id="cmd"></code>',
+    `<button class="copy" id="copy" type="button" title="copy" aria-label="copy the command">${COPY}</button>`,
+    '</div>',
     '</footer>',
 
     '</div>',
@@ -181,43 +245,46 @@ export function panelHtml(plan = {}) {
 
 const STYLE = `
 /* --------------------------------------------------------------------------
-   Tokens. Dark is the design — he works dark and this window lives beside his
-   editor. Light is handled properly underneath, on a warm off-white ground,
-   never plain white paper.
+   Tokens.
+
+   Four colours carry meaning and nothing else does: accent blue for "this is
+   happening" and "you are needed", green for held, amber for moved, red for
+   broke. Everything structural is the ground, the ink, or a hairline. That is
+   what lets a single amber dot be seen from across a desk.
+
+   Dark is the design — this window lives beside an editor all day. Light is a
+   warm paper, never the white page with grey cards the brief rules out.
    -------------------------------------------------------------------------- */
 :root {
   color-scheme: dark;
 
-  --ground: #0a0d14;
-  --ground-lift: #10141f;
-  --card: rgba(255, 255, 255, 0.035);
-  --card-solid: #141926;
-  --well: #080b11;
-  --glass: rgba(14, 18, 28, 0.72);
+  --ground: #0a0c12;
+  --lift: #12161f;
+  --card: rgba(255, 255, 255, 0.032);
+  --card-hover: rgba(255, 255, 255, 0.055);
+  --well: #070910;
+  --glass: rgba(10, 12, 18, 0.74);
 
-  --ink: #e9ecf3;
-  --soft: #8d95a8;
-  --faint: #626b7d;
+  --ink: #e7eaf2;
+  --soft: #939bad;
+  --faint: #616a7d;
 
-  --line: rgba(255, 255, 255, 0.075);
-  --line-strong: rgba(255, 255, 255, 0.14);
-  --sheen: rgba(255, 255, 255, 0.09);
-  --shadow: rgba(0, 0, 0, 0.62);
+  --line: rgba(255, 255, 255, 0.07);
+  --line-firm: rgba(255, 255, 255, 0.13);
+  --sheen: rgba(255, 255, 255, 0.06);
+  --shadow: rgba(0, 0, 0, 0.66);
 
-  --good: #4fc98a;
-  --warn: #e6b055;
-  --bad: #f2685f;
-  --wait: #6ea8ff;
-  --idle: #39415280;
-
-  --accent: #6ea8ff;
-  --shade1: #8b8cf0;
-  --shade2: #5f6b82;
-  --shade3: #4bb3ae;
-  --shade4: #38404f;
+  --accent: #6f9dff;
+  --held: #55bd8c;
+  --moved: #e2a84f;
+  --broke: #ef6a61;
+  --resting: rgba(255, 255, 255, 0.09);
 
   --radius: 20px;
-  --radius-sm: 12px;
+  --radius-sm: 13px;
+  --radius-xs: 9px;
+
+  --pad: 16px;
   --tint: var(--accent);
 }
 /*
@@ -233,33 +300,27 @@ const STYLE = `
 :root[data-theme='system'] {
   color-scheme: light;
 
-    --ground: #ece8df;
-    --ground-lift: #fbf9f4;
-    --card: rgba(255, 255, 255, 0.88);
-    --card-solid: #fffdf8;
-    --well: #eae6dc;
-    --glass: rgba(247, 244, 237, 0.78);
+  --ground: #e3ded3;
+  --lift: #fdfbf7;
+  --card: rgba(255, 255, 255, 0.82);
+  --card-hover: rgba(255, 255, 255, 1);
+  --well: #dad4c8;
+  --glass: rgba(231, 226, 217, 0.82);
 
-    --ink: #1b1a17;
-    --soft: #6d675d;
-    --faint: #8d8679;
+  --ink: #1c1a16;
+  --soft: #6b665c;
+  --faint: #8b8578;
 
-    --line: rgba(28, 24, 18, 0.1);
-    --line-strong: rgba(28, 24, 18, 0.18);
-    --sheen: rgba(255, 255, 255, 0.9);
-    --shadow: rgba(40, 34, 24, 0.26);
+  --line: rgba(28, 24, 18, 0.1);
+  --line-firm: rgba(28, 24, 18, 0.19);
+  --sheen: rgba(255, 255, 255, 0.85);
+  --shadow: rgba(58, 47, 30, 0.34);
 
-    --good: #217a4c;
-    --warn: #8a5f00;
-    --bad: #b52d21;
-    --wait: #2f55c8;
-    --idle: #cdc6b880;
-
-    --accent: #2f55c8;
-    --shade1: #6a5fd0;
-    --shade2: #9a9182;
-    --shade3: #2c8c88;
-    --shade4: #cfc7b6;
+  --accent: #2f57c9;
+  --held: #1f7a4d;
+  --moved: #94620a;
+  --broke: #b52f23;
+  --resting: rgba(28, 24, 18, 0.1);
 }
 
 * { box-sizing: border-box; }
@@ -268,359 +329,478 @@ html, body { margin: 0; padding: 0; height: 100%; }
 body {
   background: var(--ground);
   color: var(--ink);
-  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
-.mono, code, .clock, .counts, .rname, .rtime, .project, .shotname, .tkey b {
+/* The terminal character of the thing: every name, number and command is set
+   in the monospace, and nothing else is. */
+.mono, code {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   font-variant-numeric: tabular-nums;
 }
-p { margin: 0; }
-h1, h2 { margin: 0; }
+p, h2 { margin: 0; }
 img { display: block; }
+button { font: inherit; color: inherit; }
+.glyph { width: 16px; height: 16px; flex: 0 0 auto; }
 
-/* The ground is never flat. A cool light from above and a dark floor, so the
-   black reads as a lit surface rather than a hole in the screen. Nothing here
-   has an edge you could see on purpose — a texture you can name is decoration,
-   and decoration next to a person's work is noise. */
-.glowfield {
+/* A single soft light from above, tinted by how the run is going. It is the
+   only decoration on the page, it has no edge you could point at, and it is
+   the thing that stops the dark reading as a hole in the screen. */
+.aura {
   position: fixed; inset: 0; pointer-events: none; z-index: 0;
   background:
-    radial-gradient(135% 62% at 50% -14%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 64%),
-    radial-gradient(120% 70% at 50% 118%, var(--shadow), transparent 62%),
-    radial-gradient(80% 40% at 12% 42%, rgba(255, 255, 255, 0.022), transparent 70%);
+    radial-gradient(120% 46% at 50% -8%, color-mix(in srgb, var(--tint) 15%, transparent), transparent 70%),
+    radial-gradient(100% 60% at 50% 112%, var(--shadow), transparent 66%);
+  transition: background 500ms ease;
 }
 
 .panel {
   position: relative; z-index: 1;
   display: flex; flex-direction: column;
   height: 100%;
-  padding: 0 13px;
-  gap: 11px;
 }
 
-/* --- masthead ------------------------------------------------------------ */
-.head {
+/* --- header -------------------------------------------------------------- */
+.top {
   flex: 0 0 auto;
-  position: relative; z-index: 3;
-  margin: 0 -13px;
-  padding: 13px 13px 11px;
+  padding: 15px var(--pad) 14px;
   background: var(--glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
   border-bottom: 1px solid var(--line);
-  box-shadow: inset 0 1px 0 var(--sheen), 0 12px 26px -22px var(--shadow);
 }
-.masthead { display: flex; align-items: center; gap: 8px; }
-.marker {
+.brand { display: flex; align-items: center; gap: 9px; }
+.badge {
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: center;
-  width: 26px; height: 26px;
-  border-radius: 9px;
+  width: 24px; height: 24px;
+  border-radius: 8px;
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
-  box-shadow: inset 0 1px 0 var(--sheen);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
 }
-.mark { width: 16px; height: 16px; }
+.badge .glyph { width: 15px; height: 15px; }
 .wordmark {
   flex: 1 1 auto; min-width: 0;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 12px; font-weight: 600;
-  letter-spacing: 0.24em; text-transform: uppercase;
-  color: var(--ink);
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.2em; text-transform: uppercase;
+  color: var(--soft);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.clock { flex: 0 0 auto; font-size: 12px; color: var(--soft); }
+.elapsed { flex: 0 0 auto; font-size: 11.5px; color: var(--faint); }
 
-.watching { display: flex; align-items: baseline; gap: 7px; margin-top: 10px; min-width: 0; }
-.watchlabel {
-  flex: 0 0 auto;
-  font-size: 11px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--faint);
+.target {
+  display: flex; align-items: baseline; gap: 6px;
+  margin-top: 12px;
+  font-size: 12px;
+  white-space: nowrap; overflow: hidden;
 }
-.project { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
-.what { color: var(--soft); font-size: 11.5px; margin-top: 2px; overflow-wrap: anywhere; }
+.target .mono { color: var(--ink); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.target .sep { color: var(--faint); flex: 0 0 auto; }
+.target .app { color: var(--faint); flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
 
+/* The sentence. The largest text on the page after the picture, because it is
+   the one thing a person reads from four feet away. */
 .state {
-  margin-top: 11px;
-  font-size: 15.5px; font-weight: 600; line-height: 1.35;
-  letter-spacing: -0.005em;
+  margin-top: 9px;
+  font-size: 17px; font-weight: 620; line-height: 1.32;
+  letter-spacing: -0.011em;
   overflow-wrap: anywhere;
+  transition: color 300ms ease;
 }
-.state.good { color: var(--good); }
-.state.bad { color: var(--bad); }
-.state.warn { color: var(--warn); }
-.state.wait { color: var(--wait); }
-.note { margin-top: 4px; font-size: 11.5px; color: var(--soft); overflow-wrap: anywhere; }
+.state.held { color: var(--ink); }
+.state.moved { color: var(--moved); }
+.state.broke { color: var(--broke); }
+.state.wait { color: var(--accent); }
+.note { margin-top: 5px; font-size: 11.5px; color: var(--faint); overflow-wrap: anywhere; }
 
-.progress { display: flex; gap: 2px; margin-top: 11px; height: 6px; }
-.seg {
-  flex: 1 1 0; min-width: 0; border-radius: 3px;
-  background: var(--idle);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
-  transition: background 180ms ease, box-shadow 180ms ease;
+/* One hairline, not a row of blocks. Each finished check adds its own slice of
+   colour to a single continuous line, so progress and outcome are the same
+   object and there is one fewer thing on the page. */
+.meter { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.track {
+  flex: 1 1 auto; min-width: 0;
+  height: 4px; border-radius: 999px;
+  background: var(--resting);
+  overflow: hidden;
 }
-.seg.good { background: var(--good); }
-.seg.warn { background: var(--warn); }
-.seg.bad { background: var(--bad); }
-.seg.wait { background: var(--wait); }
-.seg.muted { background: var(--shade4); }
-.seg.running {
+.fill { display: flex; height: 100%; width: 100%; }
+.slice {
+  min-width: 0; height: 100%;
+  background: var(--resting);
+  transition: background 260ms ease, flex-basis 260ms ease;
+}
+.slice.held { background: var(--held); }
+.slice.moved { background: var(--moved); }
+.slice.broke { background: var(--broke); }
+.slice.wait { background: var(--accent); }
+.slice.skip { background: color-mix(in srgb, var(--ink) 16%, transparent); }
+.slice.running {
   background: var(--accent);
-  box-shadow: 0 0 10px -1px color-mix(in srgb, var(--accent) 65%, transparent);
+  animation: breathe 1.9s ease-in-out infinite;
 }
-.counts { margin-top: 7px; font-size: 11px; color: var(--faint); letter-spacing: 0.02em; }
+@keyframes breathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+.counts { flex: 0 0 auto; font-size: 10.5px; color: var(--faint); letter-spacing: 0.02em; }
 
-/* --- the live picture ---------------------------------------------------- */
-.stage { flex: 0 0 auto; position: relative; }
-/* A soft light behind the glass, tinted by how the last screen came out. */
-.stage::before {
-  content: ''; position: absolute; z-index: 0;
-  left: 14%; right: 14%; top: 12px; bottom: 34%;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--tint) 34%, transparent);
-  filter: blur(30px);
-  opacity: 0.62;
-  transition: background 220ms ease;
-  pointer-events: none;
+/* --- the body: one column, or two when there is room --------------------- */
+.body {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+  gap: 4px;
+  padding: 0 var(--pad);
+  overflow: hidden;
 }
-.frame {
-  position: relative; z-index: 1;
-  height: clamp(148px, 25vh, 236px);
+
+/* --- the hero ------------------------------------------------------------ */
+.stage { flex: 0 0 auto; padding-top: 16px; }
+.shot {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  max-height: 40vh;
+  margin: 0 auto;
   border-radius: var(--radius);
   background: var(--well);
-  border: 1px solid var(--line);
   overflow: hidden;
   display: flex; align-items: center; justify-content: center;
-  box-shadow:
-    inset 0 1px 0 var(--sheen),
-    inset 0 0 44px -18px #000,
-    0 22px 44px -26px var(--shadow);
   cursor: zoom-in;
+  /* No border. The picture is the hero, so nothing is drawn around it that
+     could compete with it — only a soft floor shadow and the faintest rim to
+     keep a white screenshot from bleeding into a light ground. */
+  box-shadow:
+    0 1px 0 0 var(--sheen) inset,
+    0 0 0 1px var(--line),
+    0 26px 50px -30px var(--shadow);
+  transition: box-shadow 300ms ease;
 }
-.frame.blank { cursor: default; }
-/* The hairline that makes it read as a screen rather than a hole in the page. */
-.bezel {
-  position: absolute; inset: 5px; border-radius: 15px;
-  border: 1px solid var(--line);
-  pointer-events: none;
-}
+.shot.empty { cursor: default; }
 .layer {
-  position: absolute; inset: 6px;
-  width: calc(100% - 12px); height: calc(100% - 12px);
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
   object-fit: contain;
   opacity: 0;
-  transition: opacity 200ms ease;
-  border-radius: 14px;
+  transition: opacity 260ms ease;
 }
 .layer.on { opacity: 1; }
-.empty { position: relative; color: var(--faint); font-size: 11.5px; text-align: center; padding: 0 28px; }
+.blank {
+  position: relative;
+  color: var(--faint); font-size: 11.5px; line-height: 1.6;
+  text-align: center; padding: 0 30px; max-width: 260px;
+}
 
-.tabs { display: flex; gap: 4px; margin-top: 9px; }
-.tab {
-  flex: 1 1 0; min-width: 0;
-  font: inherit; font-size: 11px; letter-spacing: 0.04em;
-  color: var(--soft);
+.caption {
+  display: flex; align-items: baseline; gap: 10px;
+  margin-top: 11px; min-height: 18px;
+}
+.shotname { flex: 0 1 auto; font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shotout { flex: 1 1 auto; min-width: 0; font-size: 11.5px; color: var(--soft); text-align: right; overflow-wrap: anywhere; }
+.shotout.moved { color: var(--moved); }
+.shotout.broke { color: var(--broke); }
+.shotout.wait { color: var(--accent); }
+
+/* Approved / now / difference. One pill, three quiet words — the only control
+   on the page that is ever shown without being asked for, because a screen
+   that moved is the one moment there is a real decision to make. */
+.switch {
+  display: flex; gap: 2px;
+  margin-top: 10px; padding: 2px;
+  border-radius: 999px;
   background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 5px 4px;
-  cursor: pointer;
-  transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+  box-shadow: inset 0 0 0 1px var(--line);
 }
-.tab:hover { color: var(--ink); border-color: var(--line-strong); }
-.tab.on {
+.switch button {
+  flex: 1 1 0; min-width: 0;
+  font-size: 11px; letter-spacing: 0.01em;
+  color: var(--soft);
+  background: transparent; border: 0;
+  border-radius: 999px;
+  padding: 5px 6px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color 160ms ease, background 160ms ease;
+}
+.switch button:hover { color: var(--ink); }
+.switch button.on {
   color: var(--ink);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--card-hover);
+  box-shadow: 0 1px 2px -1px var(--shadow), inset 0 0 0 1px var(--line);
 }
-.shotname { margin-top: 9px; font-size: 12px; overflow-wrap: anywhere; }
-.shotdesc { color: var(--soft); font-size: 11.5px; overflow-wrap: anywhere; }
-.shotout { font-size: 11.5px; margin-top: 3px; overflow-wrap: anywhere; color: var(--soft); }
-.shotout.bad { color: var(--bad); }
-.shotout.warn { color: var(--warn); }
-.shotout.wait { color: var(--wait); }
 
 /* --- the list ------------------------------------------------------------ */
-.rail {
-  flex: 1 1 auto;
-  min-height: 88px;
+.scroll {
+  flex: 1 1 auto; min-height: 70px;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  /* Rows fade out at both edges, so the list reads as sliding under the glass
-     above and below it rather than being clipped by a box. */
-  mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
-  padding: 6px 0 8px;
+  scrollbar-color: color-mix(in srgb, var(--soft) 22%, transparent) transparent;
+  padding: 16px 5px 14px 0;
+  /* The list slides away under the header rather than being cut off by a box. */
+  mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 12px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 12px), transparent 100%);
 }
-.rail::-webkit-scrollbar { width: 9px; }
-.rail::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--soft) 26%, transparent); border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
-.rail::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--soft) 46%, transparent); background-clip: padding-box; }
-.rail::-webkit-scrollbar-track { background: transparent; }
+.scroll::-webkit-scrollbar { width: 10px; }
+.scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--soft) 22%, transparent);
+  border-radius: 8px; border: 3px solid transparent; background-clip: padding-box;
+}
+.scroll::-webkit-scrollbar-track { background: transparent; }
 
-.list {
-  background: var(--card);
-  border: 1px solid var(--line);
+.group + .group { margin-top: 18px; }
+.grouplabel {
+  display: flex; align-items: baseline; gap: 9px;
+  padding: 0 6px 8px 4px;
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--faint);
+}
+.grouplabel .mono { font-size: 10px; letter-spacing: 0.04em; color: color-mix(in srgb, var(--faint) 70%, transparent); }
+
+.items {
   border-radius: var(--radius);
-  box-shadow: inset 0 1px 0 var(--sheen), 0 16px 34px -28px var(--shadow);
-  padding: 4px 0;
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--line), 0 18px 34px -30px var(--shadow);
   overflow: hidden;
 }
-.listempty { padding: 18px 15px; color: var(--faint); font-size: 11.5px; line-height: 1.6; }
-.listempty .mono { color: var(--soft); font-size: 11px; }
+.item + .item { box-shadow: inset 0 1px 0 var(--line); }
+.item.attention { background: color-mix(in srgb, var(--tone, var(--accent)) 5%, transparent); }
 
+/* Big, quiet, touch-sized rows. At rest a check is a dot, a name and a time —
+   that is the whole of it. */
 .row {
-  position: relative;
-  display: flex; gap: 10px;
-  padding: 8px 13px;
-  border-left: 2px solid transparent;
-  transition: background 160ms ease, transform 160ms ease;
+  display: flex; align-items: center; gap: 11px;
+  width: 100%; min-height: 44px;
+  padding: 10px 14px;
+  text-align: left;
+  background: transparent; border: 0;
+  cursor: pointer;
+  transition: background 160ms ease;
 }
-.row + .row { border-top: 1px solid var(--line); }
-.row.fresh { animation: settle 170ms ease both; }
-@keyframes settle { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.row.running {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border-left-color: var(--accent);
-  box-shadow: 0 8px 20px -16px var(--shadow), inset 0 1px 0 var(--sheen);
-  border-radius: 2px;
-}
-.dot {
-  flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
-  margin-top: 6px;
-  background: var(--shade4);
-  transition: background 160ms ease, box-shadow 160ms ease;
-}
-.row.good .dot { background: var(--good); }
-.row.warn .dot { background: var(--warn); }
-.row.bad .dot { background: var(--bad); }
-.row.wait .dot { background: var(--wait); }
-.row.muted .dot { background: var(--shade4); opacity: 0.6; }
-.row.running .dot { background: var(--accent); animation: pulse 1.5s ease-in-out infinite; }
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
-  55% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent); }
-}
+.row:hover { background: var(--card-hover); }
+.row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.item.plain .row { cursor: default; }
+.item.showing .row { box-shadow: inset 2px 0 0 var(--line-firm); }
+.item.showing .rname { color: var(--ink); }
+.item.plain .row:hover { background: transparent; }
+.item.fresh { animation: settle 200ms ease both; }
+@keyframes settle { from { opacity: 0; } to { opacity: 1; } }
 
-.rowmain { flex: 1 1 auto; min-width: 0; }
-.rowtop { display: flex; gap: 8px; align-items: baseline; }
-.rname { flex: 1 1 auto; font-size: 12px; overflow-wrap: anywhere; }
-.row.muted .rname { color: var(--soft); }
-.rtime { flex: 0 0 auto; font-size: 11px; color: var(--faint); }
-.rdesc { color: var(--soft); font-size: 11.5px; overflow-wrap: anywhere; }
-.rout { font-size: 11.5px; margin-top: 2px; overflow-wrap: anywhere; color: var(--soft); }
-.rout.good { color: var(--soft); }
-.rout.warn { color: var(--warn); }
-.rout.bad { color: var(--bad); }
-.rout.wait { color: var(--wait); }
-.rwhy {
-  margin-top: 7px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--well);
-  border: 1px solid var(--line);
-  font-size: 11.5px;
+.dot {
+  flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--resting);
+  transition: background 240ms ease, box-shadow 240ms ease;
+}
+.item.held .dot { background: color-mix(in srgb, var(--held) 78%, transparent); }
+.item.moved .dot { background: var(--moved); box-shadow: 0 0 0 4px color-mix(in srgb, var(--moved) 15%, transparent); }
+.item.broke .dot { background: var(--broke); box-shadow: 0 0 0 4px color-mix(in srgb, var(--broke) 15%, transparent); }
+.item.wait .dot { background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent); }
+.item.skip .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--resting); }
+.item.running .dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--accent);
+  animation: ping 1.7s ease-out infinite;
+}
+@keyframes ping {
+  0% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  70%, 100% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 7px color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+.item.running .rname { color: var(--ink); }
+
+.rname {
+  flex: 1 1 auto; min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.item.pending .rname, .item.skip .rname { color: var(--faint); }
+.rtime {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px; color: var(--faint);
+}
+.row .chev {
+  flex: 0 0 auto; width: 14px; height: 14px;
+  color: var(--faint); opacity: 0;
+  transition: transform 200ms ease, opacity 160ms ease;
+}
+.row:hover .chev, .item.open .chev { opacity: 1; }
+.item.open .chev { transform: rotate(180deg); }
+.item.plain .chev { display: none; }
+
+/* Everything a person did not ask for lives here. */
+.detail {
+  padding: 0 14px 13px 33px;
+  font-size: 11.5px; line-height: 1.6;
   overflow-wrap: anywhere;
 }
-.rclaim { color: var(--bad); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
-.rbecause { color: var(--soft); margin-top: 4px; }
-
-.follow {
-  flex: 0 0 auto; align-self: center;
-  font: inherit; font-size: 11px; letter-spacing: 0.02em;
-  color: var(--ink);
-  background: var(--ground-lift);
-  border: 1px solid var(--line-strong); border-radius: 999px;
-  padding: 6px 14px; cursor: pointer;
-  box-shadow: 0 10px 22px -16px var(--shadow), inset 0 1px 0 var(--sheen);
-  transition: border-color 140ms ease, color 140ms ease;
+.detail .why { color: var(--soft); }
+.detail .out { color: var(--soft); margin-top: 3px; }
+.detail .out.moved { color: var(--moved); }
+.detail .out.broke { color: var(--broke); }
+.detail .out.wait { color: var(--accent); }
+.detail .claim {
+  margin-top: 9px; padding: 9px 12px;
+  border-radius: var(--radius-xs);
+  background: var(--well);
+  box-shadow: inset 2px 0 0 var(--broke), inset 0 0 0 1px var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; color: var(--ink);
 }
-.follow:hover { border-color: var(--accent); color: var(--accent); }
+.detail .claim em { font-style: normal; color: var(--faint); }
+.detail .story { margin-top: 7px; color: var(--faint); }
+
+.nothing { padding: 26px 16px; color: var(--faint); font-size: 11.5px; line-height: 1.7; text-align: center; }
+.nothing .mono { color: var(--soft); }
 
 /* --- where the time went ------------------------------------------------- */
 .timing {
-  margin-top: 10px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  box-shadow: inset 0 1px 0 var(--sheen);
-  padding: 12px 13px 13px;
+  flex: 0 0 auto;
+  padding: 11px var(--pad) 12px;
+  border-top: 1px solid var(--line);
+  background: var(--glass);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
 }
-.timing h2 {
-  font-size: 11px; letter-spacing: 0.13em; text-transform: uppercase;
-  color: var(--faint); font-weight: 600; margin-bottom: 9px;
+.tophead {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 0 0 8px;
+  background: transparent; border: 0; cursor: pointer;
+  text-align: left;
 }
-.tbar { display: flex; gap: 2px; height: 8px; }
-.tpart { min-width: 2px; border-radius: 3px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); }
-.tkey { list-style: none; margin: 9px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: var(--soft); }
-.tkey li { display: flex; align-items: center; gap: 6px; }
-.tswatch { width: 8px; height: 8px; border-radius: 3px; flex: 0 0 auto; }
-.tkey b { font-weight: 500; color: var(--ink); font-size: 11px; }
+.tlabel {
+  flex: 1 1 auto;
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--faint);
+}
+.ttotal {
+  flex: 0 1 auto; min-width: 0;
+  font-size: 10.5px; color: var(--faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ttotal b {
+  font-weight: 500; color: var(--soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.tophead .chev { color: var(--faint); width: 13px; height: 13px; transition: transform 200ms ease; }
+.tophead[aria-expanded='true'] .chev { transform: rotate(180deg); }
+.tophead:hover .tlabel, .tophead:hover .ttotal, .tophead:hover .chev { color: var(--soft); }
 
-/* --- footer -------------------------------------------------------------- */
+/* Deliberately not coloured. Where the time went is information, not state,
+   and colour on this page only ever means something needs a person. */
+.tbar { display: flex; gap: 1px; height: 6px; border-radius: 999px; overflow: hidden; background: var(--resting); }
+.tpart { min-width: 2px; }
+.tkey { list-style: none; margin: 11px 0 1px; padding: 0; }
+.tkey li { display: flex; align-items: center; gap: 9px; padding: 3px 4px; font-size: 11px; color: var(--soft); }
+.tkey .tswatch { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 2px; }
+.tkey .tlabelled { flex: 1 1 auto; min-width: 0; }
+.tkey b {
+  flex: 0 0 auto; font-weight: 500; color: var(--ink); font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- follow ------------------------------------------------------------- */
+.follow {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  z-index: 4;
+  font-size: 11px;
+  color: var(--ink);
+  background: var(--lift);
+  border: 1px solid var(--line-firm); border-radius: 999px;
+  padding: 6px 15px; cursor: pointer;
+  box-shadow: 0 12px 24px -14px var(--shadow);
+  transition: border-color 160ms ease, color 160ms ease;
+}
+.follow:hover { border-color: var(--accent); color: var(--accent); }
+
+/* --- the one thing left to do ------------------------------------------- */
 .foot {
   flex: 0 0 auto;
-  margin: 0 -13px;
-  padding: 11px 13px 13px;
+  padding: 13px var(--pad) 15px;
   background: var(--glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
   border-top: 1px solid var(--line);
-  box-shadow: 0 -12px 26px -24px var(--shadow);
 }
-.footverdict { font-size: 11.5px; color: var(--soft); overflow-wrap: anywhere; }
-.footverdict.good { color: var(--good); }
-.footverdict.bad { color: var(--bad); }
-.footverdict.warn { color: var(--warn); }
-.footverdict.wait { color: var(--wait); }
-.cmd { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.nextlabel {
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 8px;
+}
+.cmd { display: flex; align-items: stretch; gap: 7px; }
 .cmd code {
   flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center;
   background: var(--well);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  padding: 7px 10px; font-size: 11.5px;
+  border-radius: var(--radius-xs);
+  box-shadow: inset 0 0 0 1px var(--line-firm);
+  padding: 8px 11px; font-size: 11.5px;
   color: var(--ink);
   overflow-wrap: anywhere;
   user-select: all;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }
+.prompt { flex: 0 0 auto; color: var(--held); opacity: 0.75; user-select: none; }
 .copy {
-  flex: 0 0 auto; font: inherit; font-size: 11px;
+  flex: 0 0 auto; width: 36px;
+  display: flex; align-items: center; justify-content: center;
   color: var(--soft); background: transparent;
-  border: 1px solid var(--line-strong); border-radius: 999px;
-  padding: 5px 11px; cursor: pointer;
-  transition: color 140ms ease, border-color 140ms ease;
+  border: 1px solid var(--line-firm); border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease;
 }
 .copy:hover { color: var(--ink); border-color: var(--soft); }
+.copy.done { color: var(--held); border-color: color-mix(in srgb, var(--held) 45%, transparent); }
 
 /* --- one picture, made big ---------------------------------------------- */
 .lightbox {
   position: fixed; inset: 0; z-index: 10;
-  background: color-mix(in srgb, var(--ground) 82%, #000);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: color-mix(in srgb, var(--ground) 78%, #000);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   display: flex; align-items: center; justify-content: center;
-  padding: 14px; cursor: zoom-out;
+  padding: 18px; cursor: zoom-out;
 }
 .lightbox img {
   max-width: 100%; max-height: 100%;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--line-strong);
-  box-shadow: 0 30px 60px -30px #000;
+  box-shadow: 0 0 0 1px var(--line-firm), 0 36px 70px -34px #000;
 }
 
-/* The panel has to stay readable when someone drags it narrow. */
-@media (max-width: 420px) {
-  .frame { height: clamp(120px, 20vh, 170px); }
-  .state { font-size: 14px; }
+/* --- the range it has to survive ---------------------------------------- */
+
+/* Dragged narrow. Everything stays, nothing wraps into a mess. */
+@media (max-width: 330px) {
+  :root { --pad: 11px; --radius: 16px; }
+  .state { font-size: 15px; }
+  .target .app, .target .sep { display: none; }
+  .row { gap: 9px; padding: 9px 11px; }
+  .detail { padding: 0 11px 12px 28px; }
+  .shot { max-height: 30vh; }
+  .switch button { font-size: 10px; padding: 5px 3px; }
+  .ttotal { display: none; }
+  .caption { display: block; }
+  .shotname { display: block; white-space: normal; overflow-wrap: anywhere; }
+  .shotout { display: block; text-align: left; margin-top: 2px; }
+  .timing { padding: 10px var(--pad) 11px; }
+}
+
+/* Pulled wide. Two columns rather than one very long thin one, so the picture
+   gets the room and the list stays beside it instead of below the fold. */
+@media (min-width: 720px) {
+  :root { --pad: 22px; }
+  .body { flex-direction: row; gap: 26px; padding-bottom: 4px; }
+  .stage { flex: 1 1 54%; min-width: 0; align-self: center; padding-top: 0; }
+  .scroll { flex: 1 1 46%; min-width: 0; padding-top: 20px; }
+  .shot { max-height: 58vh; }
+  .state { font-size: 19px; }
+  .timing { margin-top: 22px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .row.running .dot { animation: none; }
-  .row.fresh { animation: none; }
-  .layer, .seg, .row, .tab, .copy, .follow, .stage::before { transition: none; }
+  * { animation: none !important; transition: none !important; }
 }
 `;
 
@@ -643,17 +823,21 @@ const SCRIPT = `
   function el(id) { return document.getElementById(id); }
 
   var ui = {
-    project: el('project'), app: el('app'),
-    clock: el('clock'), state: el('state'), note: el('note'),
-    progress: el('progress'), counts: el('counts'),
-    rail: el('rail'), list: el('list'), listempty: el('listempty'), follow: el('follow'),
-    stage: el('stage'), frame: el('frame'), layerA: el('layerA'), layerB: el('layerB'), empty: el('empty'),
-    tabs: el('tabs'),
-    shotname: el('shotname'), shotdesc: el('shotdesc'), shotout: el('shotout'),
-    timing: el('timing'), tbar: el('tbar'), tkey: el('tkey'),
-    footer: el('footer'), footlead: el('footlead'), cmdrow: el('cmdrow'), cmd: el('cmd'), copy: el('copy'),
+    clock: el('clock'), project: el('project'), app: el('app'), targetsep: el('targetsep'),
+    state: el('state'), note: el('note'),
+    track: el('track'), fill: el('fill'), counts: el('counts'),
+    stage: el('stage'), shot: el('shot'), layerA: el('layerA'), layerB: el('layerB'), blank: el('blank'),
+    caption: el('caption'), shotname: el('shotname'), shotout: el('shotout'), tabs: el('tabs'),
+    scroll: el('scroll'), follow: el('follow'), nothing: el('nothing'),
+    groupScreens: el('groupScreens'), listScreens: el('listScreens'), countScreens: el('countScreens'),
+    groupGuards: el('groupGuards'), listGuards: el('listGuards'), countGuards: el('countGuards'),
+    timing: el('timing'), thead: el('thead'), ttotal: el('ttotal'), tbar: el('tbar'), tkey: el('tkey'),
+    footer: el('footer'), cmd: el('cmd'), copy: el('copy'),
+    aura: document.querySelector('.aura'),
     lightbox: el('lightbox'), lightimg: el('lightimg')
   };
+
+  var CHEVRON = '<svg class="glyph chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 10.5l3.5 3.5 3.5-3.5"></path></svg>';
 
   // -------------------------------------------------------------------------
   // Words. These match the terminal on purpose — the same run should not be
@@ -678,17 +862,36 @@ const SCRIPT = `
 
   function plural(n, one, many) { return n === 1 ? one : many; }
 
-  // Colour is the only thing carrying state here, so the mapping is the whole
-  // vocabulary: green held, amber moved, red broke, blue is waiting for a
-  // person to look, grey was never run.
+  // The whole colour vocabulary, in one place: green held, amber moved, red
+  // broke, blue is waiting for a person to look, and a check nobody ran has no
+  // colour at all.
   function toneOf(status) {
     switch (status) {
       case 'running': return 'running';
-      case 'passed': return 'good';
-      case 'changed': case 'flaky': return 'warn';
-      case 'failed': case 'missing': return 'bad';
+      case 'passed': return 'held';
+      case 'changed': case 'flaky': return 'moved';
+      case 'failed': case 'missing': return 'broke';
       case 'new': return 'wait';
-      case 'skipped': return 'muted';
+      case 'skipped': return 'skip';
+      default: return '';
+    }
+  }
+
+  // A tone that means "somebody has to look at this". These are the rows that
+  // open themselves; everything else waits to be asked.
+  function needsPerson(tone) { return tone === 'moved' || tone === 'broke' || tone === 'wait'; }
+
+  // The terse form, for the line beside the picture. The colour and the compare
+  // control have already said most of it there.
+  function outcomeShort(ev) {
+    switch (ev.status) {
+      case 'changed':
+        var n = ev.diffPixels || 0;
+        return commas(n) + ' ' + plural(n, 'pixel', 'pixels') + ' moved';
+      case 'new': return 'not approved yet';
+      case 'missing': return 'no approved picture';
+      case 'failed': return ev.message || 'could not be photographed';
+      case 'flaky': return 'changed between tries';
       default: return '';
     }
   }
@@ -715,80 +918,194 @@ const SCRIPT = `
   }
 
   // -------------------------------------------------------------------------
-  // The list, and the progress bar that shadows it
+  // The list. One line per check at rest; everything else on request.
   // -------------------------------------------------------------------------
 
-  var rows = Object.create(null);
+  var items = Object.create(null);
   var order = [];
   var outcomes = Object.create(null);
+  var expected = { picture: 0, guard: 0 };
 
   function keyFor(kind, name) { return kind + ':' + name; }
 
-  function addRow(kind, name, describe) {
+  function addItem(kind, name, describe) {
     var root = document.createElement('div');
-    root.className = 'row fresh';
+    root.className = 'item fresh pending';
+
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'row';
+    row.setAttribute('aria-expanded', 'false');
 
     var dot = document.createElement('span');
     dot.className = 'dot';
-    root.appendChild(dot);
-
-    var main = document.createElement('div');
-    main.className = 'rowmain';
-
-    var top = document.createElement('div');
-    top.className = 'rowtop';
     var rname = document.createElement('span');
     rname.className = 'rname';
     rname.textContent = name;
     var rtime = document.createElement('span');
     rtime.className = 'rtime';
-    top.appendChild(rname);
-    top.appendChild(rtime);
-    main.appendChild(top);
+    row.appendChild(dot);
+    row.appendChild(rname);
+    row.appendChild(rtime);
+    row.insertAdjacentHTML('beforeend', CHEVRON);
 
-    var rdesc = document.createElement('div');
-    rdesc.className = 'rdesc';
-    rdesc.textContent = describe || '';
-    rdesc.hidden = !describe;
-    main.appendChild(rdesc);
+    var detail = document.createElement('div');
+    detail.className = 'detail';
+    detail.hidden = true;
 
-    var rout = document.createElement('div');
-    rout.className = 'rout';
-    rout.hidden = true;
-    main.appendChild(rout);
+    root.appendChild(row);
+    root.appendChild(detail);
 
-    var rwhy = document.createElement('div');
-    rwhy.className = 'rwhy';
-    rwhy.hidden = true;
-    main.appendChild(rwhy);
+    var entry = {
+      kind: kind, name: name, root: root, row: row, time: rtime,
+      detail: detail, describe: describe || '', open: false, hasDetail: false
+    };
 
-    root.appendChild(main);
-    ui.list.appendChild(root);
-    ui.listempty.hidden = true;
+    // One rule, so a click is never a surprise: the first click brings this
+    // check forward — its picture on the glass, its detail open. The second
+    // click, on the row that is already forward, folds it away again. That is
+    // what makes the whole run browsable afterwards instead of only the last
+    // screen photographed.
+    row.addEventListener('click', function () {
+      var forward = entry.pics && !entry.root.classList.contains('showing');
+      if (forward) {
+        recall(entry);
+        setOpen(entry, true);
+        return;
+      }
+      toggle(entry);
+    });
+    redraw(entry);
 
-    var seg = document.createElement('span');
-    seg.className = 'seg';
-    ui.progress.appendChild(seg);
+    (kind === 'guard' ? ui.listGuards : ui.listScreens).appendChild(root);
+    (kind === 'guard' ? ui.groupGuards : ui.groupScreens).hidden = false;
 
-    var entry = { kind: kind, name: name, root: root, time: rtime, desc: rdesc, out: rout, why: rwhy, seg: seg };
-    rows[keyFor(kind, name)] = entry;
+    items[keyFor(kind, name)] = entry;
     order.push(entry);
     return entry;
   }
 
-  function ensureRow(kind, name, describe) {
-    var entry = rows[keyFor(kind, name)];
-    if (!entry) return addRow(kind, name, describe);
-    if (describe && !entry.desc.textContent) {
-      entry.desc.textContent = describe;
-      entry.desc.hidden = false;
-    }
+  function ensureItem(kind, name, describe) {
+    var entry = items[keyFor(kind, name)];
+    if (!entry) return addItem(kind, name, describe);
+    if (describe && !entry.describe) { entry.describe = describe; redraw(entry); }
     return entry;
   }
 
+  /**
+   * Rebuild what is hidden under a row. Written out every time rather than
+   * patched, because the same row is drawn twice at most and a rebuilt block
+   * can never disagree with the event that caused it.
+   */
+  function redraw(entry) {
+    var d = entry.detail;
+    d.textContent = '';
+
+    if (entry.describe) {
+      var why = document.createElement('div');
+      why.className = 'why';
+      why.textContent = entry.describe;
+      d.appendChild(why);
+    }
+    // "Still the same" is not worth a line of anybody's attention, so a check
+    // that held says only what it is for.
+    if (entry.outText && entry.tone !== 'held') {
+      var out = document.createElement('div');
+      out.className = 'out' + (entry.tone ? ' ' + entry.tone : '');
+      out.textContent = entry.outText;
+      d.appendChild(out);
+    }
+    if (entry.failedAt) {
+      var claim = document.createElement('div');
+      claim.className = 'claim';
+      var label = document.createElement('em');
+      label.textContent = 'expected ';
+      claim.appendChild(label);
+      claim.appendChild(document.createTextNode(entry.failedAt));
+      d.appendChild(claim);
+    }
+    if (entry.story && entry.story !== entry.describe) {
+      var story = document.createElement('div');
+      story.className = 'story';
+      story.textContent = 'Why this guard exists: ' + entry.story;
+      d.appendChild(story);
+    }
+
+    entry.hasDetail = !!d.firstChild;
+    entry.root.classList.toggle('plain', !entry.hasDetail);
+    if (!entry.hasDetail) setOpen(entry, false);
+  }
+
+  /** Put a screen's pictures back in the hero, with the words that went with them. */
+  function recall(entry) {
+    var pics = entry.pics;
+    if (!pics) return;
+    var showed = false;
+    if (pics.status === 'changed') showed = comparePictures(pics);
+    if (!showed && pics.thumbnail) {
+      singlePicture();
+      showShot(pics.thumbnail, 'the picture taken of ' + entry.name);
+      showed = true;
+    }
+    if (!showed) return;
+    nameTheShot(entry.name);
+    sayOutcome(entry.tone, outcomeShort(pics));
+    for (var i = 0; i < order.length; i++) order[i].root.classList.remove('showing');
+    entry.root.classList.add('showing');
+  }
+
+  function setOpen(entry, open) {
+    entry.open = !!open && entry.hasDetail;
+    entry.detail.hidden = !entry.open;
+    entry.root.classList.toggle('open', entry.open);
+    entry.row.setAttribute('aria-expanded', entry.open ? 'true' : 'false');
+  }
+
+  function toggle(entry) {
+    if (!entry.hasDetail) return;
+    setOpen(entry, !entry.open);
+  }
+
   function setTone(entry, tone) {
-    entry.root.className = 'row' + (tone ? ' ' + tone : '');
-    entry.seg.className = 'seg' + (tone ? ' ' + tone : '');
+    entry.tone = tone;
+    var classes = ['item'];
+    if (tone) classes.push(tone);
+    if (!tone) classes.push('pending');
+    if (needsPerson(tone)) classes.push('attention');
+    if (entry.open) classes.push('open');
+    if (!entry.hasDetail) classes.push('plain');
+    if (entry.root.classList.contains('showing')) classes.push('showing');
+    entry.root.className = classes.join(' ');
+    entry.root.style.setProperty('--tone', tone ? 'var(--' + tone + ')' : 'var(--accent)');
+    paintMeter();
+  }
+
+  // -------------------------------------------------------------------------
+  // The meter: one hairline, sliced by outcome.
+  // -------------------------------------------------------------------------
+
+  function meterTotal() {
+    var planned = (expected.picture || 0) + (expected.guard || 0);
+    return Math.max(order.length, planned, 1);
+  }
+
+  function paintMeter() {
+    var total = meterTotal();
+    var width = (100 / total) + '%';
+    var slices = ui.fill.children;
+    // One slice per known check, in order. The rest of the track stays empty,
+    // which is what tells you how much is still to come.
+    while (slices.length > order.length) ui.fill.removeChild(ui.fill.lastChild);
+    while (slices.length < order.length) {
+      var span = document.createElement('span');
+      span.className = 'slice';
+      ui.fill.appendChild(span);
+    }
+    for (var i = 0; i < order.length; i++) {
+      var tone = order[i].tone || '';
+      slices[i].className = 'slice' + (tone ? ' ' + tone : '');
+      slices[i].style.width = width;
+    }
   }
 
   function updateCounts() {
@@ -796,11 +1113,36 @@ const SCRIPT = `
     for (var i = 0; i < order.length; i++) {
       if (outcomes[keyFor(order[i].kind, order[i].name)]) done++;
     }
-    var total = order.length;
-    ui.counts.textContent = total
-      ? commas(done) + ' of ' + commas(total) + ' done'
-      : '';
-    ui.listempty.hidden = total > 0;
+    var total = meterTotal();
+    // Say what happened, not just how far along it is. "11/11" tells a person the
+    // run finished and nothing else; they still have to read the whole list to find
+    // out whether they can walk away. The tally answers that in four words.
+    var tally = { changed: 0, failed: 0, waiting: 0, skipped: 0 };
+    for (var t = 0; t < order.length; t++) {
+      var st = outcomes[keyFor(order[t].kind, order[t].name)];
+      if (st === 'changed') tally.changed++;
+      else if (st === 'failed' || st === 'missing') tally.failed++;
+      else if (st === 'new') tally.waiting++;
+      else if (st === 'skipped') tally.skipped++;
+    }
+    var parts = [];
+    if (tally.failed) parts.push(commas(tally.failed) + ' broke');
+    if (tally.changed) parts.push(commas(tally.changed) + ' moved');
+    if (tally.waiting) parts.push(commas(tally.waiting) + ' needs you');
+    if (tally.skipped) parts.push(commas(tally.skipped) + ' skipped');
+    var counted = commas(done) + ' of ' + commas(total);
+    if (done === total && total > 0 && parts.length === 0) counted += ' — all held';
+    ui.counts.textContent = order.length ? counted + (parts.length ? ' · ' + parts.join(' · ') : '') : '';
+    ui.countScreens.textContent = countIn('picture');
+    ui.countGuards.textContent = countIn('guard');
+    ui.nothing.hidden = order.length > 0;
+    paintMeter();
+  }
+
+  function countIn(kind) {
+    var n = 0;
+    for (var i = 0; i < order.length; i++) if (order[i].kind === kind) n++;
+    return n ? String(n) : '';
   }
 
   // Auto-scroll follows the running row, and stops the moment the person
@@ -812,18 +1154,24 @@ const SCRIPT = `
     following = false;
     ui.follow.hidden = false;
   }
-  ['wheel', 'touchmove', 'pointerdown', 'keydown'].forEach(function (name) {
-    ui.rail.addEventListener(name, stopFollowing, { passive: true });
+  ['wheel', 'touchmove', 'keydown'].forEach(function (name) {
+    ui.scroll.addEventListener(name, stopFollowing, { passive: true });
   });
   ui.follow.addEventListener('click', function () {
     following = true;
     ui.follow.hidden = true;
-    if (runningRow) runningRow.root.scrollIntoView({ block: 'nearest' });
+    if (runningItem) runningItem.root.scrollIntoView({ block: 'nearest' });
   });
 
-  var runningRow = null;
+  /** Which row the picture on the glass belongs to. */
+  function markShowing(entry) {
+    for (var i = 0; i < order.length; i++) order[i].root.classList.remove('showing');
+    if (entry) entry.root.classList.add('showing');
+  }
+
+  var runningItem = null;
   function markRunning(entry) {
-    runningRow = entry;
+    runningItem = entry;
     setTone(entry, 'running');
     if (following) entry.root.scrollIntoView({ block: 'nearest' });
   }
@@ -843,8 +1191,8 @@ const SCRIPT = `
     ui.stage.hidden = false;
     shownSrc = src;
     shownAlt = alt || '';
-    ui.empty.hidden = true;
-    ui.frame.classList.remove('blank');
+    ui.blank.hidden = true;
+    ui.shot.classList.remove('empty');
     var next = frontIsA ? ui.layerB : ui.layerA;
     var current = frontIsA ? ui.layerA : ui.layerB;
     next.src = src;
@@ -854,13 +1202,16 @@ const SCRIPT = `
     frontIsA = !frontIsA;
   }
 
-  function nameTheShot(name, describe) {
+  function nameTheShot(name) {
     ui.shotname.textContent = name || '';
-    ui.shotdesc.textContent = describe || '';
   }
 
-  function tintStage(tone) {
-    ui.stage.style.setProperty('--tint', tone ? 'var(--' + tone + ')' : 'var(--accent)');
+  // The light behind everything takes the colour of the worst thing that has
+  // happened so far. It is the one piece of the panel a person reads without
+  // looking at it.
+  function tint(tone) {
+    var value = tone && tone !== 'held' && tone !== 'skip' ? 'var(--' + tone + ')' : 'var(--accent)';
+    document.documentElement.style.setProperty('--tint', value);
   }
 
   function clearTabs() {
@@ -874,11 +1225,12 @@ const SCRIPT = `
   }
 
   /**
-   * The one line under the picture. Silent when a screen simply held, because a
-   * panel that congratulates you on every screen is a panel you stop reading.
+   * The line beside the picture's name. Silent when a screen simply held,
+   * because a panel that congratulates you on every screen is a panel you stop
+   * reading.
    */
   function sayOutcome(tone, text) {
-    if (!text || !tone || tone === 'good' || tone === 'muted') {
+    if (!text || !tone || tone === 'held' || tone === 'skip') {
       ui.shotout.hidden = true;
       return;
     }
@@ -888,7 +1240,7 @@ const SCRIPT = `
   }
 
   // A screen that moved is the one moment a person has a real decision to make,
-  // so all three pictures are one keypress away and the difference is the one
+  // so all three pictures are one click away and the difference is the one
   // already on screen — that is the picture that answers the question.
   function comparePictures(ev) {
     var choices = [];
@@ -904,14 +1256,14 @@ const SCRIPT = `
     var buttons = [];
     function select(index) {
       for (var i = 0; i < buttons.length; i++) {
-        buttons[i].className = i === index ? 'tab on' : 'tab';
+        buttons[i].className = i === index ? 'on' : '';
+        buttons[i].setAttribute('aria-pressed', i === index ? 'true' : 'false');
       }
       showShot(choices[index].src, choices[index].label.toLowerCase() + ' picture of ' + (ev.name || 'this screen'));
     }
     choices.forEach(function (choice, index) {
       var button = document.createElement('button');
       button.type = 'button';
-      button.className = 'tab';
       button.textContent = choice.label;
       button.addEventListener('click', function () { select(index); });
       buttons.push(button);
@@ -933,7 +1285,7 @@ const SCRIPT = `
     ui.lightimg.alt = alt || '';
     ui.lightbox.hidden = false;
   }
-  ui.frame.addEventListener('click', function () { enlarge(shownSrc, shownAlt); });
+  ui.shot.addEventListener('click', function () { enlarge(shownSrc, shownAlt); });
   ui.lightbox.addEventListener('click', function () { ui.lightbox.hidden = true; });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') ui.lightbox.hidden = true;
@@ -960,18 +1312,36 @@ const SCRIPT = `
   }
 
   // -------------------------------------------------------------------------
-  // Where the time went
+  // Where the time went. Folded shut, because it is a thing you go and look at
+  // once in a while rather than something you need on screen all day.
   // -------------------------------------------------------------------------
 
   var TIMING_PARTS = [
-    ['launch', 'opening the app', 'var(--accent)'],
-    ['steps', 'clicking through the app', 'var(--shade1)'],
-    ['prepare', 'waiting for fonts and pictures', 'var(--shade2)'],
-    ['settle', 'waiting for the screen to hold still', 'var(--warn)'],
-    ['compare', 'comparing the pictures', 'var(--good)'],
-    ['guards', 'running the guards', 'var(--shade3)'],
-    ['other', 'everything else', 'var(--shade4)']
+    ['launch', 'opening the app'],
+    ['steps', 'clicking through the app'],
+    ['prepare', 'waiting for fonts and pictures'],
+    ['settle', 'waiting for the screen to hold still'],
+    ['compare', 'comparing the pictures'],
+    ['guards', 'running the guards'],
+    ['other', 'everything else']
   ];
+
+  // Shades of the text colour, darkest first. Not a palette — a ramp, so the
+  // breakdown reads as one object and never competes with the four colours
+  // that actually mean something.
+  function shade(index, count) {
+    var top = 46;
+    var bottom = 11;
+    var step = count > 1 ? (top - bottom) / (count - 1) : 0;
+    return 'color-mix(in srgb, var(--ink) ' + (top - step * index).toFixed(1) + '%, transparent)';
+  }
+
+  var timingOpen = false;
+  ui.thead.addEventListener('click', function () {
+    timingOpen = !timingOpen;
+    ui.tkey.hidden = !timingOpen;
+    ui.thead.setAttribute('aria-expanded', timingOpen ? 'true' : 'false');
+  });
 
   function showTiming(timings) {
     if (!timings || typeof timings !== 'object') return;
@@ -981,26 +1351,32 @@ const SCRIPT = `
       var ms = Number(timings[part[0]]);
       if (!isFinite(ms) || ms <= 0) return;
       sum += ms;
-      parts.push({ label: part[1], colour: part[2], ms: ms });
+      parts.push({ label: part[1], ms: ms });
     });
     if (!parts.length || sum <= 0) return;
 
+    // Biggest first: the answer to "where did the time go" is the first row.
+    parts.sort(function (a, b) { return b.ms - a.ms; });
+
     ui.tbar.textContent = '';
     ui.tkey.textContent = '';
-    parts.forEach(function (part) {
+    parts.forEach(function (part, index) {
+      var colour = shade(index, parts.length);
+
       var bar = document.createElement('span');
       bar.className = 'tpart';
       bar.style.flex = String(part.ms / sum) + ' 1 0';
-      bar.style.background = part.colour;
+      bar.style.background = colour;
       bar.title = part.label + ' — ' + fmt(part.ms);
       ui.tbar.appendChild(bar);
 
       var item = document.createElement('li');
       var swatch = document.createElement('span');
       swatch.className = 'tswatch';
-      swatch.style.background = part.colour;
+      swatch.style.background = colour;
       var text = document.createElement('span');
-      text.textContent = part.label + ' ';
+      text.className = 'tlabelled';
+      text.textContent = part.label;
       var value = document.createElement('b');
       value.textContent = fmt(part.ms);
       item.appendChild(swatch);
@@ -1008,6 +1384,11 @@ const SCRIPT = `
       item.appendChild(value);
       ui.tkey.appendChild(item);
     });
+    ui.ttotal.textContent = '';
+    var most = document.createElement('b');
+    most.textContent = fmt(parts[0].ms);
+    ui.ttotal.appendChild(most);
+    ui.ttotal.appendChild(document.createTextNode(' ' + parts[0].label));
     ui.timing.hidden = false;
   }
 
@@ -1015,31 +1396,22 @@ const SCRIPT = `
   // What to do next
   // -------------------------------------------------------------------------
 
-  function showNextStep(summary, verdict, tone) {
+  function showNextStep(summary) {
     var pictures = (summary && summary.pictures) || [];
     var waiting = pictures.filter(function (p) {
       return p && (p.status === 'changed' || p.status === 'new' || p.status === 'missing');
     });
-    ui.footer.hidden = false;
-    ui.footlead.textContent = verdict || '';
-    ui.footlead.className = 'footverdict' + (tone ? ' ' + tone : '');
-    if (!waiting.length) {
-      ui.cmdrow.hidden = true;
-      return;
-    }
+    // The verdict is already the biggest sentence on the page. The footer only
+    // ever exists when there is something for a person to actually type.
+    if (!waiting.length) { ui.footer.hidden = true; return; }
     ui.cmd.textContent = waiting.length === 1
       ? 'staysfixed approve ' + waiting[0].name
       : 'staysfixed approve --all';
-    ui.cmdrow.hidden = false;
+    ui.footer.hidden = false;
   }
 
   ui.copy.addEventListener('click', function () {
     var text = ui.cmd.textContent || '';
-    var original = ui.copy.textContent;
-    function done() {
-      ui.copy.textContent = 'copied';
-      setTimeout(function () { ui.copy.textContent = original; }, 1200);
-    }
     // A page opened from a file is not a secure context, so the modern
     // clipboard is usually refused here. The old way still works.
     var box = document.createElement('textarea');
@@ -1049,12 +1421,16 @@ const SCRIPT = `
     box.style.opacity = '0';
     document.body.appendChild(box);
     box.select();
-    try { document.execCommand('copy'); done(); } catch (err) { /* nothing to do */ }
+    try {
+      document.execCommand('copy');
+      ui.copy.classList.add('done');
+      setTimeout(function () { ui.copy.classList.remove('done'); }, 1300);
+    } catch (err) { /* nothing to do */ }
     document.body.removeChild(box);
   });
 
   // -------------------------------------------------------------------------
-  // The state line
+  // The sentence at the top
   // -------------------------------------------------------------------------
 
   function setState(text, tone) {
@@ -1078,7 +1454,14 @@ const SCRIPT = `
     if (type === 'run:start') {
       var planned = ev.plan || {};
       if (planned.project) ui.project.textContent = planned.project;
-      if (planned.app) ui.app.textContent = planned.app;
+      if (planned.app) {
+        ui.app.textContent = planned.app;
+        ui.app.hidden = false;
+        ui.targetsep.hidden = false;
+      }
+      // A caller who counted instead of listing still gets a truthful meter.
+      if (typeof planned.screens === 'number') expected.picture = planned.screens;
+      if (typeof planned.guards === 'number') expected.guard = planned.guards;
       setState('opening the app');
       updateCounts();
       return;
@@ -1095,37 +1478,41 @@ const SCRIPT = `
     }
 
     if (type === 'screen:start') {
+      if (typeof ev.total === 'number' && ev.total > expected.picture) expected.picture = ev.total;
       if (!announcedScreens) {
         announcedScreens = true;
-        var screens = ev.total || countOf(plan.screens);
+        var screens = ev.total || expected.picture || countOf(plan.screens);
         setState(screens ? 'photographing ' + commas(screens) + ' ' + plural(screens, 'screen', 'screens') : 'photographing the screens');
       }
       // The picture is deliberately left alone here. Nothing has been
       // photographed yet, so renaming the frame now would put this screen's
       // name under the last screen's picture — a caption that lies for a
       // second is worse than one that is a second behind.
-      markRunning(ensureRow('picture', String(ev.name || ''), ev.describe));
+      markRunning(ensureItem('picture', String(ev.name || ''), ev.describe));
       return;
     }
 
     if (type === 'screen:shot') {
+      var shotRow = ev.name ? ensureItem('picture', String(ev.name), ev.describe) : null;
       if (ev.thumbnail) {
         lastShot = ev.thumbnail;
+        if (shotRow) shotRow.pics = { name: ev.name, status: '', thumbnail: ev.thumbnail };
         singlePicture();
         showShot(ev.thumbnail, 'the picture just taken of ' + (ev.name || 'this screen'));
       }
-      if (ev.name) nameTheShot(ev.name, ev.describe);
+      if (ev.name) nameTheShot(ev.name);
+      markShowing(shotRow);
       return;
     }
 
     if (type === 'screen:done') {
-      var done = ensureRow('picture', String(ev.name || ''), ev.describe);
+      var done = ensureItem('picture', String(ev.name || ''), ev.describe);
       var tone = finish(done, 'picture', ev);
       if (ev.thumbnail) lastShot = ev.thumbnail;
-      // The name, the description and the colour behind the glass all move
-      // together with the picture, or none of them move. A screen that could
-      // not be photographed leaves the last real one up, correctly labelled,
-      // rather than putting its own name under someone else's picture.
+      // The name, the caption and the light behind the glass all move together
+      // with the picture, or none of them move. A screen that could not be
+      // photographed leaves the last real one up, correctly labelled, rather
+      // than putting its own name under someone else's picture.
       var showed = false;
       if (ev.status === 'changed') {
         showed = comparePictures(ev);
@@ -1140,48 +1527,54 @@ const SCRIPT = `
         showed = true;
       }
       if (showed) {
-        nameTheShot(ev.name, ev.describe);
-        tintStage(tone === 'running' ? '' : tone);
-        // Anything but "still the same" is said under the picture as well as in
-        // the list, because the picture is where the person is looking and the
-        // line under it is what tells them there is something to decide.
-        sayOutcome(tone, outcomeText('picture', ev));
+        markShowing(done);
+        nameTheShot(ev.name);
+        // Anything but "still the same" is said beside the picture as well as
+        // in the list, because the picture is where the person is looking and
+        // that line is what tells them there is something to decide.
+        sayOutcome(tone, outcomeShort(ev));
       }
+      tint(worstTone());
       return;
     }
 
     if (type === 'guard:start') {
+      if (typeof ev.total === 'number' && ev.total > expected.guard) expected.guard = ev.total;
       if (!announcedGuards) {
         announcedGuards = true;
-        var guards = ev.total || countOf(plan.guards);
+        var guards = ev.total || expected.guard || countOf(plan.guards);
         setState(guards ? 'running ' + commas(guards) + ' ' + plural(guards, 'guard', 'guards') : 'running the guards');
       }
-      markRunning(ensureRow('guard', String(ev.name || ''), ev.describe));
+      markRunning(ensureItem('guard', String(ev.name || ''), ev.describe));
       return;
     }
 
     if (type === 'guard:done') {
-      finish(ensureRow('guard', String(ev.name || ''), ev.describe), 'guard', ev);
+      finish(ensureItem('guard', String(ev.name || ''), ev.describe), 'guard', ev);
+      tint(worstTone());
       return;
     }
 
     if (type === 'run:done') {
-      runningRow = null;
+      runningItem = null;
+      ui.follow.hidden = true;
       var summary = ev.summary || null;
       stopClock(typeof ev.at === 'number' ? ev.at : (summary && summary.durationMs));
       var verdict = ev.verdict || fallbackVerdict();
-      var verdictTone = worstTone();
-      setState(verdict, verdictTone);
-      tintStage(verdictTone);
+      var worst = worstTone();
+      setState(verdict, worst);
+      tint(worst);
       showTiming(ev.timings || (summary && summary.timings));
-      showNextStep(summary, verdict, verdictTone);
+      showNextStep(summary);
       updateCounts();
-      // The timing card has just appeared under the list and taken room from
-      // it, so the tail is put back in view — otherwise a run ends showing the
-      // middle of itself, and the breakdown it just drew is below the fold.
       if (following) {
         requestAnimationFrame(function () {
-          ui.rail.scrollTop = ui.rail.scrollHeight;
+          var first = null;
+          for (var i = 0; i < order.length && !first; i++) {
+            if (needsPerson(order[i].tone)) first = order[i];
+          }
+          if (first) first.root.scrollIntoView({ block: 'center' });
+          else ui.scroll.scrollTop = 0;
         });
       }
       return;
@@ -1192,31 +1585,27 @@ const SCRIPT = `
 
   function finish(entry, kind, ev) {
     var tone = toneOf(ev.status);
-    setTone(entry, tone);
+    if (kind === 'picture') {
+      entry.pics = {
+        name: ev.name, status: ev.status,
+        thumbnail: ev.thumbnail || (entry.pics && entry.pics.thumbnail) || '',
+        approvedThumb: ev.approvedThumb || '',
+        diffThumb: ev.diffThumb || '',
+        diffPixels: ev.diffPixels, message: ev.message
+      };
+      if (!entry.pics.thumbnail && !entry.pics.approvedThumb && !entry.pics.diffThumb) entry.pics = null;
+    }
+    entry.outText = outcomeText(kind, ev);
+    entry.failedAt = (kind === 'guard' && ev.status === 'failed' && ev.failedAt) ? ev.failedAt : '';
+    entry.story = (kind === 'guard' && ev.status === 'failed' && ev.because) ? ev.because : '';
     if (typeof ev.durationMs === 'number') entry.time.textContent = fmt(ev.durationMs);
-    var text = outcomeText(kind, ev);
-    if (text) {
-      entry.out.textContent = text;
-      entry.out.className = 'rout' + (tone ? ' ' + tone : '');
-      entry.out.hidden = false;
-    }
-    if (kind === 'guard' && ev.status === 'failed') {
-      entry.why.textContent = '';
-      if (ev.failedAt) {
-        var claim = document.createElement('div');
-        claim.className = 'rclaim';
-        claim.textContent = 'expected: ' + ev.failedAt;
-        entry.why.appendChild(claim);
-      }
-      if (ev.because && ev.because !== entry.desc.textContent) {
-        var why = document.createElement('div');
-        why.className = 'rbecause';
-        why.textContent = 'Why this guard exists: ' + ev.because;
-        entry.why.appendChild(why);
-      }
-      entry.why.hidden = !entry.why.firstChild;
-    }
-    outcomes[keyFor(entry.kind, entry.name)] = tone || 'good';
+    entry.tone = tone;
+    redraw(entry);
+    setTone(entry, tone);
+    // Only the checks that want a person open themselves. Everything else stays
+    // one line, which is what keeps a clean run quiet.
+    if (needsPerson(tone)) setOpen(entry, true);
+    outcomes[keyFor(entry.kind, entry.name)] = tone || 'held';
     updateCounts();
     return tone;
   }
@@ -1224,13 +1613,13 @@ const SCRIPT = `
   // The worst thing that happened, as a colour. Red beats amber beats blue
   // beats green, because a person should see the most serious state first.
   function worstTone() {
-    var rank = { bad: 4, warn: 3, wait: 2, good: 1, muted: 0 };
-    var worst = 'good';
+    var rank = { broke: 4, moved: 3, wait: 2, held: 1, skip: 0 };
+    var worst = 'held';
     for (var key in outcomes) {
       var tone = outcomes[key];
       if ((rank[tone] || 0) > (rank[worst] || 0)) worst = tone;
     }
-    return worst === 'muted' ? '' : worst;
+    return worst === 'skip' ? '' : worst;
   }
 
   // Only used when a run finishes without the verdict the terminal printed —
@@ -1240,7 +1629,7 @@ const SCRIPT = `
     var total = order.length;
     var bad = 0;
     for (var key in outcomes) {
-      if (outcomes[key] === 'bad' || outcomes[key] === 'warn' || outcomes[key] === 'wait') bad++;
+      if (outcomes[key] === 'broke' || outcomes[key] === 'moved' || outcomes[key] === 'wait') bad++;
     }
     if (!total) return 'finished';
     if (!bad) return 'Everything that worked still works.';
@@ -1266,7 +1655,7 @@ const SCRIPT = `
   // forever next to a result that is already final.
   window.__staysfixed_detach = function () {
     stopClock();
-    runningRow = null;
+    runningItem = null;
   };
 
   // Draw the plan before anything has happened, so the window is worth looking
@@ -1274,15 +1663,15 @@ const SCRIPT = `
   (function seed() {
     var i;
     for (i = 0; i < (plan.screens || []).length; i++) {
-      addRow('picture', plan.screens[i].name, plan.screens[i].describe);
+      addItem('picture', plan.screens[i].name, plan.screens[i].describe);
     }
     for (i = 0; i < (plan.guards || []).length; i++) {
-      addRow('guard', plan.guards[i].name, plan.guards[i].describe);
+      addItem('guard', plan.guards[i].name, plan.guards[i].describe);
     }
     updateCounts();
-    if (!order.length) ui.frame.classList.add('blank');
-    // Guards only: there will never be a picture, so the panel does not hold
-    // a screen's worth of empty glass open waiting for one.
+    if (!order.length) ui.shot.classList.add('empty');
+    // Guards only: there will never be a picture, so the panel does not hold a
+    // screen's worth of empty glass open waiting for one.
     if (!(plan.screens || []).length && (plan.guards || []).length) ui.stage.hidden = true;
   })();
 })();
