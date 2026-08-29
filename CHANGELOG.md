@@ -4,6 +4,17 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — 2026-08-30
+
+Documentation only, and it is a correction rather than a polish. The README
+described where journeys come from in the words of the design — read the code,
+then harvest the project's own test suite, then recorded sessions — and only the
+first of those is wired into `staysfixed check`. The suite harvest, session
+recording and the flake register are written and tested in `src/v2/journeys/` and
+nothing on the check path calls them. Both places that implied otherwise now say
+so plainly. A feature that exists in the repository and not in the run is not a
+feature you have.
+
 ## [0.6.0] — 2026-08-30
 
 The second sweep for silences, done the same way as the first: read all of

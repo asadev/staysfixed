@@ -148,6 +148,7 @@ pretend otherwise.
 | The reference cut when you ship, sealed intents, the waiver budget, and escalations in your closing summary | **Works.** This page describes what it actually does. |
 | The coverage ledger — every door counted, the unopened ones named, and the sentence saying so on every reply | **Works.** See [what it did not check](#what-it-did-not-check). |
 | Aiming a check at one kind of product, and refusing by name rather than checking something else | **Works.** |
+| Steps taken from your own test suite, from a recorded session, or rejected at birth for not repeating twice | **Written, not wired.** The code is in `src/v2/journeys/` with tests around it, and nothing on the check path calls it yet. Journeys today come from what each adapter reads out of your source, plus any `--journeys` file you name. |
 | Android APKs on an emulator | **The adapter is here.** It reads everything the APK declares with nothing installed and no Java, and where there is an emulator it installs one build at a time and walks it. Whether *this* machine can run one is a separate question, and `doctor` asks the adapter itself rather than keeping a second opinion — most of what it wants installs with a command; accepting Google's licence, once, needs a person. Two emulator snapshots restoring byte-identically is unproven, so Android compares against the stored record and says which mode it used. |
 | The iOS simulator | **The adapter is here.** It reads what the app bundle declares with nothing running, and where Xcode and a simulator runtime are present it installs one build at a time, boots it and reads what is on the screen. It is new. Paired running costs two `xcodebuild` passes, so it is for before a release rather than for every edit, and like Android it compares against the stored record and says which mode it used. Ask `doctor` what it is actually covering on your machine before trusting a clean run. |
 | Native Windows GUI (a real Win32 app, not an Electron one) | **The probe is here**, driven over ssh to any machine that reaches a Windows desktop — a WSL shell on one counts, and nothing is installed on it. Windows shows one desktop, so two builds can never run at once: the comparison is genuinely weaker here than anywhere else. |
@@ -231,6 +232,14 @@ question: read the code (free, exact) → run the project's own existing test su
 under instrumentation → recorded real sessions → the agent exploring one named
 gap and freezing it into a replayable file → never a person clicking through an
 app.
+
+What is actually wired into `staysfixed check` today is the first of those and a
+journeys file you point it at: each adapter reads your source and offers the
+journeys it can walk — routes, commands, screens, message channels — and
+`--journeys <file>` names steps by hand. The suite harvest, recorded sessions and
+the flake register are written and tested in `src/v2/journeys/`, and **nothing on
+the check path calls them yet**. Saying so is the point: a feature that exists in
+the repository and not in the run is not a feature you have.
 
 ## Keeping it quiet
 
