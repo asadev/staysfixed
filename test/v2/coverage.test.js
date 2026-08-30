@@ -433,3 +433,44 @@ describe('a door and the address a walk touched', () => {
     assert.match(toCoverage(led).gaps[0].what, /only door has never been opened/, 'and it reads as English on a one-door product');
   });
 });
+
+describe('knocking is not walking', () => {
+  /** @param {any} extra */
+  const capture = (extra) => ({
+    journey: 'GET /reports',
+    startedAt: '2026-08-31T00:00:00.000Z',
+    build: { id: 'work-1' },
+    observations: [{ path: 'api.GET /reports.status', channel: 'results', value: extra.status }],
+  });
+  const journey = () => ({
+    steps: [{ act: 'request', method: 'GET', door: '/reports', kind: 'route', doorDetail: 'GET' }],
+  });
+
+  test('a route the build answers 404 to is not a walked door', () => {
+    // Behind a login wall every door bounced, and a route whose handler had been deleted
+    // answered 404 — and both counted as WALKED, so the run reported full coverage of a
+    // product it had never been inside. The coverage ledger lying in that direction is the
+    // one thing this file says it must never do. Measured 2026-08-31.
+    const walk = walkFromCapture(/** @type {any} */ (capture({ status: 404 })), /** @type {any} */ (journey()));
+    assert.equal(walk.doorAddresses, undefined, 'nothing was proved about it, so it stays shut');
+    assert.deepEqual(walk.knockedShut, [{ door: 'GET /reports', status: 404 }]);
+  });
+
+  test('a route that answers is walked', () => {
+    const walk = walkFromCapture(/** @type {any} */ (capture({ status: 200 })), /** @type {any} */ (journey()));
+    assert.equal(walk.doorAddresses?.length, 1, 'or nothing could ever be covered');
+    assert.equal(walk.knockedShut, undefined);
+  });
+
+  test('a 500 is walked — the route exists and it broke, which is the whole point', () => {
+    const walk = walkFromCapture(/** @type {any} */ (capture({ status: 500 })), /** @type {any} */ (journey()));
+    assert.equal(walk.doorAddresses?.length, 1);
+    assert.equal(walk.knockedShut, undefined);
+  });
+
+  test('a redirect is walked, and said out loud, because the bounce is not what is behind it', () => {
+    const walk = walkFromCapture(/** @type {any} */ (capture({ status: 302 })), /** @type {any} */ (journey()));
+    assert.equal(walk.doorAddresses?.length, 1);
+    assert.deepEqual(walk.onlyRedirected, [{ door: 'GET /reports', status: 302 }]);
+  });
+});

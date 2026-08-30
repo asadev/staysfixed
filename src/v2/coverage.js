@@ -101,6 +101,14 @@ import { listBuilds, listCaptures, loadCapture, referencePointer } from './store
  * @property {string[]} [doors]               Door keys the journey's steps name, for steps that
  *                                            named a door with nothing to tell apart from
  *                                            another of the same name. See doorKey.
+ * @property {{door: string, status: number}[]} [onlyRedirected]
+ *                                            Doors that answered with a redirect. Walked — the
+ *                                            bounce is real behaviour — but what is behind them
+ *                                            was never seen.
+ * @property {{door: string, status: number}[]} [knockedShut]
+ *                                            Doors a step knocked on where the running build
+ *                                            answered that they are not there. Knocking is not
+ *                                            walking, and these have proved nothing.
  * @property {string[]} [doorAddresses]       Full door addresses, for steps that were specific
  *                                            enough to build one. A route step knows its verb,
  *                                            and GET /x and POST /x are two doors that share a
@@ -402,6 +410,15 @@ export function addressesTouched(observations) {
 }
 
 /**
+ * Answers that mean the door is not there in the build that ran.
+ *
+ * A 500 is deliberately NOT here: the route exists and it broke, which is a real difference
+ * and exactly what a check is for. These four are the codes that say the thing the source
+ * declares was never reachable, so nothing has been proved about it either way.
+ */
+const NOTHING_THERE = new Set([404, 405, 410, 501]);
+
+/**
  * A walk, built from one stored capture and, when it is to hand, the journey behind it.
  *
  * @param {Capture} capture
@@ -426,8 +443,55 @@ export function walkFromCapture(capture, journey) {
     // would report POST as walked too, which is the coverage ledger lying in the one direction
     // it must never lie in.
     const named = journey.steps.filter((s) => typeof s.door === 'string' && typeof s.kind === 'string');
-    const exact = named.filter((s) => typeof s.doorDetail === 'string' && s.doorDetail !== '');
-    const byName = named.filter((s) => typeof s.doorDetail !== 'string' || s.doorDetail === '');
+
+    // KNOCKING IS NOT WALKING.
+    //
+    // A door was counted as walked because a STEP said it knocked on it — whatever came back.
+    // So a route the source declares and the running build answers 404 counted as covered; and
+    // behind a login wall, where every request is bounced to /login, every door in the product
+    // counted as walked and the run came back clean. That is the coverage ledger lying in the
+    // one direction this file says it must never lie in.
+    //
+    // What answered is on the record: the http adapter writes `api.<door>.status`. A 404, 405,
+    // 410 or 501 means the thing the code declares is not there in the build that ran, so
+    // nothing was proved about it and it stays shut.
+    const answered = new Map();
+    for (const ob of capture.observations ?? []) {
+      const found = /^api\.(.+)\.status$/.exec(String(ob?.path ?? ''));
+      if (found) answered.set(found[1], Number(ob.value));
+    }
+    /** @type {{door: string, status: number}[]} */
+    const shut = [];
+    /** @type {{door: string, status: number}[]} */
+    const bounced = [];
+    /** @param {any} s @returns {boolean} */
+    const reallyWalked = (s) => {
+      // The door is the ROUTE (`/reports`); the observation is addressed by method and route
+      // together (`api.GET /reports.status`), because GET and POST on one path are two doors.
+      // Try the composite first and the bare name after, so both shapes of step are covered.
+      const keys = [
+        typeof s.doorDetail === 'string' && s.doorDetail ? `${s.doorDetail} ${s.door}` : null,
+        typeof s.method === 'string' && s.method ? `${s.method} ${s.door}` : null,
+        String(s.door),
+      ].filter(Boolean);
+      const key = keys.find((k) => answered.has(/** @type {string} */ (k)));
+      const code = key === undefined ? undefined : answered.get(/** @type {string} */ (key));
+      // A redirect is real behaviour and it IS walked — but what you saw is the bounce, not the
+      // thing behind it. Behind a login wall every door answers 302 to /login, and the run
+      // then reports full coverage of a product it never got into.
+      if (typeof code === 'number' && code >= 300 && code < 400) {
+        bounced.push({ door: String(key), status: code });
+        return true;
+      }
+      if (typeof code !== 'number' || !NOTHING_THERE.has(code)) return true;
+      shut.push({ door: String(key), status: code });
+      return false;
+    };
+
+    const exact = named.filter((s) => typeof s.doorDetail === 'string' && s.doorDetail !== '').filter(reallyWalked);
+    const byName = named.filter((s) => typeof s.doorDetail !== 'string' || s.doorDetail === '').filter(reallyWalked);
+    if (shut.length > 0) walk.knockedShut = shut;
+    if (bounced.length > 0) walk.onlyRedirected = bounced;
     if (byName.length > 0) walk.doors = byName.map((s) => doorKey({ kind: String(s.kind), name: String(s.door) }));
     if (exact.length > 0) {
       walk.doorAddresses = exact.map((s) =>
@@ -611,6 +675,27 @@ export function buildLedger(input) {
   if (cutFunctions > 0) {
     caveats.push(
       `${cutFunctions} functions that really did run were cut from the coverage lists to keep them readable, so up to that many of the doors counted as never opened were in fact opened. This ledger undercounts, and it undercounts by no more than ${cutFunctions}.`,
+    );
+  }
+  // Named, never silently dropped. A route the code declares and the build answers 404 to is
+  // not a covered route and it is not an absent one either — it is a disagreement between the
+  // source and the thing that ran, and that is worth more than most differences.
+  /** @type {Map<string, number>} */
+  const shutDoors = new Map();
+  for (const { walk } of walks) for (const d of walk.knockedShut ?? []) shutDoors.set(d.door, d.status);
+  if (shutDoors.size > 0) {
+    const listed = [...shutDoors.entries()].slice(0, 6).map(([door, code]) => `${door} answered ${code}`).join(', ');
+    caveats.push(
+      `${shutDoors.size} ${shutDoors.size === 1 ? 'door the code declares was' : 'doors the code declares were'} knocked on and answered as not being there (${listed}${shutDoors.size > 6 ? ', and more' : ''}). Knocking is not walking: nothing has been proved about ${shutDoors.size === 1 ? 'it' : 'them'}, and the source and the build that ran disagree about whether ${shutDoors.size === 1 ? 'it exists' : 'they exist'}.`,
+    );
+  }
+  /** @type {Map<string, number>} */
+  const bouncedDoors = new Map();
+  for (const { walk } of walks) for (const d of walk.onlyRedirected ?? []) bouncedDoors.set(d.door, d.status);
+  if (bouncedDoors.size > 0) {
+    const all = bouncedDoors.size >= Math.max(1, opened);
+    caveats.push(
+      `${bouncedDoors.size} ${bouncedDoors.size === 1 ? 'door' : 'doors'} answered with a redirect rather than with ${bouncedDoors.size === 1 ? 'a page' : 'pages'} — ${[...bouncedDoors.entries()].slice(0, 5).map(([door, code]) => `${door} answered ${code}`).join(', ')}${bouncedDoors.size > 5 ? ', and more' : ''}. What was seen is the bounce, not what is behind it.${all ? ' EVERY door that answered did this, which is what a sign-in wall looks like from out here: this run has not been inside the product at all.' : ''}`,
     );
   }
   if (input.doors.length === 0) {
