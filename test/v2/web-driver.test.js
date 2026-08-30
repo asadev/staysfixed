@@ -22,10 +22,34 @@ import assert from 'node:assert/strict';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadPlaywright, runStep } from '../../src/v2/adapters/web-driver.js';
+import { loadPlaywright, runStep, browserNote } from '../../src/v2/adapters/web-driver.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
+
+describe('what it says about the browser it will open', () => {
+  test('it never calls the person\'s own browser a separate application', () => {
+    // The reassuring half of this sentence was said whatever was found, and the one case it
+    // matters in is the case where it is false: with no downloaded test browser anywhere,
+    // the survey falls back to the browser the person actually uses.
+    const borrowed = browserNote('1.56', 'Google Chrome', true);
+    assert.doesNotMatch(borrowed, /separate application/, 'it is not a separate application — it is theirs');
+    assert.match(borrowed, /the one you use yourself/);
+    assert.match(borrowed, /throwaway profile/, 'and it has to say their own profile is safe');
+    assert.match(borrowed, /playwright install chromium/, 'and how to stop borrowing it');
+  });
+
+  test('a real test browser is still described as the separate thing it is', () => {
+    const proper = browserNote('1.56', 'Chrome for Testing', false);
+    assert.match(proper, /separate application/);
+    assert.doesNotMatch(proper, /the one you use yourself/);
+  });
+
+  test('with its own Chromium there is nothing to explain', () => {
+    const own = browserNote('1.56', undefined, false);
+    assert.match(own, /its Chromium is downloaded/);
+  });
+});
 
 describe('a step that does nothing says so', () => {
   /** Enough of a page to prove which calls were made, and no more. */

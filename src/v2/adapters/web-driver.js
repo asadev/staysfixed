@@ -174,6 +174,8 @@ export async function loadPlaywright(opts = {}) {
   // So: ask it. Only when there is no browser on the machine at all is this a real "no".
   /** @type {string|undefined} */
   let borrowedFrom;
+  /** True when the browser found is the one the PERSON uses, not a separate one. */
+  let borrowedTheirOwn = false;
   if (!there) {
     try {
       const { surveyBrowsers } = await import('../browsers.js');
@@ -181,6 +183,7 @@ export async function loadPlaywright(opts = {}) {
       if (survey.chosen?.binary && (await exists(survey.chosen.binary))) {
         executable = survey.chosen.binary;
         borrowedFrom = survey.chosen.name;
+        borrowedTheirOwn = survey.borrowingHis === true || survey.chosen.everyday === true;
         there = true;
       }
     } catch {
@@ -206,10 +209,33 @@ export async function loadPlaywright(opts = {}) {
     chromium: mod.chromium,
     version,
     executable,
-    why: borrowedFrom
-      ? `The browser driver ${version ?? ''} is here and it will open ${borrowedFrom}, which is a separate application from the browser you use, so pages can be opened.`.trim()
-      : `The browser driver ${version ?? ''} is here and its Chromium is downloaded, so pages can be opened.`.trim(),
+    why: browserNote(version, borrowedFrom, borrowedTheirOwn),
   };
+}
+
+/**
+ * What to say about the browser a check will open.
+ *
+ * "a separate application from the browser you use" used to be said whatever was found — and
+ * the one case where that sentence matters is the case where it is false. With no downloaded
+ * test browser anywhere, the survey falls back to the person's OWN browser, and this then
+ * told them the opposite of what was about to happen. A reassurance is only worth anything
+ * if it is withheld when it is not true.
+ *
+ * Exported so the wording is a test rather than a thing somebody has to notice.
+ *
+ * @param {string|undefined} version        The driver version, if it said one.
+ * @param {string|undefined} borrowedFrom   The browser found, if one had to be borrowed.
+ * @param {boolean} borrowedTheirOwn        True when that browser is the person's own.
+ * @returns {string}
+ */
+export function browserNote(version, borrowedFrom, borrowedTheirOwn) {
+  const v = version ?? '';
+  if (!borrowedFrom) return `The browser driver ${v} is here and its Chromium is downloaded, so pages can be opened.`.trim();
+  if (borrowedTheirOwn) {
+    return `The browser driver ${v} is here and the only browser on this machine is the one you use yourself (${borrowedFrom}). It will be opened invisibly with a throwaway profile, so your own settings, cookies and tabs are never touched — but it is your browser, not a separate one. \`npx playwright install chromium\` gives checks one of their own.`.trim();
+  }
+  return `The browser driver ${v} is here and it will open ${borrowedFrom}, which is a separate application from the browser you use, so pages can be opened.`.trim();
 }
 
 /**
