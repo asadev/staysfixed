@@ -37,7 +37,7 @@ import {
 import { fingerprintFinding, waiverFor, waiversFile } from '../../src/v2/waiver.js';
 import { clusterDifferences } from '../../src/v2/cluster.js';
 import { sealIntent } from '../../src/v2/intent.js';
-import { cutReference } from '../../src/v2/reference.js';
+import { cutReference, referenceHistory } from '../../src/v2/reference.js';
 import { callTool } from '../../src/v2/mcp/tools.js';
 import { scratchDir, cleanUp } from '../support.mjs';
 
@@ -401,6 +401,30 @@ describe('shipping is the only thing that says what working means', () => {
     assert.equal(after.expired.length, 1);
     assert.equal(after.left, WAIVER_BUDGET, 'and the budget starts again, because this is a new change now');
     assert.notEqual(after.stamp, before.stamp, 'the stamp is what a waiver is pinned to, so it has to have moved');
+  });
+
+  test('six ships at once cut one reference, not several', async () => {
+    // Measured on 2026-08-30 with six real `staysfixed ship` processes started together on
+    // one project: all six reported success, FOUR of them each said "Nothing was being
+    // compared against before this" because all four had read an empty reference and none
+    // had seen the others, four records survived out of six, and the "already the reference,
+    // change nothing" path — the one that stops a release script running twice from writing
+    // history twice — never fired once. This is an MCP server; two agents shipping at the
+    // same time is the design, and the file they race on is the one that defines what
+    // "working" means.
+    const { store } = await project();
+    await saveBuild(store, { id: 'work-new', product: PRODUCT });
+    await runCheckOver(store, [], { buildId: 'work-new' });
+
+    const cuts = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        cutReference(store, { product: PRODUCT, build: 'work-new', why: '1.0.0 went out', setBy: 'ship' }),
+      ),
+    );
+
+    assert.equal(cuts.filter((c) => c.unchanged !== true).length, 1, 'exactly one of them may move what "working" means');
+    assert.equal(cuts.filter((c) => c.unchanged === true).length, 5, 'and the other five have to say nothing changed');
+    assert.equal((await referenceHistory(store, PRODUCT)).length, 1, 'one release, one entry in the history');
   });
 
   test('a waiver written before a ship no longer hides anything after it', async () => {

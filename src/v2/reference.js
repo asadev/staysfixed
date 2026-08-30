@@ -234,6 +234,82 @@ async function readJson(file, fallback) {
 }
 
 /**
+ * Read a JSON file, change it, and write it back with nobody else doing the same thing at
+ * the same time.
+ *
+ * `writeJsonAtomic` makes each individual write whole — nobody ever reads half a file. It
+ * does nothing at all about two processes READING the same file, each appending to what they
+ * read, and each writing their own version over the other's. Measured on 2026-08-30: six
+ * `staysfixed ship` commands started at once on one project, all six reported success, four
+ * of them each believed they were cutting the very first reference — and four records
+ * survived out of six. This is an MCP server. Two agents shipping at once is not an exotic
+ * case, it is the design.
+ *
+ * The lock is a directory, because creating one either succeeds or fails and never half
+ * happens, on every platform this runs on. A lock far older than any write could take is
+ * rubbish left behind by a killed process and is taken. Waiting for ever is worse than the
+ * bug, so after a long wait it is taken anyway — losing a record is bad, and a release that
+ * hangs is worse.
+ *
+ * @template T
+ * @param {string} file
+ * @param {(current: T) => T | Promise<T>} change
+ * @param {T} fallback
+ * @returns {Promise<T>}
+ */
+async function updateJsonAtomic(file, change, fallback) {
+  return await withLock(`${file}.lock`, async () => {
+    const next = await change(await readJson(file, fallback));
+    await writeJsonAtomic(file, next);
+    return next;
+  });
+}
+
+/**
+ * Do something with nobody else doing it at the same time, across processes.
+ *
+ * A directory is the lock, because creating one either succeeds or fails and never half
+ * happens, on every platform this runs on. A lock far older than the work could take is
+ * rubbish left behind by a killed process and is taken. Waiting for ever is worse than the
+ * bug it prevents, so after a long wait it is taken anyway: losing a record is bad, and a
+ * release that never returns is worse.
+ *
+ * @template T
+ * @param {string} lock
+ * @param {() => Promise<T>} work
+ * @returns {Promise<T>}
+ */
+async function withLock(lock, work) {
+  const STALE_MS = 30_000;
+  const GIVE_UP_MS = 15_000;
+  await fsp.mkdir(path.dirname(lock), { recursive: true });
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      await fsp.mkdir(lock);
+      break;
+    } catch {
+      let age = 0;
+      try {
+        age = Date.now() - (await fsp.stat(lock)).mtimeMs;
+      } catch {
+        continue; // It went away between the failure and the question. Try again.
+      }
+      if (age > STALE_MS || Date.now() - startedAt > GIVE_UP_MS) {
+        await fsp.rm(lock, { recursive: true, force: true }).catch(() => {});
+        continue;
+      }
+      await new Promise((done) => setTimeout(done, 15 + Math.floor(Math.random() * 35)));
+    }
+  }
+  try {
+    return await work();
+  } finally {
+    await fsp.rm(lock, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
  * A sortable, file-safe id for one cut.
  * @param {Date} [now]
  * @returns {string}
@@ -868,6 +944,32 @@ export async function cutReference(store, opts) {
 
   await ensureStore(store);
 
+  // ONE AT A TIME, PER PRODUCT. Everything below reads the current reference, decides
+  // whether this build is already it, moves the pointer, retires waivers and writes the log
+  // — and until 2026-08-30 nothing stopped two of them doing all of that at once.
+  //
+  // Measured: six `staysfixed ship` commands started together on one project. All six
+  // reported success. FOUR of them each said "Nothing was being compared against before
+  // this", because all four had read an empty reference and none had seen the others. Four
+  // records survived out of six, and the "already the reference, change nothing" path — the
+  // one that stops a release script running twice from writing history twice — never fired
+  // once. This is an MCP server: two agents shipping at once is the design, not an exotic
+  // case, and the file they were racing on is the one that defines what "working" means.
+  return await withLock(path.join(store.dir, `cut.${safeName(product)}.lock`), async () =>
+    cutReferenceHoldingTheLock(store, opts, product, buildId),
+  );
+}
+
+/**
+ * The cut itself, with the lock already held.
+ *
+ * @param {Store} store
+ * @param {any} opts
+ * @param {string} product
+ * @param {string} buildId
+ * @returns {Promise<ReferenceCut>}
+ */
+async function cutReferenceHoldingTheLock(store, opts, product, buildId) {
   const decision = await shouldCut(store, product, opts.build);
   if (!decision.ok && opts.force !== true) {
     throw new StaysFixedError(decision.refusal ?? decision.why, {
@@ -977,20 +1079,24 @@ function summarise(cut, name, decision) {
  */
 async function appendToLog(store, cut) {
   const file = fileIn(store, 'reference-log.json');
-  /** @type {ReferenceCut[]} */
-  const log = await readJson(file, /** @type {ReferenceCut[]} */ ([]));
-  const all = [...(Array.isArray(log) ? log : []), cut];
-
-  if (all.length > MAX_LOG_ENTRIES) {
-    const overflow = all.slice(0, all.length - MAX_LOG_ENTRIES);
-    const archiveFile = fileIn(store, 'reference-log-archive.json');
-    /** @type {ReferenceCut[]} */
-    const archive = await readJson(archiveFile, /** @type {ReferenceCut[]} */ ([]));
-    await writeJsonAtomic(archiveFile, [...(Array.isArray(archive) ? archive : []), ...overflow]);
-    await writeJsonAtomic(file, all.slice(-MAX_LOG_ENTRIES));
-    return;
-  }
-  await writeJsonAtomic(file, all);
+  const archiveFile = fileIn(store, 'reference-log-archive.json');
+  await updateJsonAtomic(
+    file,
+    async (log) => {
+      const all = [...(Array.isArray(log) ? log : []), cut];
+      if (all.length > MAX_LOG_ENTRIES) {
+        const overflow = all.slice(0, all.length - MAX_LOG_ENTRIES);
+        await updateJsonAtomic(
+          archiveFile,
+          (archive) => [...(Array.isArray(archive) ? archive : []), ...overflow],
+          /** @type {ReferenceCut[]} */ ([]),
+        );
+        return all.slice(-MAX_LOG_ENTRIES);
+      }
+      return all;
+    },
+    /** @type {ReferenceCut[]} */ ([]),
+  );
 }
 
 /**
