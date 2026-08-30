@@ -234,6 +234,25 @@ describe('init', () => {
     assert.ok(answer.plan.covers.short.length > 20, 'the paragraph an agent repeats to a person cannot be empty');
   });
 
+  test('nobody is asked for a build step on a script that runs from source', async () => {
+    // A plain Node command-line tool is recorded as "not built", because there is nothing
+    // to build — and that used to be read as "it has not been built yet", so a fresh
+    // install told its owner to go and name the command that builds a file sitting right
+    // there, which the same run had already worked out how to run. Being sent shopping for
+    // nothing is the fastest way to make somebody stop reading this page.
+    const dir = await aTinyProject('staysfixed-init-nobuild');
+    const { stdout } = await cli(['init', '--json'], { cwd: dir });
+    const answer = JSON.parse(stdout);
+    const asked = [...answer.plan.needs.person, ...answer.plan.needs.agent];
+    for (const need of asked) {
+      assert.ok(!/built$/.test(String(need.what)), `it asked for "${need.what}" on a script that runs straight from source`);
+    }
+    assert.ok(
+      answer.plan.readiness.some((/** @type {{state: string}} */ r) => r.state === 'ready'),
+      'a command-line tool it can already run has to read as ready',
+    );
+  });
+
   test('--dry-run works everything out and writes nothing', async () => {
     const dir = await aTinyProject('staysfixed-init-dry');
     const { code } = await cli(['init', '--dry-run'], { cwd: dir });

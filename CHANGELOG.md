@@ -4,6 +4,21 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-08-30
+
+Found by installing 0.7.0 from npm into an empty folder and running it the way a
+stranger would, which is the only way this was ever going to be found.
+
+### Fixed
+
+- **`init` asked for a build step on a script that runs straight from source.** A
+  plain Node command-line tool is recorded as "not built", because there is
+  nothing to build — and that was read as "it has not been built yet". So a fresh
+  install told its owner to go and name the command that builds a file sitting
+  right there, in the same breath as offering to run it. Being sent shopping for
+  nothing is the fastest way to make somebody stop reading the page, and this
+  project's README promises it never happens. A test holds it shut.
+
 ## [0.7.0] — 2026-08-30
 
 The release where the front door was found to be locked.
@@ -81,6 +96,11 @@ printed, which is the only way this kind of mistake is ever found.
 - **It reported Docker as present because the command was on the path**, on a
   machine where Docker Desktop was shut and nothing it promises would have worked.
   It asks the engine for its version now.
+- **It said an iPhone app "cannot be done here at all" on a Mac with Xcode and
+  three simulator runtimes on it.** The real reason was that this repository has
+  no iPhone app in it, which is not a limit of the machine. Those two reasons are
+  two different sentences now, and the object carries
+  `surfaces[].notInThisProject` so an agent can tell them apart too.
 - No probe in `doctor` uses a shell variable or a loop any more. One machine in
   this config reaches Windows through an OpenSSH server that hands the command down
   through a second shell, and every `$p` is expanded to nothing before the shell

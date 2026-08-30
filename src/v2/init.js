@@ -432,7 +432,17 @@ function productNeeds(product, project) {
   // A command-line program that has to be built before it can be run. This is what a product
   // nothing in package.json names looks like on a fresh clone: the source is there, the
   // program is real, and the file that would be run does not exist yet.
-  if (product.kind === 'cli' && !product.built.found) {
+  //
+  // `built.found === false` is NOT that on its own, and reading it as though it were sent a
+  // plain Node command-line tool's owner shopping for a build step it does not have. A
+  // script that runs straight from source is recorded as `found: false, how: "nothing to
+  // build — it runs from source"`, and this file used to ask a person to "name the command
+  // that builds it" about a file that was sitting right there and that the very same run
+  // had already worked out how to run. Two signals rule it out, and either is enough: the
+  // detector saying there is nothing to build, and a command already worked out for it.
+  const nothingToBuild = /nothing to build/i.test(String(product.built.how ?? ''));
+  const alreadyRunnable = Array.isArray(suggest.commands) && suggest.commands.length > 0;
+  if (product.kind === 'cli' && !product.built.found && !nothingToBuild && !alreadyRunnable) {
     const build = typeof suggest.buildWith === 'string' ? String(suggest.buildWith) : null;
     needs.push({
       what: `${product.name}, built`,
