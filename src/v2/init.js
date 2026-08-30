@@ -1807,7 +1807,21 @@ export async function run(ctx) {
   }
 
   blank();
+  // What was ANNOUNCED and what was WRITTEN have to agree. On a workspaces monorepo this
+  // said "can be checked here now" about four things — including a folder that is only a
+  // container and holds no product at all — and then wrote one settings file describing one
+  // product. Measured 2026-08-31. Everything above is what was FOUND; this says what is
+  // actually covered, and how to cover the rest.
+  const others = (result.plan?.readiness ?? [])
+    .map((/** @type {any} */ r) => String(r.product ?? ''))
+    .filter((/** @type {string} */ n, /** @type {number} */ i, /** @type {string[]} */ all) => n !== '' && all.indexOf(n) === i);
   if (result.written.length > 0) ok(`Written: ${result.written.map((f) => shortPath(f)).join(', ')}`);
+  if (others.length > 1) {
+    warn(
+      `Those settings describe ONE product. ${others.length} were found here (${others.join(', ')}), and the others are not covered by this file. ` +
+        'Run `staysfixed init` from inside each of the others to give it its own settings, and check it from there.',
+    );
+  }
   if (result.kept.length > 0) warn(`Left exactly as it was: ${result.kept.map((f) => shortPath(f)).join(', ')}`);
   for (const problem of result.problems) fail(problem);
 

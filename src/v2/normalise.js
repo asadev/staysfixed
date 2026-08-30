@@ -115,6 +115,17 @@ export const DEFAULT_RULES = [
     with: '<hex>',
   },
   {
+    id: 'asset.bundled',
+    kind: 'replace',
+    what: 'The hash in a bundler\'s own asset filename — /_next/static/chunks/main-9f2c1a.js, /assets/index-4b8e21.css, app.7d3f9a1c.js.',
+    why:
+      'A bundler renames its output whenever the source changes, so editing one line renames several files. Measured on a Next.js app: one source edit produced four extra findings, all of them chunk filenames, and the change a person actually made was underneath them. The rename is not news — the code change is, and that is reported on its own.',
+    wouldHide:
+      'A deliberate change to an asset filename, which nobody makes by hand. Deliberately narrow: the hash is only taken inside a path that a bundler owns, so a content hash anywhere else still changes and still shows — see id.hex, which leaves 32-and-longer hex alone for exactly that reason.',
+    pattern: '(/_next/static/[^"\'\\s]*?|/assets/[^"\'\\s]*?|\\b[\\w.-]+)[.-][0-9a-fA-F]{6,}(\\.(?:js|mjs|css|map))',
+    with: '$1.<asset>$2',
+  },
+  {
     id: 'id.pid',
     kind: 'replace',
     what: 'Process ids, where they are labelled as such.',
