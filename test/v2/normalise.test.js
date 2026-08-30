@@ -48,6 +48,14 @@ const CASES = {
     hides: ['your booking is 2026-01-01T09:00:00.000Z', 'your booking is 2027-06-14T09:00:00.000Z'],
     cost: 'a date the product shows on purpose, like a booking or a due date',
   },
+  'asset.bundled': {
+    quiets: ['/_next/static/chunks/main-9f2c1a4b.js', '/_next/static/chunks/main-71e0dd39.js'],
+    // What it costs: a filename where the hash-looking part is the thing that matters. Rare,
+    // because nobody writes those by hand — but a product that serves a file NAMED after a
+    // version, and renames it on purpose, would have that rename quietened.
+    hides: ['/assets/report-2024001.css', '/assets/report-2025002.css'],
+    cost: 'a built asset deliberately named by number — a yearly report, an edition — where the number is long enough to read as a build hash',
+  },
   'clock.epoch-ms': {
     quiets: ['saved 1756468802113', 'saved 1756468809882'],
     hides: ['account 1700000000001', 'account 1900000000009'],

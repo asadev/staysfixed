@@ -8,6 +8,63 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.10.0] — 2026-08-31
+
+The night the four surfaces nobody had pointed it at were pointed at it, and the biggest
+remaining lie in the coverage ledger was closed.
+
+### Fixed — the ledger said things had been checked that had not
+
+- **Knocking counted as walking.** A door counted as walked because a step said it knocked on
+  it, whatever came back. So a route the source declares and the running build answers 404 to
+  was counted as covered — and behind a sign-in wall, where every request is bounced to
+  /login, every door in the product counted as walked and the run came back clean. What
+  answered was on the record all along. **404, 405, 410 and 501** now leave the door shut and
+  say that the source and the build disagree about whether it exists. **A redirect** is walked
+  — the bounce is real behaviour — but named as a bounce, and when every door that answered
+  did it, the run says so: that is what a sign-in wall looks like from outside. **A 500 is
+  still walked**, deliberately: the route exists and it broke, which is what a check is for.
+- **A product that never started was reported as twelve regressions.** A server that will not
+  boot produces a difference at every address it used to answer at, and not one of them said
+  the server had not started. The verdict leads with the cause now.
+- **A build older than its source passed as "nothing that worked has changed".** This tool
+  runs your product and never builds it, so `node dist/server.js` runs yesterday's build
+  against today's code and compares it against a reference cut from the same stale output. It
+  says so now. Following `npm run start` down into package.json is what made it fire at all.
+
+### Added — the headline feature actually runs
+
+- **Guards run on `staysfixed check`**, and over MCP, whenever the settings give an address to
+  open. A guard that fails becomes a finding **sealed by name**, which no agent may wave
+  through. Where there is no address to open it still says so, and names the one line that
+  would change it.
+
+### Fixed — it asked for what it had already been given
+
+- **`doctor` asked every adapter with an EMPTY config** unless the settings were JSON — and
+  `init` writes JavaScript. So on almost every project it asked for the very thing the
+  settings already named, and one sentence managed to say an app was present and missing at
+  once. It reads the few values it needs out of the text now, scoped per block, without
+  running anybody's code.
+- **`ios.app` was invisible**: the lookup only ever searched for `xcworkspace`, while this
+  tool's own advice says to name the built app under `ios.app`.
+
+### Fixed — noise that buried the news
+
+- **A bundler renames its output whenever the source changes**, so one edit produced four
+  extra findings, all of them chunk filenames, with the real change underneath. Normalised
+  inside a bundler's own asset paths only — a standalone content hash still changes and still
+  shows.
+- **On a monorepo `init` announced five products and wrote settings for one.** What is
+  announced and what is written now have to agree.
+
+### Still wrong, and written down rather than hidden
+
+- `init` still names a container folder (`packages/`) as a product on a workspaces monorepo.
+- An Electron check deadlocked once with no output and could not be reproduced.
+- The Windows surface is reachable and signed in but its screen is locked, so nothing can be
+  driven there yet.
+
 ## [0.9.1] — 2026-08-30
 
 Eleven more, from the same hunt that produced 0.9.0 — the findings it had already paid for.
