@@ -517,7 +517,11 @@ function buildEscalations(product, record, verdict) {
       kind: 'no-reference',
       what: `There is no build of ${product} on record as working yet, so this run had nothing to compare against.`,
       why: 'Only you can say what "working" means, and you say it by shipping — no agent may cut that reference.',
-      todo: 'Ship once with the hook in place. From the next change onwards it is automatic and you will not see this again.',
+      // The order is said out loud because leaving it out sent people round a circle: `ship`
+      // on a build nothing has watched answers "run a check before the next release", and
+      // this line answered "you say it by shipping". Both are true and neither says which
+      // comes first. A check watches the build; shipping then blesses what was watched.
+      todo: 'Run `staysfixed check` once so there is a build to bless, then `staysfixed ship`. From the next change onwards it is automatic and you will not see this again.',
     });
   }
 
