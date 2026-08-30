@@ -4,6 +4,153 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Not released yet. Everything below is in the working tree.
+
+### Changed
+
+- **`staysfixed init` now runs version 2's setup.** It ran version 1's picture
+  setup until now. Version 2's `init` had been written and tested and was wired
+  to nothing — the command table deliberately left it out, on the grounds that
+  somebody might have `staysfixed init` in a setup script and would get a
+  different file. True, and not a reason: version 1's `init` writes settings for
+  photographing screens, which is not what this tool does any more, so a new
+  project got the wrong shape of file and was told it was set up. `init --json`
+  now answers with the fields `docs/getting-started.md` tells an agent to read —
+  `plan.project`, `plan.readiness`, `plan.needs.person`, `plan.journeys`,
+  `plan.covers.short`.
+
+- **`staysfixed check --watch` opens version 2's panel, not version 1's.** This
+  is the one flag whose meaning moved, and it is written down here because
+  nothing else said so. The panel draws what a difference engine finds —
+  journeys, wobble, findings, a verdict — where version 1's drew approved
+  pictures, which this tool no longer has. `--pictures --watch` and `--guards
+  --watch` still open version 1's panel over version 1's run, so the only person
+  whose command changed meaning is the one who typed `--watch` on its own.
+
+- **The scratch copy is cloned, not copied.** Every run works in a throwaway copy
+  of the project so it can write anywhere it likes without touching the real one,
+  and that copy used to be made byte by byte. On the project this was built
+  against — twelve gigabytes, most of it an iOS build folder — that is twelve
+  gigabytes of real disk per build and twenty-four per check, before a single
+  journey is walked. It now asks the filesystem to clone instead: on a Mac that is
+  one call per file that copies no bytes at all and shares the blocks until
+  something writes to them, and on Linux the same where the filesystem supports
+  it. Measured on that tree: **41.5 seconds and no bytes moved.** It falls back to
+  a real copy wherever cloning is not available, so a filesystem without it is
+  slower here and never wrong. Never a symlink and never a hardlink — both point
+  back at the real project, which is the one thing the copy exists to protect.
+
+### Added
+
+- **`process.skip` — folders to leave out of that copy.** A project can name
+  folders that are not worth copying, and a copy that takes over twenty seconds
+  now says so and points at the setting. **The bar is deliberately high: only
+  things regenerated on demand and read by nothing.** Anything skipped that turns
+  out to matter makes a run pass for the wrong reason, and a false pass is the one
+  failure this whole tool exists to prevent. It can only ever add to the built-in
+  list — `.git`, `.staysfixed`, `.turbo`, `.nyc_output`, `coverage`,
+  `.pytest_cache`, `__pycache__`, `.DS_Store` — because a setting that could
+  switch one of those back on would only ever make runs slower.
+
+- **`docs/settings.md` — every option, and what each surface needs on the machine.**
+  None of the roughly ninety settings keys the adapters read was written down
+  anywhere: the README said the reference "lives with the code it configures",
+  which is no help at all to somebody who is not going to read the code. Nor was
+  anything the code needs installed: the exact commands for Xcode, the iOS
+  runtime, the Android SDK and its emulator, and the two separate ways a browser
+  can be missing were all sitting in the source as `howToGet` strings and in none
+  of the documentation. It also names the things that quietly cost you coverage —
+  an Android Play Store image, which refuses root forever so the files an app
+  writes cannot be seen; a `web.start` or `http.start` that hard-codes its port; a
+  Windows desktop nobody is signed in to.
+
+- **The README now lists the silences that are still open,** beside the table of
+  the ones that were found and closed. A table of closed bugs on its own reads as
+  though nothing is left. Twelve rows, each with the file that would close it.
+
+- **`staysfixed browsers` is reachable.** It was written, tested, given a finished
+  command entry with a comment saying "wiring it up is one line" — and that line
+  was never written. README.md told people to run `npx staysfixed browsers` and
+  `npx staysfixed browsers --clean` to clear up after an interrupted run, and both
+  answered *"There is no command called browsers"*. Somebody whose disk was
+  filling with abandoned browser profiles had no way to clear them and no reason
+  to doubt the page telling them there was.
+
+### Fixed
+
+- **`staysfixed ship --version 0.14.0` printed `0.7.2` and shipped nothing.**
+  `--version` is a global flag meaning "print the tool's version", and it is also
+  one of `ship`'s own options meaning "the release that went out was called this".
+  The two lists were concatenated, the parser reads switches before values, so the
+  global one won: the release script got the tool's version number on standard
+  output, exit code 0, and no reference cut. A command's own flags now win any name
+  they share with a global one.
+
+- **`staysfixed walk --no-snap` answered "I do not know the option --no-snap".**
+  `--no-snap` — leave both windows where they are instead of putting them side by
+  side — was read by `walk` and declared by nobody. It is now in `walk`'s options
+  and in its help, so `docs/watching.md` saying both commands take every panel flag
+  is true again.
+
+- **The very first run on a project answered `ok: true` to a machine.** With no
+  build on record there is nothing to compare against, so the run proves nothing.
+  It said exactly that, in words, in the summary, and the command line exited 2 on
+  it — but `--json` and the MCP reply both carried `ok: true`, with no `blocked`
+  and none of the `NOTHING WAS ACTUALLY COMPARED` wording. An agent reads the
+  fields, not the sentence, so the two interfaces that matter most reported a pass
+  over a run that compared nothing. That is the exact failure this tool exists to
+  prevent, produced by the tool itself. `comparedNothing` fired only on
+  per-journey gaps, which a true cold start never records; it now fires on an
+  empty `reference.id` as well, and the rest of the codebase was swept for the
+  same shape — `ok` computed from "were there findings" rather than from "was
+  anything compared at all".
+
+- **The README said a fresh install pulls two packages under a megabyte.** It
+  pulls three: `playwright-core` became a runtime dependency, which is the browser
+  driver without a browser in it — about 13MB, and still nothing that takes
+  minutes. The install section now says what actually happens, including that a
+  browser already on the machine is found and used before anything is downloaded,
+  and that a project already using the full `playwright` is never asked for a
+  second copy of the same driver.
+
+- **`staysfixed check --guards-only` does not exist and never did.**
+  `docs/guards.md` had told people to run it since it was written. The flag is
+  `--guards`.
+
+- **`staysfixed rules` and `staysfixed browsers` were both named in the README and
+  neither existed.** `browsers` has been wired up; there is no `rules` command, so
+  the README now says where the rules actually are — one file,
+  `.staysfixed/rules.json`, read like any other file in a pull request.
+
+- **`--watch-width 100` is refused, not quietly widened.** `docs/watching.md` said
+  anything under 240 or over 900 was brought back to the nearest of the two. Under
+  240 is an error with a message; over 900 is brought down.
+
+- **`--profile` prints nothing on a difference-engine check.** It works on
+  `staysfixed walk` and on the version 1 picture check. The flag is accepted by the
+  new check and the timings are not kept, so `docs/watching.md` no longer claims
+  otherwise.
+
+- **`staysfixed doctor --json` does not fill the project path into its MCP wiring
+  block** — `staysfixed init --json` does. `docs/mcp.md` had said both did.
+
+- **`docs/design-v2.md` named four tools that were never used.** It is a plan
+  rather than a description and says so at the top, but it is also the only
+  per-platform prose in the repository, and it told anybody reading it that
+  Android needs Appium, UiAutomator2 and a Java runtime, iOS needs WebDriverAgent
+  and Windows needs a .NET probe built on FlaUI. None of those is used. What
+  shipped needs none of them, and the section now says so before the list rather
+  than after it.
+
+- **`--color` was accepted by every command and did nothing.** Colour is settled
+  before anything else loads, so by the time a command is parsed the answer is
+  already fixed and nothing on the command line could turn it back on. `--no-color`
+  works and always did — it is handled first thing, before the logging module
+  decides. `--color` has been taken away rather than left as a switch that turns
+  nothing on.
+
 ## [0.7.2] — 2026-08-30
 
 Found the same way as 0.7.1, one step further along: install from npm into an

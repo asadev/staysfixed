@@ -376,16 +376,17 @@ verdict reading *nothing that worked has changed*. It is arithmetically true and
 it would let a real regression through. That run comes back as **`NOTHING WAS
 ACTUALLY COMPARED`**, it is not a pass, and it exits non-zero.
 
-**The cold start is the same thing and is not yet marked the same way.** The very
+**The cold start is the same thing, and it is now marked the same way.** The very
 first run on a project — before anybody has shipped once with the hook in place —
-has no reference at all, rather than a reference with nothing in it. On the
-command line that is caught: the run says *"Nothing to compare against yet… this
-run proves nothing about what still works"* and **exits 2**. But the machine-readable
-answer still carries `ok: true`, no `blocked`, and none of the words above, on
-both `staysfixed check --json` and `staysfixed_check` over MCP. **An agent must
-read `reference.id`: an empty string means nothing was compared, whatever `ok`
-says.** It is in the open silences below, and it is the one on that list that
-matters most to an agent.
+has no reference at all, rather than a reference with nothing in it. For a while
+only the command line caught that: it said *"Nothing to compare against yet… this
+run proves nothing about what still works"* and exited 2, while `--json` and
+`staysfixed_check` over MCP both carried `ok: true` with none of those words. An
+agent reads the fields, not the sentence, so the two interfaces that matter most
+reported a pass over a run that compared nothing — the exact failure this tool
+exists to prevent, produced by the tool itself. Both now answer `ok: false` with
+**`NOTHING WAS ACTUALLY COMPARED`**. `reference.id` is still worth reading — an
+empty string means nothing was compared, whatever else a reply says.
 
 ### The silences that were found and closed
 
@@ -434,7 +435,6 @@ has to take this on trust.
 | **A folder that cannot be opened while looking for written files drops that whole subtree with no note** — "it wrote a file there" becomes "it wrote nothing". This is the same shape as two rows in the table above, in a third place. | `src/v2/adapters/process.js` — `snapshotTree` |
 | **A folder that cannot be read while looking for a website's pages drops every page behind it, silently** — the same shape again, in a fourth place. | `src/v2/adapters/web.js` — `readPageRoutes` |
 | **Two screens with the same name collapse into one.** The second is never walked, and it is not counted as an unopened door either, so it is missing from the coverage that exists to catch exactly this. | `src/v2/adapters/web.js` |
-| **The very first run on a project reads as `ok: true` to a machine.** With no reference at all there is nothing to compare against, and the words that say so are in the summary and not in a field. The command line exits 2; `--json` and the MCP reply do not say it. Read `reference.id` — empty means nothing was compared. | `src/v2/check.js` — `comparedNothing`, and `nothingToCompare` in `src/v2/cli.js` |
 | **A waiver is pinned to the first 40 differences of a finding and at most 20 of its addresses,** not to all of them. A waiver written about a three-hundred-address finding goes on matching when a difference past the fortieth turns into something else. The four gates all still hold; the pin is looser than this page said. | `src/v2/waiver.js`, `src/v2/cluster.js` |
 | **What the scratch copy leaves out is left out of *both* builds.** A product that actually needs one of those folders fails the same way twice, so there is no difference to report and the run reads clean. That is why the bar for `process.skip` is "regenerated on demand and read by nothing". | `src/v2/adapters/process.js` — `SKIP_BY_DEFAULT` |
 | **Working out what a repository makes reads at most 300 files, four folders deep, and skips any file over 2MB** — and says nothing when it hits those limits. A product it never sees is never set up and never walked, so the run is clean about something that was not in it. The 24MB ceiling in the table above is the *source reader*; this is a different, lower one. | `src/v2/detect.js` — `readSome` |
