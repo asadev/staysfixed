@@ -28,7 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { cliPath, repoRoot, scratchDir, cleanUp } from '../support.mjs';
-import { renderCheck } from '../../src/v2/mcp/tools.js';
+import { renderCheck, findingForAgent } from '../../src/v2/mcp/tools.js';
 
 /** The revision an agent asks for. */
 const PROTOCOL = '2025-06-18';
@@ -157,8 +157,57 @@ function jsonFrom(result) {
   return null;
 }
 
+describe('the class an agent reads is the class that decides', () => {
+  test('a sealed money difference never reaches an agent as ordinary', () => {
+    // Measured on 2026-08-30 on a real product with a 20% markup slipped into a price: the
+    // human text said "1 of them sealed and not yours to waive", `staysfixed_waive` refused
+    // it outright — "Nobody may wave this through on their own: it touches money" — and the
+    // JSON the agent reads carried `class: "ordinary"`. Three answers, one run.
+    const moneyFinding = {
+      id: 'f-money',
+      title: 'In what the program gives back, "GET /total / body" now has "total" reading 9.3 where it read 7.75.',
+      class: 'ordinary',
+      differences: [
+        {
+          path: 'api.GET /total.body',
+          channel: 'results',
+          kind: 'changed',
+          reference: { total: 7.75 },
+          candidate: { total: 9.3 },
+          journey: 'GET /total',
+          real: true,
+        },
+      ],
+    };
+
+    const forAgent = findingForAgent(moneyFinding);
+    assert.equal(forAgent.sealed, true, 'a price that moved is sealed');
+    assert.equal(forAgent.waivable, false, 'and no agent may wave it through');
+    assert.notEqual(forAgent.class, 'ordinary', 'so it must never still read as ordinary');
+    assert.equal(forAgent.class, 'money');
+    assert.ok(String(forAgent.sealedBecause).length > 0, 'and it has to say why in a sentence');
+  });
+
+  test('an ordinary difference is still marked waivable, or nothing could ever be accounted for', () => {
+    const plain = {
+      id: 'f-plain',
+      title: 'In what the program gives back, "GET /menu / body" now has a second item.',
+      class: 'ordinary',
+      differences: [{ path: 'api.GET /menu.body', channel: 'results', kind: 'changed', reference: {}, candidate: {}, real: true }],
+    };
+    const forAgent = findingForAgent(plain);
+    assert.equal(forAgent.sealed, false);
+    assert.equal(forAgent.waivable, true);
+  });
+});
+
 describe('a run that compared nothing is never reported to an agent as clean', () => {
-  /** The shape `check` hands the MCP renderer when there is nothing on record at all. */
+  /**
+   * The shape `check` hands the MCP renderer when there is nothing on record at all.
+   * Only the fields this decision reads are filled in; the rest of a real verdict is not
+   * what is being tested here.
+   * @type {any}
+   */
   const nothingOnRecord = {
     result: {
       ok: false,

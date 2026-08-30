@@ -880,7 +880,14 @@ async function toolCheck(ctx, input) {
         waiversLeft: accounting?.left ?? null,
         note: accounting?.note ?? null,
       },
-      findings: page,
+      // The class an agent reads has to be the class that DECIDES things, not the engine's
+      // first guess. A 20% markup on a price came back as `class: "ordinary"` here while the
+      // human text on the same run said "1 of them sealed and not yours to waive" and
+      // `staysfixed_waive` refused it outright because it touches money. An agent reading
+      // "ordinary" would reasonably believe it may wave a price change through, and would
+      // tell somebody so. `waivable` is spelled out beside it so nothing has to be inferred
+      // from a word at all.
+      findings: page.map(findingForAgent),
       aimedAt: aimed ? { surface: surface ?? 'auto', at: at ?? null, confirmed: missedTheTarget === null } : null,
       aimingWarning: missedTheTarget,
     };
@@ -925,6 +932,28 @@ async function toolCheck(ctx, input) {
   // agent, and an agent that skims past a real regression is exactly the failure
   // this whole tool exists to prevent.
   return { content: [{ type: 'text', text: body + tail }], isError: !clean };
+}
+
+/**
+ * One finding, shaped for the machine that reads it.
+ *
+ * Split out and exported because it is a DECISION, not formatting, and a decision only a
+ * running MCP server can reach is one nobody notices breaking. The class an agent reads has
+ * to be the class that decides things: a 20% markup on a price came back over MCP as
+ * `class: "ordinary"` while the human text on the same run said "1 of them sealed and not
+ * yours to waive" and `staysfixed_waive` refused it because it touches money. An agent
+ * reading "ordinary" would reasonably believe it may wave a price change through, and would
+ * say so to a person. `waivable` is spelled out beside it so nothing has to be inferred
+ * from a word at all.
+ *
+ * @param {any} f
+ * @returns {any}
+ */
+export function findingForAgent(f) {
+  const sealed = classify(f);
+  return sealed
+    ? { ...f, class: sealed.class, sealed: true, waivable: false, sealedBecause: sealed.why, sealedBy: sealed.matched }
+    : { ...f, sealed: false, waivable: true };
 }
 
 /**
