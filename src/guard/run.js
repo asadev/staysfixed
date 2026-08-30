@@ -289,7 +289,7 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
       };
     }
     const raw = error instanceof Error ? error.message : String(error);
-    return { ok: false, message: `${raw}${consoleNote(app)}` };
+    return { ok: false, message: `${explainApiSlip(raw, app.page, project)}${consoleNote(app)}` };
   } finally {
     // The losing side of the race keeps running otherwise, and a stray timer
     // holds the process open long after the run is reported.
@@ -297,6 +297,54 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
   }
 
   return { ok: true };
+}
+
+/**
+ * Turn "page.goto is not a function" into one sentence a person can act on.
+ *
+ * A guard is the first code most people write against this tool, and the object it is handed
+ * is not the shape anybody arrives expecting. Reach for a name from a browser library that is
+ * not there and JavaScript answers with its own sentence, which is true, useless, and exactly
+ * the kind of raw error this project promises never to print. The first guard written against
+ * it while proving the tool still worked failed this way.
+ *
+ * Two things it must not do, both learned by getting them wrong first:
+ *
+ *  - **Do not trust the receiver's name.** The guard above called its one parameter `page`,
+ *    so the error read `page.goto is not a function` — but the parameter holds `app`, and the
+ *    honest answer is `app.open()`. Reading that name as if it meant the page suggested
+ *    "did you mean goto()", which is the very thing they had just written.
+ *  - **Do not list every method.** An earlier version printed all thirty names on the page
+ *    handle inline. It was complete, unreadable, and it destroyed the results table it sat in.
+ *
+ * So: name the six things on `app`, say where the rest live, and stop.
+ *
+ * @param {string} raw
+ * @param {import('../types.js').PageHandle} page
+ * @param {import('../types.js').Project} project
+ * @returns {string}
+ */
+export function explainApiSlip(raw, page, project) {
+  const missing = /^(?:\w+\.)?(\w+) is not a function$/.exec(String(raw || ''));
+  if (!missing) return raw;
+  const method = missing[1];
+  const api = makeGuardApi(page, project, {});
+  const onApp = Object.keys(api).filter((k) => typeof (/** @type {any} */ (api))[k] === 'function').sort();
+  if (onApp.includes(method)) return raw;
+
+  // Only ever suggested from what `app` itself offers, and only when one name is clearly the
+  // one meant. A guess between three is worse than no guess.
+  const near = onApp.filter((n) => n.toLowerCase().includes(method.toLowerCase()) || method.toLowerCase().includes(n.toLowerCase()));
+  const browserish = /^(goto|navigate|visit|load|open|click|type|fill|press|hover|wait|screenshot|querySelector|\$)/i.test(method);
+  const meant = near.length === 1 ? ` You probably want \`app.${near[0]}()\`.`
+    : browserish ? ' To go to a page it is `app.open(\'/path\')`; anything a browser does is on `app.page`.'
+    : '';
+
+  return (
+    `This guard called \`${method}()\` on what it was handed, and there is no such thing there.${meant} ` +
+    `A guard is given one object — call it \`app\` — with ${onApp.map((n) => `\`${n}()\``).join(', ')}. ` +
+    'The whole page is `app.page`. There is a worked example in `examples/guards/`.'
+  );
 }
 
 /** A timeout, kept apart from a real error so the wording stays ours. */
