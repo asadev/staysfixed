@@ -40,6 +40,7 @@ import {
 } from '../../src/v2/adapters/isolate.js';
 import { scratchDir, cleanUp } from '../support.mjs';
 import { sweepAbandonedScratch, guardNames } from '../../src/v2/check.js';
+import { spawnServer, stopServer } from '../../src/v2/adapters/child.js';
 
 after(cleanUp);
 
@@ -401,3 +402,56 @@ describe('the guards a project has', () => {
     assert.deepEqual(await guardNames(root), []);
   });
 });
+
+describe('stopping the product, and everything the product started', () => {
+  test('a server the start command spawned as its own child is stopped too', async (t) => {
+    // A start command is run through a shell, because that is what people write. So the
+    // thing spawned is the SHELL and the server is its child — `npm run dev` is npm, which
+    // runs next, which runs node. Killing the shell left the server running, and because the
+    // shell's stdout is a pipe every survivor inherits the writing end of it, so the pipe
+    // never closed, the event loop never emptied, and `staysfixed check` printed its whole
+    // answer and then hung for ever. Measured 2026-08-30: the verdict in about thirty
+    // seconds, and the command never came back.
+    if (process.platform === 'win32') return t.skip('process groups work differently on Windows');
+
+    const dir = await scratchDir('staysfixed-stop');
+    const pidFile = path.join(dir, 'grandchild.pid');
+    // The shell starts a long-lived grandchild and then waits, which is the shape that broke.
+    const child = spawnServer(
+      `node -e 'require("fs").writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)' ${JSON.stringify(pidFile)} & wait`,
+      { cwd: dir, env: process.env },
+    );
+
+    // Wait for the grandchild to say who it is.
+    let pid = 0;
+    for (let i = 0; i < 100 && !pid; i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+      try {
+        pid = Number(await fsp.readFile(pidFile, 'utf8'));
+      } catch {
+        pid = 0;
+      }
+    }
+    assert.ok(pid > 0, 'the grandchild has to be running before this proves anything');
+    assert.equal(alive(pid), true);
+
+    await stopServer(child);
+
+    // It may take the kernel a moment to reap it.
+    for (let i = 0; i < 100 && alive(pid); i += 1) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(alive(pid), false, 'the server the start command started has to go with it');
+  });
+});
+
+/**
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}

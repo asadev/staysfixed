@@ -40,7 +40,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 
 import {
   countBucket, defineAdapter, howLongItTook, joinPath, notCovered, observation, sizeBucket,
@@ -50,6 +49,7 @@ import { copyForScratch, frozenEnvironment } from './process.js';
 import { freePort, looksDestructive, waitForServer } from './http.js';
 import { applyFreeze, prepareForShutter } from '../../freeze/index.js';
 import { settle } from '../../freeze/settle.js';
+import { spawnServer, stopServer } from './child.js';
 import {
   actOf, countRoles, flattenAria, inkOf, loadPlaywright, openWindow, parseAria, runStep, short,
   watchTheWire, whereItIs, withLimit,
@@ -537,7 +537,7 @@ export const webAdapter = defineAdapter({
       if (!verdict.safe) notes.push(verdict.why);
       else {
         const done = await new Promise((resolve) => {
-          const child = spawn(String(config.restore), { shell: true, cwd: work, env, stdio: 'ignore' });
+          const child = spawnServer(String(config.restore), { cwd: work, env, stdio: 'ignore' });
           child.on('error', () => resolve(false));
           child.on('close', (code) => resolve(code === 0));
         });
@@ -549,7 +549,7 @@ export const webAdapter = defineAdapter({
     const said = [];
     /** @type {string|null} */
     let exited = null;
-    const child = spawn(String(config.start), { shell: true, cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnServer(String(config.start), { cwd: work, env });
     child.stdout?.on('data', (c) => said.push(c));
     child.stderr?.on('data', (c) => said.push(c));
     child.on('close', (code, signal) => {
@@ -558,14 +558,14 @@ export const webAdapter = defineAdapter({
 
     const up = await waitForServer(port, { timeoutMs: config.startTimeoutMs ?? 90000, crashed: () => exited });
     if (!up.up) {
-      child.kill('SIGTERM');
+      await stopServer(child);
       return {
         build,
         root: work,
         ready: false,
         why: `${up.why} What it printed while trying: ${trimForStorage(Buffer.concat(said).toString('utf8'), 1500).text || '(nothing)'}`,
         dispose: async () => {
-          child.kill('SIGKILL');
+          await stopServer(child);
           await fsp.rm(base, { recursive: true, force: true });
         },
       };
@@ -584,9 +584,7 @@ export const webAdapter = defineAdapter({
         running.delete(build.id);
         if (!held) return;
         // Only ever the process we started ourselves.
-        held.child?.kill('SIGTERM');
-        await new Promise((r) => setTimeout(r, 400));
-        if (held.child && held.child.exitCode === null) held.child.kill('SIGKILL');
+        await stopServer(held.child);
         await fsp.rm(base, { recursive: true, force: true });
       },
     };
@@ -779,7 +777,7 @@ export const webAdapter = defineAdapter({
   },
 
   async teardown() {
-    for (const [, held] of running) held.child?.kill('SIGTERM');
+    for (const [, held] of running) await stopServer(held.child);
     running.clear();
   },
 });

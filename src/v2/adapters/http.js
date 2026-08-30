@@ -31,7 +31,6 @@
 import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import {
   defineAdapter, joinPath, notCovered, observation, sizeBucket, stableValue,
   howLongItTook, timeBucket, trimForStorage, undoOurFootprint,
@@ -40,6 +39,7 @@ import {
   compareTrees, copyForScratch, frozenEnvironment, readWatcher, snapshotTree, watcherScript,
 } from './process.js';
 import { readContract, readFileRoutes } from './source.js';
+import { spawnServer, stopServer } from './child.js';
 
 // ---------------------------------------------------------------------------
 // Headers
@@ -456,7 +456,7 @@ export const httpAdapter = defineAdapter({
         notes.push(verdict.why);
       } else {
         const result = await new Promise((resolve) => {
-          const child = spawn(String(config.restore), { shell: true, cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'] });
+          const child = spawnServer(String(config.restore), { cwd: work, env });
           /** @type {Buffer[]} */
           const err = [];
           child.stderr?.on('data', (c) => err.push(c));
@@ -483,7 +483,7 @@ export const httpAdapter = defineAdapter({
     /** @type {Buffer[]} */
     const bootOut = [];
     let exited = /** @type {string|null} */ (null);
-    const child = spawn(String(config.start), { shell: true, cwd: work, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnServer(String(config.start), { cwd: work, env });
     child.stdout?.on('data', (c) => bootOut.push(c));
     child.stderr?.on('data', (c) => bootErr.push(c));
     child.on('close', (code, signal) => {
@@ -496,11 +496,11 @@ export const httpAdapter = defineAdapter({
     });
 
     if (!up.up) {
-      child.kill('SIGTERM');
+      await stopServer(child);
       return {
         build, root: work, ready: false,
         why: `${up.why} What it printed while trying: ${trimForStorage(Buffer.concat(bootErr).toString('utf8') || Buffer.concat(bootOut).toString('utf8'), 1500).text || '(nothing)'}`,
-        dispose: async () => { child.kill('SIGKILL'); await fsp.rm(base, { recursive: true, force: true }); },
+        dispose: async () => { await stopServer(child); await fsp.rm(base, { recursive: true, force: true }); },
       };
     }
 
@@ -522,9 +522,7 @@ export const httpAdapter = defineAdapter({
         if (!held) return;
         // Only ever the process we started. Somebody else's server on this machine is
         // somebody else's business.
-        held.child.kill('SIGTERM');
-        await new Promise((r) => setTimeout(r, 500));
-        if (held.child.exitCode === null) held.child.kill('SIGKILL');
+        await stopServer(held.child);
         await fsp.rm(base, { recursive: true, force: true });
       },
     };
@@ -612,7 +610,7 @@ export const httpAdapter = defineAdapter({
 
   async teardown() {
     for (const [, held] of running) {
-      held.child.kill('SIGTERM');
+      await stopServer(held.child);
     }
     running.clear();
   },
