@@ -4,6 +4,28 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] — 2026-08-30
+
+Found the same way as 0.7.1, one step further along: install from npm into an
+empty folder, run `init`, then run `doctor` on what `init` just wrote.
+
+### Fixed
+
+- **`doctor` read the commented-out examples in a settings file as settings.**
+  `staysfixed init` comments out every option that does not apply to your
+  project rather than leaving it out, so nothing is hidden from the person
+  reading the file — and `doctor` searched the raw text. On a folder holding one
+  script and nothing else it announced *"Electron desktop apps: **Covered.** It
+  opens release/mac-arm64/Your App.app"*, and an Android app beside it, both read
+  out of comments and both false.
+
+  A surface reported as covered when nothing will ever be walked on it is the
+  worst answer this tool can give, because every clean result after it is
+  believed. Comments are taken away before anything is read out of the file now,
+  with strings respected so an address keeps its two slashes — and the file is
+  still never loaded, because a settings file may be JavaScript and doctor must
+  not run somebody's code to answer a question about their machine.
+
 ## [0.7.1] — 2026-08-30
 
 Found by installing 0.7.0 from npm into an empty folder and running it the way a

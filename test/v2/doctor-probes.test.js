@@ -22,11 +22,16 @@
  * the exact bytes the real machines sent.
  */
 
-import { test, describe } from 'node:test';
+import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
 
-import { readHostProbe } from '../../src/v2/doctor.js';
+import { readHostProbe, withoutComments, capabilities } from '../../src/v2/doctor.js';
 import { POWERSHELL_PATHS } from '../../src/v2/remote.js';
+import { scratchDir, cleanUp } from '../support.mjs';
+
+after(cleanUp);
 
 /** What github.com writes when it refuses to run a command. Verbatim, on stderr. */
 const GITHUB_REFUSAL = {
@@ -108,5 +113,84 @@ describe('what is really on the other end of an ssh host name', () => {
         `${p} is in the list remote.js will drive, so doctor has to recognise it`
       );
     }
+  });
+});
+
+describe('a commented-out example is not a product', () => {
+  /**
+   * What `staysfixed init` writes: every option that does NOT apply is commented out rather
+   * than left out, so nothing is hidden from the person reading it. Doctor reads this file
+   * as text — it must never LOAD it, because a settings file may be JavaScript and doctor
+   * must not run somebody's code to answer a question about their machine — and it used to
+   * search the raw text, examples and all.
+   */
+  const SETTINGS = [
+    '/**',
+    ' * Stays Fixed — settings for this project.',
+    ' * The options that do not apply here are commented out rather than left out.',
+    ' */',
+    'export default {',
+    '  product: "notes",',
+    '  process: {',
+    '    commands: [',
+    '      { name: "notes --help", run: "node cli.js --help" },',
+    '    ],',
+    '  },',
+    '  // web: {',
+    '  //   url: "http://localhost:3000",',
+    '  // },',
+    '  // app: {',
+    '  //   kind: "electron",',
+    '  //   binary: "release/mac-arm64/Your App.app",',
+    '  // },',
+    '  // android: {',
+    '  //   apk: "app/build/outputs/apk/debug/app-debug.apk",',
+    '  // },',
+    '};',
+    '',
+  ].join('\n');
+
+  test('the examples are taken away before anything is read out of the file', () => {
+    const real = withoutComments(SETTINGS);
+    assert.ok(!/binary/.test(real), 'a commented-out binary: is an example, not a desktop app');
+    assert.ok(!/apk/.test(real), 'and a commented-out apk: is an example, not an Android app');
+    assert.match(real, /product: "notes"/, 'while everything that is not a comment survives');
+    assert.match(real, /node cli\.js --help/);
+  });
+
+  test('an address inside a string keeps its two slashes', () => {
+    // The obvious way to strip comments is to cut at "//", and it turns every URL in
+    // somebody's settings into "http:".
+    const real = withoutComments('const a = { url: "http://localhost:3000" }; // a comment');
+    assert.match(real, /http:\/\/localhost:3000/);
+    assert.ok(!/a comment/.test(real));
+  });
+
+  test('a comment ends at the end of its line and a block comment at its close', () => {
+    assert.match(withoutComments('// gone\nkept'), /kept/);
+    assert.ok(!/gone/.test(withoutComments('// gone\nkept')));
+    assert.match(withoutComments('/* gone */ kept'), /kept/);
+    assert.ok(!/gone/.test(withoutComments('/* gone */ kept')));
+    // Line numbering is preserved, so anything that reports "line 40 of your settings"
+    // still points at line 40.
+    assert.equal(withoutComments('a\n// b\nc').split('\n').length, 3);
+  });
+
+  test('doctor reports no desktop app and no Android app for a project that only has examples of them', async () => {
+    // The whole point, end to end. On a folder holding one script, doctor announced
+    // "Electron desktop apps: Covered. It opens release/mac-arm64/Your App.app" and "An
+    // Android app is here" — both read out of commented-out lines, both false. A surface
+    // reported as covered when nothing will ever be walked on it is the worst answer this
+    // tool can give, because every clean result after it is believed.
+    const dir = await scratchDir('staysfixed-commented-out');
+    await fsp.writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: 'notes', version: '1.0.0', type: 'module', bin: { notes: 'cli.js' } }) + '\n');
+    await fsp.writeFile(path.join(dir, 'cli.js'), "console.log('hello');\n");
+    await fsp.writeFile(path.join(dir, 'staysfixed.config.js'), SETTINGS);
+
+    const caps = await capabilities({ cwd: dir, offline: true });
+    const surface = (/** @type {string} */ id) => caps.surfaces.find((s) => s.id === id);
+    assert.equal(surface('electron')?.status, 'unavailable', `doctor found a desktop app here: ${surface('electron')?.summary}`);
+    assert.equal(surface('android')?.status, 'unavailable', `doctor found an Android app here: ${surface('android')?.summary}`);
+    assert.ok(!JSON.stringify(caps).includes('Your App.app'), 'and it must not repeat an example path back as though it were a real one');
   });
 });

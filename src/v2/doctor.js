@@ -669,6 +669,59 @@ function hasModule(cwd, name) {
 }
 
 /**
+ * The settings file with everything commented out taken away.
+ *
+ * `staysfixed init` writes a settings file whose whole point is that the options which do
+ * NOT apply to your project are commented out rather than left out, so nothing is hidden
+ * from the person reading it. Doctor reads that file as TEXT — never by loading it, because
+ * a settings file may be JavaScript and doctor must not run somebody's code to answer a
+ * question about their machine — and it used to search the raw text.
+ *
+ * Which means it found the examples. On a folder containing one `cli.js` and nothing else,
+ * doctor announced "Electron desktop apps: Covered. It opens release/mac-arm64/Your App.app"
+ * and "An Android app is here", both read out of commented-out lines, and both false. A
+ * surface reported as covered when nothing will ever be walked on it is the worst answer
+ * this tool can give.
+ *
+ * Strings are respected, so an address like "http://localhost:3000" survives: the two
+ * slashes inside it are not the start of a comment.
+ *
+ * @param {string} text
+ * @returns {string}   The same text with comments blanked, line numbering unchanged.
+ */
+export function withoutComments(text) {
+  let out = '';
+  /** @type {"code"|"line"|"block"|"'"|'"'|'`'} */
+  let mode = 'code';
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (mode === 'code') {
+      if (c === '/' && next === '/') { mode = 'line'; out += '  '; i += 1; continue; }
+      if (c === '/' && next === '*') { mode = 'block'; out += '  '; i += 1; continue; }
+      if (c === "'" || c === '"' || c === '`') mode = /** @type {any} */ (c);
+      out += c;
+      continue;
+    }
+    if (mode === 'line') {
+      if (c === '\n') { mode = 'code'; out += c; continue; }
+      out += ' ';
+      continue;
+    }
+    if (mode === 'block') {
+      if (c === '*' && next === '/') { mode = 'code'; out += '  '; i += 1; continue; }
+      out += c === '\n' ? c : ' ';
+      continue;
+    }
+    // Inside a string. A backslash escapes whatever comes next, quote included.
+    if (c === '\\') { out += c + (next ?? ''); i += 1; continue; }
+    if (c === mode) mode = 'code';
+    out += c;
+  }
+  return out;
+}
+
+/**
  * Is there a desktop app in this project to check?
  *
  * Asked without running anything and without importing the project's settings.
@@ -687,7 +740,10 @@ function findDesktopApp(cwd) {
   const configFile = findConfigFile(cwd);
   if (configFile) {
     try {
-      const text = readFileSync(configFile, 'utf8');
+      // Comments taken away first. See `withoutComments`: the examples in a settings file
+      // are commented out on purpose, and reading them as settings reported a desktop app
+      // in a folder that contains one script.
+      const text = withoutComments(readFileSync(configFile, 'utf8'));
       const named = /["']?binary["']?\s*:\s*["'`]([^"'`]+)["'`]/.exec(text);
       if (named) return { where: named[1], how: 'your settings name it under app.binary' };
       if (/["']?kind["']?\s*:\s*["'`]electron["'`]/.test(text)) {
@@ -761,7 +817,9 @@ async function phoneApps(root, configFile) {
   let settings = '';
   if (configFile) {
     try {
-      settings = readFileSync(configFile, 'utf8');
+      // Comments taken away first, for the same reason `findDesktopApp` does it: a
+      // commented-out `apk:` line is an example, not an Android app.
+      settings = withoutComments(readFileSync(configFile, 'utf8'));
     } catch {
       settings = '';
     }
