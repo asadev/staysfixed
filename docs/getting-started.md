@@ -84,6 +84,13 @@ What comes back:
 `init` writes at most two files: the settings, and three lines appended to `.gitignore`. Add
 `--dry-run` to work everything out and write nothing.
 
+**Where the steps come from, today.** Each adapter reads their source and offers what it
+finds there — routes, commands, screens, message channels — and `--journeys <file>` names
+steps by hand. Harvesting their own test suite and replaying a recorded session are written
+in `src/v2/journeys/` and are **not wired into a run**: ask for `--journeys suite` or
+`--journeys recorded` and you are told so by name. Nothing quietly substitutes different
+steps and hands you a clean answer about them.
+
 ### 3. Take the first reading
 
 ```
@@ -101,7 +108,9 @@ it is the cold start, and it is over as soon as they ship once.
 ### 4. Wire it into their agent
 
 `plan.wiring.mcp` is the MCP block, with the project path already filled in. Paste it into
-their agent's MCP settings. From then on the loop is: you call `staysfixed_check`, you get
+their agent's MCP settings. It runs `staysfixed mcp`, which serves the seven difference-engine
+tools — capabilities, intent, check, explain, prove, waive, coverage. (`staysfixed mcp --v1`
+serves the older picture-checking tools instead, for anybody who wired those up before.) From then on the loop is: you call `staysfixed_check`, you get
 back only the differences, you already know what you meant to change, so the ones you did NOT
 intend are your work queue. You fix those and run again. The person is not in that loop at
 all.
@@ -212,8 +221,9 @@ watch it notice. There is a built-in version of the same idea:
 staysfixed check --selfcheck
 ```
 
-which builds eleven deliberately broken products and proves the engine still behaves on every
-one — eight breaks it must catch, three clean pairs it must stay silent about. A case that
+which builds seventeen deliberately broken products and proves the engine still behaves on
+every one — twelve breaks it must catch, four clean pairs it must stay silent about, and one
+product so unsteady that the only correct answer is that the run says nothing at all. A case that
 misbehaves is built again and run again before that counts: fail twice and it is a real
 failure; behave the second time and it comes back as **could not tell**, which is exit code 2
 and is not a pass. That exists because a corpus that can be perturbed by a busy machine is
@@ -275,7 +285,7 @@ Say these once, when someone asks how much it covers. They are permanent, they a
 | `staysfixed init --dry-run` | The same answer, writing nothing. |
 | `staysfixed check --paired` | The strongest run. Boots the old build live. |
 | `staysfixed check --json` | The everyday run. Only what changed comes back. |
-| `staysfixed check --journeys suite` | Walk the project's own test suite as journeys. |
+| `staysfixed check --journeys <file>` | Walk exactly the steps a journeys file names. |
 | `staysfixed check --against <ref>` | Compare against a tag, commit or marker. |
 | `staysfixed check --selfcheck` | Prove the engine still catches deliberate breakage. |
 | `staysfixed ship` | The build that went out is now what "working" means. |

@@ -10,24 +10,37 @@ staysfixed check --watch
 staysfixed walk --watch
 ```
 
+Watching it is most of how anybody comes to trust it. Without `--watch`, a desktop
+app under check is moved off the screen rather than opened in front of you.
+
 ---
 
 ## What the panel shows
 
-- **Every screen and every guard, in a list**, each one moving from waiting, to
-  running, to whatever it turned out to be: still the same, changed, new, or
-  broken.
-- **A thumbnail of each picture the moment it is taken**, so you see the app
-  going past even on the screens that pass.
-- **Approved, now, and the difference side by side** for anything that changed —
-  the same three pictures the HTML report gives you, without waiting for the run
-  to end.
-- **A bar per check** showing how long it took, so the slow one is obvious.
-- **Running totals and the verdict**: how many are done, how many changed, and
-  the same closing sentence the terminal prints.
+This is a product being proven unchanged, so that is what the panel draws:
 
-The terminal still prints everything it always printed. The panel is a second
-view of one run, not a replacement for the first.
+- **Every journey, in a list**, with the surface each one walks — a page, a
+  command, a screen, a message channel — moving from waiting, to running, to what
+  it turned out to be.
+- **Which build it is being measured against**, and how that build was chosen: the
+  last one you shipped, a marker you named, or the stored record from the last time
+  the old build ran.
+- **Addresses ticking up as they are watched.** That number is the size of the
+  answer: 601 addresses is a different claim from 15,000.
+- **How much wobble was measured and subtracted.** This is the number that explains
+  why the tool is quiet, and no other tool of this kind has one — it is the
+  difference between "nothing changed" and "nothing was looked at".
+- **The findings that survived**, worst first, and separately anything **newly
+  unpredictable**.
+- **What was NOT checked**, in the same window as the good news.
+- **The one or two things only a person may decide**, if there are any.
+
+The terminal still prints everything it always printed. The panel is a second view
+of one run, not a replacement for the first.
+
+`--pictures --watch` and `--guards --watch` open version 1's panel instead — the
+screens, the thumbnails and the approved-versus-now comparison — because that is
+the run they describe.
 
 ---
 
@@ -63,7 +76,7 @@ and both windows open exactly where they would have anyway.
 | --- | --- |
 | `--watch` | Open the panel. |
 | `--watch-side left` | Push the app to the left edge and put the panel on its right. The default is `right`. |
-| `--watch-width 520` | How wide the panel is, in pixels. The default is 460; anything under 240 or over 900 is brought back to the nearest of the two. |
+| `--watch-width 520` | How wide the panel is, in pixels. The default is 480; anything under 240 or over 900 is brought back to the nearest of the two. |
 | `--no-snap` | Leave both windows exactly where they are. Nothing is moved. |
 | `--no-keep-open` | Close the panel the moment the run ends. By default it stays up so you can look at what changed. |
 | `--watch-front` | Bring the panel to the front. See below for why that is not the default. |
@@ -92,15 +105,26 @@ saying no to it, so it never switches off a panel your settings file asked for.
 
 ---
 
-## It opens behind your work, on purpose
+## It comes up once, and then never takes your screen again
 
-The panel is a real window, and a window that jumps in front of what you are
-typing at the wrong moment is worse than no window at all. So it opens *behind*
-whatever you are using and keeps drawing there. Bring it forward yourself
-whenever you want to look — click it in your dock or task switcher — or start the
-run with `--watch-front` if you would rather it came forward on its own.
+The rule is not "stay hidden". An app the tool opens is *allowed* to appear, and
+should — that first appearance is how you see what is happening. **From the moment
+you pick something else, anything the tool launched loses the argument
+permanently.**
 
-This is the same rule the app being photographed already follows.
+That is enforced rather than asked for, because there is nothing to ask. An
+Electron app calls `focus()` from its own main process while it starts, a
+simulator activates when it boots, a browser activates when a window opens — none
+of it goes through this tool. The only thing that works is watching which
+application you are using and putting it back in front the moment something the
+tool started pushes in. It learns which application is yours by watching what you
+choose, never by being told, and it says nothing at all unless it actually had to
+act.
+
+The panel itself opens *behind* whatever you are using and keeps drawing there.
+Bring it forward when you want to look — click it in your dock or task switcher —
+or start the run with `--watch-front` if you would rather it came forward on its
+own.
 
 ---
 

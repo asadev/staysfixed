@@ -1,6 +1,13 @@
 /**
- * The MCP server, spoken to the way a coding agent speaks to it: a real process,
- * real JSON-RPC, over real pipes.
+ * The VERSION 1 MCP server — the picture tools — spoken to the way a coding agent
+ * speaks to it: a real process, real JSON-RPC, over real pipes.
+ *
+ * It is reached with `staysfixed mcp --v1` now. `staysfixed mcp` on its own serves the
+ * difference engine, which is what every document about this tool describes and what
+ * test/v2/mcp.test.js holds it to. This file is the promise to everybody who wired the
+ * picture tools up before that: they still work, unchanged, behind one flag. If this file
+ * ever has to be deleted, that promise is being broken and it should be a decision rather
+ * than a tidy-up.
  *
  * Two things matter more than the rest. Stdout is the protocol — one stray
  * printed word corrupts the stream and the agent's client dies with an error
@@ -46,7 +53,7 @@ const OPT_IN = ['staysfixed_approve', 'staysfixed_mark'];
 function startServer(cwd) {
   // No `stdio` option on purpose: the default is a pipe on all three, and it is
   // the only shape that guarantees the streams are there to listen to.
-  const child = spawn(process.execPath, [cliPath, 'mcp'], {
+  const child = spawn(process.execPath, [cliPath, 'mcp', '--v1'], {
     cwd,
     env: { ...process.env, NO_COLOR: '1' },
   });

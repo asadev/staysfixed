@@ -138,8 +138,10 @@ pretend otherwise.
 
 | | State |
 | --- | --- |
-| Picture checks, guards, walk, markers, flake register, MCP server | **Shipped.** Published as `staysfixed` 0.3.x and in use. |
-| `doctor` describing this machine in plain English and as JSON | **Shipped.** |
+| Picture checks, guards, walk, markers, flake register | **Shipped.** Published as `staysfixed` 0.3.x and in use. Reached from `staysfixed check --pictures` and `--guards`, and over MCP with `staysfixed mcp --v1`. |
+| The MCP server an agent wires up — seven tools, no door marked approve | **Works,** and it is what `staysfixed mcp` serves. It served version 1's picture tools until 0.7.0, which meant every word written about the engine over MCP was true of code no client could reach. |
+| `staysfixed init` reading the repository and writing settings you can read | **Works,** and it is what `staysfixed init` runs. Also wired up in 0.7.0, for the same reason. |
+| `doctor` describing this machine in plain English and as JSON | **Shipped.** Three of its probes were wrong about the machine it was run on until 0.7.0 — see [the silences](#the-silences-that-were-found-and-closed). |
 | The difference engine — the address space, normalisation, wobble subtraction, clustering, ranking, causal proof, the store, the MCP tools, the self-check corpus | **Works.** |
 | Command-line tools, libraries and HTTP servers | **Works.** |
 | Reading the contract straight out of your source — routes, exports, message channels — without running anything | **Works.** 5,785 doors read out of one desktop app in 1.4 seconds. |
@@ -155,8 +157,14 @@ pretend otherwise.
 
 `staysfixed check` is the front door for both. Version 1's flags still mean
 exactly what they meant yesterday — `--pictures`, `--guards`, `--watch` and
-`--only` reach the same code they always did. Nobody who installed this last week
-has to change anything.
+`--only` reach the same code they always did, on the settings you already have,
+and `staysfixed mcp --v1` still serves the picture tools. Nobody who installed
+this last week has to change anything.
+
+The one thing that did change: `staysfixed init` now writes settings for the
+difference engine. On a product with no screen those settings have no `app` block
+in them, and the picture commands say so plainly rather than telling you to invent
+a web address. Add an `app` block yourself if you want picture checks too.
 
 ## How it proves nothing changed
 
@@ -284,7 +292,7 @@ What this run did not check
 
   391 of the 452 ways into this product have never been walked through.
       A break behind any of them is invisible to this tool. Point a journey at
-      them, or run the project's own test suite as journeys.
+      them - name the steps in a journeys file and pass it with --journeys.
 ```
 
 A **door** is any way into your product the source declares: an HTTP route, an
@@ -332,11 +340,13 @@ ACTUALLY COMPARED`**, it is not a pass, and it exits non-zero.
 
 ### The silences that were found and closed
 
-Every one of these produced a clean-looking run while something was invisible.
-They are listed because a tool like this earns trust by naming the ways it has
-been wrong, not by claiming it never was. All five were found on 2026-08-29 and
-2026-08-30 by reading the whole engine looking for the same shape as the first
-one, and each has a case in the corpus or a test holding it shut.
+Every one of these left something invisible while the answer looked complete —
+most of them a clean-looking run, and the last four an honest-looking description
+of a machine. They are listed because a tool like this earns trust by naming the
+ways it has been wrong, not by claiming it never was. All of them were found on
+2026-08-29 and 2026-08-30 by reading the whole thing looking for the same shape
+as the first one, and each has a case in the corpus, a test, or a probe rewritten
+to ask the question a different way.
 
 | It used to | Now |
 | --- | --- |
@@ -350,6 +360,10 @@ one, and each has a case in the corpus or a test holding it shut.
 | Subtract the new build's own wobble even when the wobble had swallowed the comparison — a second run that fell over makes almost every address unsteady, everything is dropped before it is compared, and the run ends "nothing that already worked has changed" | A build that disagrees with itself about most of its own addresses gets **no verdict**: the run says NO ANSWER FROM THIS RUN, in those words, and is not a pass |
 | Keep the **first** of two facts written at one address and ignore the second, so a door that broke behind a duplicated address could never be compared with anything. The detector for this was written on day one and never called | Every walk is checked for it, and each clash is named in the coverage: which address, and what the ignored answer was |
 | Skip a folder it could not open **while looking for routes**, and every route behind it — the same bug as the one above, in a second place, still silent | Names the folder, and the routes behind it are reported as unread rather than as absent |
+| Serve version **1**'s picture tools when an agent wired up `npx staysfixed mcp` exactly as this page says to. Everything written about the difference engine over MCP was true of code no client could reach | `staysfixed mcp` serves the seven tools above. Version 1's are behind `--v1` |
+| Ask a machine `command -v powershell.exe` over ssh to find out whether Windows sits behind it — a question that answers "no" on a machine with Windows right there, because that path is added by an interactive login shell and ssh does not run one. It also read a **refusal** as an answer, so `github.com` was listed as a machine to run checks on, and as a Windows desktop | Asks the filesystem for the three places PowerShell actually lives, using the one list the code that later drives it uses. Reads standard output only, and matches the whole line, so a host that quotes your command back cannot answer for itself |
+| Name only the first eight machines in an ssh config and drop the rest without a word | Dials sixteen, and anything past that is named as not dialled rather than left out |
+| Report Docker as present because the command is on the path, on a Mac where Docker Desktop is shut and nothing it promises would work | Asks the engine for its version, and says "installed but not answering" when that is the truth |
 
 ---
 
@@ -522,6 +536,15 @@ opts in, so the agent never sees a door to push on. An agent that could bless it
 own results would edit the code, notice something moved, approve it, and report
 success, and your safety net would have become a rubber stamp.
 
+Every tool in that list also carries a short title and the protocol's own flags
+for what it does to your machine, so a client can tell a question from an action
+without reading this page: `staysfixed_capabilities`, `staysfixed_explain` and
+`staysfixed_coverage` are marked read-only, and none of the seven is marked as
+reaching the outside world, because none of them does.
+
+`staysfixed mcp` serves the tools above. The version 1 picture tools are still
+there behind `staysfixed mcp --v1` for anybody who wired those up, unchanged.
+
 Full wiring for every client: [docs/mcp.md](docs/mcp.md).
 
 ### Nothing here should need a human to read documentation
@@ -611,15 +634,35 @@ replays recorded traffic and never reaches the real world.
 
 ## Settings
 
-Everything is optional except `app`. A five-line file works, and
-`staysfixed init` writes one you can read. A `staysfixed.config.json` works too,
-with a declarative `steps` form and no functions — so a Rust, Python or Go
-project can use the tool without anybody writing JavaScript.
+**You should not have to write these.** `staysfixed init` reads the repository —
+`package.json`, the lockfile, the framework config, the folder shapes, the built
+artifacts, an `.app`, an `.xcodeproj`, a `gradlew`, a Dockerfile, the test runner,
+and every route, exported name and message channel written in the source — works
+out what the repository actually makes, and writes settings with an explanation
+beside every option. It never overwrites a file you already have. `staysfixed init
+--json` is the same answer as one object, which is what an agent should read.
 
-Two fully commented examples are in [`examples/`](examples/):
+A repository usually makes more than one thing, and a list of four is normal: one
+repository producing a desktop app, an iPhone app, an Android app and a website is
+the case this was built against.
+
+What it writes names the product and one block per kind of thing it found —
+`process` for commands, `http` for a server, `web` for a website, `electron`,
+`android`, `ios`, `windows`. **A product with no screen has no `app` block, and
+that is correct**: the picture commands (`status`, `walk`, `approve`, `mark`,
+`trace`, `check --pictures`) work by opening something and photographing it, so
+they need an `app` and say so plainly if there is not one. `staysfixed check`
+needs no `app` at all.
+
+A `staysfixed.config.json` works too, with a declarative `steps` form and no
+functions — so a Rust, Python or Go project can use the tool without anybody
+writing JavaScript.
+
+Three fully commented examples are in [`examples/`](examples/):
 [a web app](examples/staysfixed.config.web.js),
 [an Electron app](examples/staysfixed.config.electron.js), and
-[a guard](examples/guards/the-sidebar-still-collapses.js).
+[a guard](examples/guards/the-sidebar-still-collapses.js). All three are written
+for the picture check, which is the half that needs an `app`.
 
 The full reference lives with the code it configures, and the design behind all
 of it is in [docs/how-v2-works.md](docs/how-v2-works.md).
@@ -632,15 +675,26 @@ A tool that reports "nothing changed" looks exactly like a tool that is broken,
 and there is no way to tell the two apart from the outside. So:
 
 **It has to prove it still catches things.** `staysfixed check --selfcheck`
-builds twelve tiny products — each a real repository with a working commit and an
-uncommitted change on top, which is the shape an agent actually points this tool
-at — and requires the engine to behave on every one. Eight are breaks it must
-catch. Three are the other half of the same promise: pairs that must produce **no
-findings at all**, because a tool that cries wolf gets switched off, and a tool
-that is switched off catches nothing. The twelfth is the third kind, added on
-2026-08-30: a product so unsteady that the comparison is thrown away before it
-happens, where the only correct answer is that this run says **nothing** — and
-saying "nothing changed" there is the worst thing the tool can do.
+builds seventeen tiny products — each a real repository with a working commit and
+an uncommitted change on top, which is the shape an agent actually points this
+tool at — and requires the engine to behave on every one.
+
+- **Twelve are breaks it must catch**: a route that starts failing, a field
+  dropped from a reply, a different exit code, a file that is no longer written, a
+  door removed from a desktop app, a total quietly rounded, a break buried in the
+  middle of a huge output, a value that used to be steady and is now random, a
+  crash that only shows in what the program said, a charge that moved where
+  nothing in the address mentions money, a run that could only compare half of
+  itself and has to say which half, and a run whose own record could not be saved.
+- **Four are the other half of the same promise**: pairs that must produce **no
+  findings at all** — two identical builds, a product that wobbles, a build that
+  takes ten times longer, and a journey nothing could walk, which has to be named
+  as a hole rather than counted as clean. A tool that cries wolf gets switched
+  off, and a tool that is switched off catches nothing.
+- **One is the third kind**: a product so unsteady that the comparison is thrown
+  away before it happens, where the only correct answer is that this run says
+  **nothing** — and saying "nothing changed" there is the worst thing the tool can
+  do.
 
 **And it has to be honest when it cannot tell.** A case that misbehaves is built
 again from scratch and run again before that becomes an accusation. Fail twice
@@ -654,9 +708,10 @@ nothing on a busy laptop. The cause was found and removed — see
 the next machine-shaped thing to creep in lands as "nobody knows" rather than as
 a false accusation people learn to ignore. Measured on 2026-08-30: eleven of
 eleven, three times running, with the project's own suite running in parallel and
-the machine's load average between 227 and 334; and after the second sweep of
-silences, twelve of twelve, three times running, with the suite in parallel again
-and the load average between 208 and 343.
+the machine's load average between 227 and 334; then twelve of twelve after the
+second sweep of silences, three times running, with the suite in parallel again
+and the load average between 208 and 343; and finally **seventeen of seventeen**,
+with the suite in parallel, at the end of the same day.
 
 **The unstable app.** `fixtures/unstable-app` is a page built to be impossible to
 observe consistently: a clock ticking ten times a second, an endless spinner, a
@@ -729,26 +784,32 @@ Honestly, so you know before you invest an afternoon.
   when you ship. What they cannot do is read the agent's mind. The five sealed
   classes are the answer to that: in the places where being wrong is expensive,
   no judgement is accepted from any agent at all.
-- **Real phones cannot be paired.** No paired run is possible on a device in your
-  hand. Real iPhones and real Android handsets fall back to comparing against the
-  stored record, and say so out loud on every run.
-- **Native Windows cannot run two builds at once, even in principle,** because
-  Windows shows one desktop at a time.
+- **Real phones cannot be paired, and the phone surfaces are the newest thing
+  here.** No paired run is possible on a device in your hand: two builds cannot
+  exist on one handset at once. Real iPhones and real Android handsets fall back
+  to comparing against the stored record, and say so out loud on every run. The
+  emulator and the simulator are the honest answer, and both of them compare
+  against the stored record too — for Android because two emulator snapshots
+  restoring byte-identically is unproven, and for iOS because a paired run costs
+  two `xcodebuild` passes and belongs before a release rather than after every
+  edit. If you ship a phone app, ask `doctor` what it is actually covering before
+  you trust a clean result.
 - **It is not every possible state.** "Deep" means every door the code exposes and
-  every journey your suite already walks. Nothing can enumerate every state, and
-  any tool claiming otherwise is lying. The coverage ledger names the doors it has
-  never opened, so the hole is visible instead of pretended away.
+  every journey it was given. Nothing can enumerate every state, and any tool
+  claiming otherwise is lying. The coverage ledger names the doors it has never
+  opened, so the hole is visible instead of pretended away.
+- **Your own test suite is not walked for you yet.** The code that harvests a
+  project's existing tests as journeys is written and tested in
+  `src/v2/journeys/`, and nothing on the check path calls it. Ask for it —
+  `--journeys suite`, or `journeys: "suite"` over MCP — and you are told that, by
+  name, rather than being given a clean result about steps it silently chose
+  instead. Today the steps come from what each adapter reads out of your source
+  and from a journeys file you point it at.
 - **No hosted service, no dashboard, no accounts, no teams, nothing paid.** It is
   a command and a folder of files in your repository.
 - **Pictures still do not travel between operating systems.** Text is drawn
   differently on every system. Pixels are evidence now rather than the accusation,
   which makes this matter far less than it did — but it has not gone away.
-- **Phones cannot be paired, and the iPhone is not covered yet.** Android runs on
-  an emulator against the stored record, which is weaker than a paired run and
-  says so every time. The iOS simulator is designed and not built. If you ship a
-  phone app, ask `doctor` what it is actually covering before you trust a clean
-  result — it will tell you plainly rather than let a green run mean less than it
-  looks like.
 - **Native Windows shows one desktop, so two builds cannot run at once even in
   principle.** Runs are one after the other and the same-minute guarantee is
   weaker there than on any platform. If your Windows product is Electron — most

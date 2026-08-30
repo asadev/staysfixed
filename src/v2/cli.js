@@ -9,9 +9,17 @@
  * NOTHING THAT WORKED THIS MORNING MAY BREAK. Somebody installed this yesterday
  * and has `staysfixed check --guards` in a git hook. So the version 1 commands
  * are not removed, not renamed and not deprecated with a warning: the same flags
- * they always typed still reach the same code. `--pictures`, `--guards` and
- * `--watch` are the version 1 check, exactly as before. `check` with none of
- * them is the difference engine. That is the whole migration.
+ * they always typed still reach the same code. `--pictures` and `--guards` are
+ * the version 1 check, exactly as before. `check` with neither of them is the
+ * difference engine. That is the whole migration.
+ *
+ * `--watch` is the one flag that moved, and deliberately. It opens the live panel
+ * beside whatever is being checked, and that panel is now version 2's — the one
+ * built for a difference engine, which draws journeys, wobble, findings and a
+ * verdict. Version 1's panel drew approved pictures, which this tool no longer
+ * has. `--pictures --watch` and `--guards --watch` still open version 1's panel
+ * over version 1's run, so the only person whose command changed meaning is the
+ * one who typed `--watch` on its own and got a picture check they did not ask for.
  *
  * This module deliberately holds no engine logic. It parses, it delegates, and
  * it says what came back in plain English — which is the one job that has to
@@ -23,6 +31,11 @@ import { say, ok, warn, fail, blank, heading, paint, duration, setLogLevel } fro
 import { openStore } from './store.js';
 import { SHIP_COMMANDS } from './ship.js';
 import { escalationBlock, escalationsFor, productFor, writeEscalations } from './escalate.js';
+// The one reader of the panel flags, shared with version 1 so `--watch-side` cannot come
+// to mean two different things depending on which check you ran. src/cli/index.js imports
+// this file in turn; that circle is safe because nothing here touches it while either
+// module is still being evaluated.
+import { watchFlags } from '../cli/index.js';
 
 /**
  * What comes back from a check. Everything that did not change never appears
@@ -58,19 +71,37 @@ const V2_OPTIONS = [
   ['--escalations <file>', 'Write the handful of things a person has to rule on into a file, in plain English, ready to paste into a closing summary.'],
 ];
 
-/** The version 1 flags, kept working word for word. */
+/**
+ * The version 1 flags, kept working word for word — plus `snap`, which never worked
+ * anywhere.
+ *
+ * `--no-snap` is documented at the top of src/cli/check.js and read there as
+ * `ctx.flags.snap`, and it was in no command's list of known flags, so typing it got
+ * "I do not know the option --no-snap" from both `check` and `walk`. A flag that is
+ * read but never declared is worse than one that does not exist: the code that reads
+ * it looks finished.
+ */
 const V1_SPEC = {
-  booleans: ['guards', 'pictures', 'record', 'report', 'watch', 'watch-front', 'keep-open', 'profile'],
+  booleans: ['guards', 'pictures', 'record', 'report', 'watch', 'watch-front', 'keep-open', 'profile', 'snap'],
   strings: ['watch-side', 'watch-width'],
   arrays: ['only'],
 };
+
+/** @type {[string, string][]} */
+const WATCH_OPTIONS = [
+  ['--watch', 'Open a window beside what is being checked and watch it happen, live. Without this, a desktop app under check is moved off the screen rather than appearing in front of you.'],
+  ['--watch-side <side>', 'Which side of the app the window sits on: left or right. Default right.'],
+  ['--watch-width <px>', 'How wide that window is. Default 480.'],
+  ['--watch-front', 'Let the window come to the front when it opens. Off by default, on purpose.'],
+  ['--no-keep-open', 'Close the window when the check finishes instead of leaving the result up.'],
+  ['--no-snap', 'Leave both windows where they are instead of putting them side by side.'],
+];
 
 /** @type {[string, string][]} */
 const V1_OPTIONS = [
   ['--pictures', 'The version 1 picture check, unchanged.'],
   ['--guards', 'The version 1 guards, unchanged.'],
   ['--only <name>', 'Just this journey, screen or guard. Repeat it for several.'],
-  ['--watch', 'Open the version 1 panel beside your app and watch it happen.'],
 ];
 
 /**
@@ -104,16 +135,17 @@ export const V2_COMMANDS = {
 
   check: {
     summary: 'Prove nothing that already worked has changed. This is the one you run.',
-    usage: 'staysfixed check [--against <ref>] [--paired] [--journeys <source>] [--json]',
+    usage: 'staysfixed check [--against <ref>] [--paired] [--journeys <source>] [--watch] [--json]',
     describe:
-      'Runs your product through the same steps twice, compares it against the build you\nwere last happy with, subtracts anything the product disagrees with itself about,\nand reports only the differences that are left. Nothing that was already the same\nis mentioned at all — that is the point, and it is what keeps the answer short\nenough for an agent to read every word of it.\n\nSaying what you meant to change, and marking a difference as intended, are not\ndone from here. They need the files you expect to touch, and they are checked\nand counted, so they live where an agent works: the staysfixed_intent and\nstaysfixed_waive tools on the MCP server.\n\nThe version 1 picture check is still here: add --pictures, --guards or --watch\nand nothing about your old command changes.',
-    options: [...V2_OPTIONS, ...V1_OPTIONS],
+      'Runs your product through the same steps twice, compares it against the build you\nwere last happy with, subtracts anything the product disagrees with itself about,\nand reports only the differences that are left. Nothing that was already the same\nis mentioned at all — that is the point, and it is what keeps the answer short\nenough for an agent to read every word of it.\n\nSaying what you meant to change, and marking a difference as intended, are not\ndone from here. They need the files you expect to touch, and they are checked\nand counted, so they live where an agent works: the staysfixed_intent and\nstaysfixed_waive tools on the MCP server.\n\nWith --watch it opens a window beside what is being checked and draws the run as\nit happens. Nothing this tool opens is allowed to keep taking your screen: it may\ncome up once, and from the moment you pick something else it stays behind you.\n\nThe version 1 picture check is still here: add --pictures or --guards and nothing\nabout your old command changes.',
+    options: [...V2_OPTIONS, ...WATCH_OPTIONS, ...V1_OPTIONS],
     examples: [
       'staysfixed check',
       'staysfixed check --json',
       'staysfixed check --against v0.13.0',
       'staysfixed check --paired',
       'staysfixed check --surface web --at http://localhost:3000',
+      'staysfixed check --watch',
       'staysfixed check --selfcheck',
       'staysfixed check --pictures        # exactly what version 1 did',
     ],
@@ -298,7 +330,25 @@ function nameOfBuild(build) {
  * @returns {boolean}
  */
 export function wantsVersionOne(ctx) {
-  return ctx.bool('pictures') || ctx.bool('guards') || ctx.bool('watch') || ctx.bool('record');
+  return ctx.bool('pictures') || ctx.bool('guards') || ctx.bool('record');
+}
+
+/**
+ * What the person typed about the live panel.
+ *
+ * The flags themselves are read by version 1's reader, so the two checks cannot drift
+ * apart on what `--watch-side left` means. Only `--no-snap` is added here, and only
+ * because it is the one panel flag whose whole meaning is "change nothing at all" — it
+ * has to be left undefined when it was not typed, so the settings file still decides.
+ *
+ * @param {import('../cli/index.js').CliContext} ctx
+ * @returns {import('./watch/index.js').WatchFlags}
+ */
+function panelFlags(ctx) {
+  /** @type {import('./watch/index.js').WatchFlags} */
+  const wanted = { ...watchFlags(ctx) };
+  if (ctx.flags.snap !== undefined) wanted.snap = ctx.flags.snap === true;
+  return wanted;
 }
 
 /**
@@ -312,9 +362,17 @@ export function wantsVersionOne(ctx) {
  * caller in three getting a silent undefined.
  *
  * @param {import('../cli/index.js').CliContext} ctx
- * @returns {{cwd: string, configFile: string|undefined, against: string|undefined, paired: boolean, journeys: string|undefined, surface: string|undefined, at: string|undefined, only: string[]}}
+ * @returns {{cwd: string, configFile: string|undefined, against: string|undefined, paired: boolean, journeys: string|undefined, surface: string|undefined, at: string|undefined, only: string[], watch: import('./watch/index.js').WatchFlags}}
  */
 export function checkOptions(ctx) {
+  const watch = panelFlags(ctx);
+  // A window to look at and output for a script want opposite things, and one stray
+  // sentence on standard output is a JSON reply that will not parse. Saying so is better
+  // than quietly picking one.
+  if (watch.enabled === true && ctx.bool('json')) {
+    warn('--watch and --json want opposite things: a window to look at, and output a script can read. Carrying on without the window.');
+    watch.enabled = false;
+  }
   return {
     cwd: ctx.cwd,
     configFile: ctx.configFile,
@@ -324,6 +382,7 @@ export function checkOptions(ctx) {
     surface: ctx.str('surface'),
     at: ctx.str('at'),
     only: ctx.list('only'),
+    watch,
   };
 }
 
@@ -636,7 +695,7 @@ function notCheckedBlock(verdict) {
     );
     say(
       paint.grey(
-        `      A break behind ${unopened === 1 ? 'it' : 'any of them'} is invisible to this tool. Point a journey at ${unopened === 1 ? 'it' : 'them'}, or run the project’s own test suite as journeys.`,
+        `      A break behind ${unopened === 1 ? 'it' : 'any of them'} is invisible to this tool. Point a journey at ${unopened === 1 ? 'it' : 'them'} — name the steps in a journeys file and pass it with --journeys.`,
       ),
     );
   }

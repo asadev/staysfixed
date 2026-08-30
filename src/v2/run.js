@@ -31,6 +31,7 @@ import {
   subtractWobble,
   sameValue,
   indexByPath,
+  wobbleStorm,
 } from './observation.js';
 import { ensureStore, saveBuild, saveCapture, latestCapture, referenceFor, listBuilds } from './store.js';
 import { clusterDifferences } from './cluster.js';
@@ -236,6 +237,13 @@ export async function runCheck(opts) {
     // `before` says which of the two it came from, and the mode has to be recorded as it
     // happens or not at all.
     let liveWalks = 0;
+    // Which journeys really got compared against the old build, by either road. An empty
+    // `before` used to produce an empty difference list, which produced no findings, which
+    // produced "Nothing that worked has changed" — the tool's all-clear sentence, said about
+    // a run in which nothing was compared with anything. Counted here so the two can never
+    // come out of the same exit again.
+    /** @type {string[]} */
+    const comparedJourneys = [];
     /** @type {Wobble[]} */
     const wobbles = [];
     /** @type {Wobble[]} */
@@ -251,9 +259,41 @@ export async function runCheck(opts) {
       const a = await walkOnce(opts, journey, opts.candidate, 'a', 'candidate', undefined, events);
       gaps.push(...duplicateGaps(a.observations, journey));
       const b = await walkOnce(opts, journey, opts.candidate, 'b', 'candidate', undefined, events);
+      // The second pass too. A collision that only happens on the second run still eats a
+      // fact — the wobble measurement indexes by path exactly the same way — and only the
+      // first pass was ever checked.
+      gaps.push(...duplicateGaps(b.observations, journey, 'on the second run of the new build'));
       const wobble = measureWobble(a, b);
       walked.set(journey.name, { a, b, wobble });
       wobbles.push(wobble);
+      // Per journey, not only over the whole run. The share is worked out again at the end
+      // across everything, and one journey that threw its whole comparison away hides inside
+      // nine that did not: ten journeys, one of them stormy, and the merged share never gets
+      // near half. That journey's answer is gone all the same, and this is where it is said.
+      // A journey that came back with nothing at all. It IS in `walked`, so the "produced
+      // nothing" check at the end never fires for it; it compares an empty list against an
+      // empty list, finds no differences, and counts as a journey that was walked. An
+      // adapter that started, found nothing to look at and returned politely is exactly how
+      // a whole surface goes dark without one sentence being written about it.
+      if (a.observations.length === 0) {
+        gaps.push({
+          what: `"${journey.describe || journey.name}" was walked and came back with nothing at all to look at.`,
+          why:
+            `${a.note ?? 'The adapter that drives this ran and produced no observations.'} ` +
+            'An empty walk compares to an empty walk and finds no differences, which is not the same as there being none.',
+          unlockedBy: 'Run this journey on its own to see what it does. If the product really has nothing to observe here, the journey is not covering anything and should say so or go.',
+          surface: journey.surface,
+        });
+      }
+      const weather = wobbleStorm(wobble);
+      if (weather.stormy) {
+        gaps.push({
+          what: `"${journey.describe || journey.name}" could not be compared: the new build did not answer it the same way twice.`,
+          why: weather.why,
+          unlockedBy: 'Run it again on a quiet machine. If it happens twice, something in the product does not survive being started a second time.',
+          surface: journey.surface,
+        });
+      }
       say({
         type: 'journey:done',
         at: events.elapsed(),
@@ -288,6 +328,8 @@ export async function runCheck(opts) {
         // is the whole difference between a weaker answer and a wrong one.
         if (wasA.observations.some((o) => o.meta?.refused !== true)) {
           before.set(journey.name, wasA);
+          comparedJourneys.push(journey.name);
+          gaps.push(...duplicateGaps(wasA.observations, journey, 'while walking the old build'));
           referenceWobbles.push(measureWobble(wasA, wasB));
           liveWalks += 1;
           continue;
@@ -304,6 +346,14 @@ export async function runCheck(opts) {
         });
       }
       const stored = await storedReference(opts.store, reference.id, journey.name);
+      for (const problem of stored.problems) {
+        gaps.push({
+          what: `Part of the old build's record of "${journey.describe || journey.name}" could not be read.`,
+          why: problem,
+          unlockedBy: 'Run a paired check, which walks the old build live rather than reading a record, or ship again to cut a fresh reference.',
+          surface: journey.surface,
+        });
+      }
       if (!stored.capture) {
         gaps.push({
           what: `The journey "${journey.describe || journey.name}" has never been walked against ${nameOf(reference)}.`,
@@ -314,6 +364,20 @@ export async function runCheck(opts) {
         continue;
       }
       before.set(journey.name, stored.capture);
+      comparedJourneys.push(journey.name);
+      gaps.push(...duplicateGaps(stored.capture.observations, journey, 'in the stored record of the old build'));
+      // A torn record of the old build is missing addresses, and every one of them reads as
+      // an address that has just APPEARED in the new build. The candidate's own torn captures
+      // were already reported; the reference's never were, and it is the side whose absences
+      // turn into findings.
+      if (stored.capture.complete === false) {
+        gaps.push({
+          what: `The stored record of "${journey.describe || journey.name}" against ${nameOf(reference)} was read back torn.`,
+          why: `${stored.capture.note ?? 'The run that wrote it stopped partway.'} Part of what the old build did is missing from it, so anything in that part looks like something the new build has just invented.`,
+          unlockedBy: 'Run a paired check, which walks the old build live instead of trusting the record, or ship again to cut a fresh reference.',
+          surface: journey.surface,
+        });
+      }
       // The rules stamp exists so a run can notice this, and until 2026-08-30 nothing ever
       // read it. A stored capture normalised under one set of rules compared against a fresh
       // one normalised under another produces differences that are about the RULES — either a
@@ -334,6 +398,12 @@ export async function runCheck(opts) {
     }
 
     stop();
+    // Booting the old build is not the same as having walked it. When every live walk came
+    // back holes-only — a built artifact that no checkout of the old commit contains — the
+    // run falls back to the stored record, and calling that a paired run would be the
+    // report's single most misleading sentence. See the gap pushed in the walk loop.
+    const walkedLive = liveWalks > 0;
+    const mode = /** @type {'paired'|'stored-record'} */ (walkedLive ? 'paired' : 'stored-record');
     const wobble = wobbles.length > 0 ? mergeWobble(wobbles) : unmeasuredWobble(opts.candidate.id, '*');
     say({
       type: 'wobble',
@@ -345,7 +415,23 @@ export async function runCheck(opts) {
           : `${wobble.unstable.length} ${plural(wobble.unstable.length, 'address', 'addresses')} this build cannot answer the same way twice. Subtracted, not counted.`,
     });
 
-    await remember(opts, walked);
+    // Things the closing paragraph owes the reader that are not findings and not coverage.
+    // The paragraph is what a person reads and what an agent quotes; a fact that only lands
+    // in the gap list is a fact most readers will never meet.
+    /** @type {string[]} */
+    const runNotes = [];
+    const kept = await remember(opts, walked);
+    if (kept.why) {
+      runNotes.push(
+        `WHAT THIS RUN SAW WAS NOT SAVED: ${kept.why} The answer here still stands — everything was walked and compared — but nothing reached the disk, so the next check will report these journeys as never having been walked.`,
+      );
+      gaps.push({
+        what: 'What this run saw was NOT saved, so the next run has nothing from today to compare against.',
+        why: `${kept.why} The answer below is still good — everything was walked and compared — but none of it reached the disk, so the next check will report these journeys as never having been walked.`,
+        unlockedBy: 'Free some disk space, or fix the permissions on the .staysfixed folder, and run the check again.',
+      });
+      say({ type: 'note', at: events.elapsed(), message: `This run could not be saved. ${kept.why}` });
+    }
 
     // Nothing on record to compare against. That is the cold start on any
     // product that has not been shipped once with the hook in place, and it is
@@ -361,7 +447,54 @@ export async function runCheck(opts) {
         noise: 0,
         newlyUnstable: [],
         coverage: foldCoverage(walked, journeys, gaps),
-        summary: `Nothing to compare against yet: no build of ${opts.product} is on record as working. This run has been kept, so the next one has something to measure against. ${NO_REFERENCE_WARNING}`,
+        summary: [
+          `Nothing to compare against yet: no build of ${opts.product} is on record as working.`,
+          // "This run has been kept" was said unconditionally, including on the runs where
+          // it had not been. On a cold start that sentence is the entire value of the run.
+          kept.kept
+            ? 'This run has been kept, so the next one has something to measure against.'
+            : opts.remember === false
+              ? 'It was not asked to keep this run, so the next one will start from nothing as well.'
+              : 'AND IT COULD NOT BE KEPT, so the next run will start from nothing as well.',
+          NO_REFERENCE_WARNING,
+          ...runNotes,
+        ].join(' '),
+        startedAt,
+        started,
+        events,
+      });
+    }
+
+    // There IS a build on record as working, and not one journey could be put beside it.
+    //
+    // Every road out of the loop above that fails — the old build had no record for this
+    // journey, or it was booted and there was nothing in it to run — ends in `continue`, and
+    // an empty `before` map makes an empty difference list, no findings, ok: true, and the
+    // sentence "Nothing that worked has changed." That sentence is this tool's whole promise
+    // and it was being said about a run that compared nothing with anything. It is the same
+    // shape as the wobble storm: not a pass, not a failure, no answer.
+    if (comparedJourneys.length === 0) {
+      const why =
+        `NO ANSWER FROM THIS RUN. None of the ${journeys.length} ${plural(journeys.length, 'journey', 'journeys')} could be put beside ${nameOf(reference)}: ` +
+        `there is no record of the old build doing any of them, and it could not be booted and walked either. ` +
+        `Nothing was compared with anything, so this run says nothing at all about whether the product still works — which is not the same as it being fine. ` +
+        `The coverage list below names each journey and what is missing for it.`;
+      gaps.push({
+        what: 'Nothing at all was compared on this run.',
+        why: `${journeys.length} ${plural(journeys.length, 'journey was', 'journeys were')} walked against the new build, and none of them had anything on the old build's side to be compared against.`,
+        unlockedBy: 'Run a paired check so the old build is built and walked here, or ship once with the reference hook in place so a record exists.',
+      });
+      return finish(opts, {
+        ok: false,
+        mode,
+        modeWarning: modeWarning(mode, walkedLive, reference),
+        reference,
+        findings: [],
+        real: 0,
+        noise: 0,
+        newlyUnstable: [],
+        coverage: foldCoverage(walked, journeys, gaps),
+        summary: [why, ...runNotes].join(' '),
         startedAt,
         started,
         events,
@@ -371,10 +504,19 @@ export async function runCheck(opts) {
     // 4 — compare, then subtract the noise.
     /** @type {Difference[]} */
     const raw = [];
+    // The addresses that really were put side by side. `wobble.steady` used to stand in for
+    // this in the closing sentence, and it is a different number: it counts what the NEW
+    // build answered the same way twice, whether or not the old build had anything to say
+    // about it. On a run where nine journeys of ten had no record, the summary still quoted
+    // every address the new build produced and read like a full comparison.
+    /** @type {Set<string>} */
+    const comparedAddresses = new Set();
     for (const journey of journeys) {
       const was = before.get(journey.name);
       const is = walked.get(journey.name);
       if (!was || !is) continue;
+      for (const o of was.observations) comparedAddresses.add(`${journey.name} ${o.path}`);
+      for (const o of is.a.observations) comparedAddresses.add(`${journey.name} ${o.path}`);
       raw.push(...diffCaptures(was, is.a));
     }
     const subtraction = subtractWobble(raw, wobble, {
@@ -404,12 +546,6 @@ export async function runCheck(opts) {
     // does too is dropped silently and counted. That silence is the point: it is
     // what keeps this list short enough to read every word of.
     let survivors = subtraction.real;
-    // Booting the old build is not the same as having walked it. When every live walk came
-    // back holes-only — a built artifact that no checkout of the old commit contains — the
-    // run fell back to the stored record above, and calling that a paired run would be the
-    // report's single most misleading sentence. See the gap pushed in the walk loop.
-    const walkedLive = liveWalks > 0;
-    const mode = /** @type {'paired'|'stored-record'} */ (walkedLive ? 'paired' : 'stored-record');
     let provedLive = walkedLive;
     // How many suspicions the old build turned out to have as well. Naming this
     // number is what makes the short list believable: it says how much work the
@@ -480,7 +616,11 @@ export async function runCheck(opts) {
       coverage: foldCoverage(walked, journeys, gaps),
       summary:
         (subtraction.couldNotTell === true ? `NO ANSWER FROM THIS RUN. ${subtraction.couldNotTellWhy} ` : '') +
-        summarise(ranked.findings, subtraction, wobble, warning, ranked.notes, reference, provedLive, dropped),
+        summarise(ranked.findings, subtraction, warning, [...runNotes, ...ranked.notes], reference, provedLive, dropped, {
+          compared: comparedJourneys.length,
+          asked: journeys.length,
+          addresses: comparedAddresses.size,
+        }),
       startedAt,
       started,
       events,
@@ -518,14 +658,20 @@ export async function runCheck(opts) {
 export async function resolveReference(store, product, against) {
   if (against) {
     const wanted = against.trim();
-    const builds = await listBuilds(store, { product });
+    /** @type {string[]} */
+    const skipped = [];
+    const builds = await listBuilds(store, { product, onProblem: (m) => skipped.push(m) });
     const hit = builds.find((b) => namesBuild(b.fingerprint, wanted));
     if (!hit) {
+      // Saying "nothing on record matches" while a build folder was skipped for being
+      // unreadable is an answer that sounds certain and is not. The skipped ones are named,
+      // because one of them may well be the build being asked for.
+      const couldNotRead = skipped.length > 0 ? ` ${skipped.length} build ${skipped.length === 1 ? 'folder was' : 'folders were'} skipped and one of them may be the one you mean: ${skipped.join(' ')}` : '';
       throw new StaysFixedError(`Nothing on record matches "${against}", so there is nothing to compare against.`, {
         hint:
-          builds.length === 0
+          (builds.length === 0
             ? 'No builds of this product have been stored yet. Run a check once to store one.'
-            : `Builds on record: ${builds.slice(0, 8).map((b) => nameOf(b.fingerprint)).join(', ')}.`,
+            : `Builds on record: ${builds.slice(0, 8).map((b) => nameOf(b.fingerprint)).join(', ')}${builds.length > 8 ? `, and ${builds.length - 8} more` : ''}.`) + couldNotRead,
       });
     }
     return hit.fingerprint;
@@ -557,20 +703,26 @@ function namesBuild(build, wanted) {
  * @param {Store} store
  * @param {string} buildId
  * @param {string} journey
- * @returns {Promise<{capture: Capture|null, wobble: Wobble|null}>}
+ * @returns {Promise<{capture: Capture|null, wobble: Wobble|null, problems: string[]}>}
  */
 async function storedReference(store, buildId, journey) {
-  const a = (await latestCapture(store, { buildId, journey, run: 'a' })) ?? (await latestCapture(store, { buildId, journey }));
-  if (!a) return { capture: null, wobble: null };
-  const b = await latestCapture(store, { buildId, journey, run: 'b' });
-  if (!b || b.id === a.id) return { capture: a, wobble: null };
+  /** @type {string[]} */
+  const problems = [];
+  /** @param {string} m */
+  const onProblem = (m) => problems.push(m);
+  const a =
+    (await latestCapture(store, { buildId, journey, run: 'a', onProblem })) ??
+    (await latestCapture(store, { buildId, journey, onProblem }));
+  if (!a) return { capture: null, wobble: null, problems };
+  const b = await latestCapture(store, { buildId, journey, run: 'b', onProblem });
+  if (!b || b.id === a.id) return { capture: a, wobble: null, problems };
   try {
-    return { capture: a, wobble: measureWobble(a, b) };
+    return { capture: a, wobble: measureWobble(a, b), problems };
   } catch {
     // Two captures of different builds or journeys got into the same folder.
     // Losing the steadiness measurement is a shame; failing the run over it
     // would be worse.
-    return { capture: a, wobble: null };
+    return { capture: a, wobble: null, problems };
   }
 }
 
@@ -588,11 +740,14 @@ async function storedReference(store, buildId, journey) {
  *
  * @param {Observation[]} observations
  * @param {Journey} journey
+ * @param {string} [where]  Which pass this was, when it was not the first walk of the new
+ *                          build — the same clash on the old build's record means something
+ *                          different to the reader and has to say so.
  * @returns {CoverageGap[]}
  */
-export function duplicateGaps(observations, journey) {
+export function duplicateGaps(observations, journey, where = '') {
   return findDuplicatePaths(observations).map((clash) => ({
-    what: `Two different answers were written down at the same address, ${clash.path}, while walking "${journey.describe || journey.name}".`,
+    what: `Two different answers were written down at the same address, ${clash.path}, while walking "${journey.describe || journey.name}"${where ? ` ${where}` : ''}.`,
     why:
       `Only the first is kept, so ${clash.values.slice(1).map((v) => JSON.stringify(v)).join(' and ')} ` +
       `${clash.values.length > 2 ? 'were' : 'was'} never compared against anything at all. Whatever produced that address is giving one name to more than one thing.`,
@@ -728,19 +883,26 @@ export function proveAgainstLive(suspicions, live, now) {
  *
  * @param {CheckRun} opts
  * @param {Map<string, {a: Capture, b: Capture}>} walked
- * @returns {Promise<boolean>}
+ * @returns {Promise<{kept: boolean, why: string}>}  `why` is empty when it worked, and empty
+ *   when nobody asked for it to be kept. It carries a sentence only when it was asked for
+ *   and failed, because that is the only case anybody has to be told about.
  */
 async function remember(opts, walked) {
-  if (opts.remember === false) return false;
+  if (opts.remember === false) return { kept: false, why: '' };
   try {
     await saveBuild(opts.store, opts.candidate, { captures: walked.size * 2 });
     for (const { a, b } of walked.values()) {
       await saveCapture(opts.store, a);
       await saveCapture(opts.store, b);
     }
-    return true;
-  } catch {
-    return false;
+    return { kept: true, why: '' };
+  } catch (e) {
+    // The doc above has always said a full disk is a reason to SAY SO. It was not: the
+    // failure was swallowed here and the one caller threw the answer away, so a run whose
+    // captures never reached the disk looked exactly like one whose captures did — and the
+    // next run, finding no record, reported the whole product as never having been walked.
+    // His disk hit zero bytes on 2026-08-30, so this is not a thought experiment.
+    return { kept: false, why: messageOf(e) };
   }
 }
 
@@ -804,24 +966,47 @@ function warningGaps(mode, provedLive) {
  *
  * @param {Finding[]} findings
  * @param {import('./types.js').WobbleSubtraction} subtraction
- * @param {Wobble} wobble
  * @param {string|undefined} warning
  * @param {string[]} notes
  * @param {BuildFingerprint} reference
  * @param {boolean} provedLive
  * @param {number} dropped   Suspicions the old build turned out to have as well.
+ * @param {{compared: number, asked: number, addresses: number}} how   How much of the run
+ *   this sentence covers: journeys that had an old-build side, journeys asked for, and the
+ *   addresses really put side by side.
  * @returns {string}
  */
-function summarise(findings, subtraction, wobble, warning, notes, reference, provedLive, dropped) {
+function summarise(findings, subtraction, warning, notes, reference, provedLive, dropped, how) {
   const against = provedLive ? `${nameOf(reference)}, run live` : `the stored record of ${nameOf(reference)}`;
   const parts = [];
-  if (findings.length === 0) {
-    parts.push(`Nothing that worked has changed. ${wobble.steady} ${plural(wobble.steady, 'address', 'addresses')} checked against ${against}.`);
+  // How much of the run this sentence is actually about. A run that compared four of its
+  // seventeen journeys is not a run that found nothing; it is a run that mostly did not look,
+  // and the first sentence is the only one some readers get.
+  const missed = how.asked - how.compared;
+  const reach =
+    missed > 0
+      ? ` ${how.compared} of ${how.asked} journeys had anything on the old build's side to be compared against; the other ${missed} ${plural(missed, 'was', 'were')} not compared at all, and ${plural(missed, 'is', 'are')} named in the coverage list.`
+      : '';
+  if (findings.length === 0 && subtraction.newlyUnstable.length > 0) {
+    // Findings and newly unpredictable addresses are two different lists, and only the first
+    // one was ever in the headline. A run with no findings and four addresses that have
+    // stopped sitting still opened with "Nothing that worked has changed", which is the
+    // sentence somebody stops reading after — while `ok` was false and the reason sat three
+    // sentences down. Reported on 2026-08-30 as the tool announcing all-clear over a verdict
+    // that needed a person.
+    const n = subtraction.newlyUnstable.length;
+    parts.push(
+      `Nothing behaves differently, but ${n} ${plural(n, 'address', 'addresses')} that used to give the same answer every time ${plural(n, 'does', 'do')} not any more. ` +
+        `That is a change too: something is now unpredictable that was not. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} compared against ${against}.${reach}`,
+    );
+  } else if (findings.length === 0) {
+    parts.push(`Nothing that worked has changed. ${how.addresses} ${plural(how.addresses, 'address', 'addresses')} checked against ${against}.${reach}`);
   } else {
     const sealed = findings.filter((f) => f.sealed).length;
     parts.push(
       `${findings.length} ${plural(findings.length, 'thing behaves', 'things behave')} differently, checked against ${against}.` +
-        (sealed > 0 ? ` ${sealed} of them ${plural(sealed, 'is', 'are')} in a class nobody may wave through.` : ''),
+        (sealed > 0 ? ` ${sealed} of them ${plural(sealed, 'is', 'are')} in a class nobody may wave through.` : '') +
+        reach,
     );
   }
   parts.push(subtraction.note);

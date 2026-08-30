@@ -126,7 +126,15 @@ Ranked, because this is the real workload question:
 4. **The agent exploring one named gap** and freezing it into a replayable file.
 5. Never a person clicking through an app.
 
-`--journeys <source>` picks: `suite`, `code`, `recorded`, or a path to a file.
+`--journeys <source>` picks between them — and **two of those five are written and
+not wired.** What a run actually walks today is (1), plus a journeys file you name:
+each adapter reads your source and offers what it finds there, and `--journeys
+<file>` names steps by hand. The suite harvest and session replay live in
+`src/v2/journeys/` with tests around them, and nothing on the check path calls
+them; ask for `--journeys suite` or `--journeys recorded` and you are told that by
+name rather than handed a clean result about steps something else chose. Saying so
+is the point: a feature that exists in the repository and not in the run is not a
+feature you have.
 
 ---
 
@@ -382,8 +390,7 @@ It carries:
   and got worse will not show. Running the new build twice recovers half of this
   by flagging anything newly unstable. Only half. This is the sharpest weakness
   in the architecture.
-- **"Deep" means every door the code exposes and every journey the suite already
-  walks.** Not every possible state — nothing can enumerate that, and any tool
+- **"Deep" means every door the code exposes and every journey it was given.** Not every possible state — nothing can enumerate that, and any tool
   claiming otherwise is lying. The coverage ledger names the doors it never
   opened, so the hole is visible instead of pretended away.
 - **Real phones cannot be paired.** No paired run is possible on a device in your

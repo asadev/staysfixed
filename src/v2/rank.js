@@ -111,6 +111,20 @@ const CHANNEL_WEIGHT = {
 };
 
 /**
+ * How far a finding sits from the edit, and — when the answer is "we do not know" — WHICH
+ * kind of not knowing it is. Three different states used to arrive as one `null`:
+ * nothing names the finding's source, the file is known and the edit never reaches it, and
+ * the graph was never built. Only the middle one is a side effect, and it is the loudest
+ * signal this tool has.
+ *
+ * @typedef {object} HowFar
+ * @property {number|null} distance  Hops from the nearest changed file, or null.
+ * @property {boolean} beyond        The source file is in this project and no path of at
+ *                                   most `maxHops` imports leads to it from anything changed.
+ * @property {string} [beyondFile]   Which file, so the sentence can name it.
+ */
+
+/**
  * @typedef {object} ChangedHunk
  * @property {string} file        Repo-relative, the "after" side.
  * @property {string} header      The hunk header line, exactly as git wrote it.
@@ -130,6 +144,13 @@ const CHANNEL_WEIGHT = {
  * @property {ChangedHunk[]} hunks
  * @property {string} patch        The whole working diff, as one patch.
  * @property {string} root         Absolute repo root.
+ * @property {boolean} [patchUnread]  True when git could not hand the working diff over at
+ *                                    all — it timed out, or the diff was larger than the
+ *                                    buffer set aside for it. `hunks` and `patch` are then
+ *                                    empty for a reason that is NOT "nothing changed", and
+ *                                    everything downstream has to be told which of the two
+ *                                    it is looking at.
+ * @property {string} [patchUnreadWhy]
  */
 
 /**
@@ -157,31 +178,51 @@ export async function rankFindings(findings, opts) {
     );
   }
 
+  if (changed.patchUnread === true) {
+    notes.push(
+      `${changed.patchUnreadWhy ?? 'git could not hand over the working diff.'} So the list of files you changed is being used, but the individual changes inside them are not known here — and nothing can be proved by undoing one of them until git can hand the diff over.`,
+    );
+  }
+
+  const hops = opts.maxHops ?? MAX_HOPS;
   const seeds = [...changed.files, ...changed.untracked].map((f) => path.resolve(changed.root, f));
   /** @type {Map<string, number>} */
   let distances = new Map();
+  /** @type {Set<string>} */
+  let known = new Set();
   if (seeds.length > 0) {
     const graph = await importGraph(changed.root);
+    known = new Set(graph.files);
     if (graph.truncated) {
       notes.push(
-        'This project has more source files than the distance measure will walk, so some findings say their distance is unknown.',
+        `This project has more than ${MAX_FILES} source files, which is as many as the distance measure will walk, so some findings say their distance is unknown.`,
       );
     }
-    distances = distancesFrom(graph.neighbours, seeds, opts.maxHops ?? MAX_HOPS);
-  } else if (changed.ok) {
+    if (graph.tooBig.length > 0) {
+      notes.push(
+        `${graph.tooBig.length} source ${graph.tooBig.length === 1 ? 'file was' : 'files were'} too large to read for the distance measure (over ${Math.round(MAX_FILE_BYTES / 1000)}KB): ${graph.tooBig.slice(0, 3).join(', ')}${graph.tooBig.length > 3 ? ', and others' : ''}. Anything only they import looks unconnected to your edit, so it may be ranked lower than it deserves.`,
+      );
+    }
+    if (graph.unreadable.length > 0) {
+      notes.push(
+        `${graph.unreadable.length} source ${graph.unreadable.length === 1 ? 'file' : 'files'} could not be opened for the distance measure: ${graph.unreadable.slice(0, 3).join(', ')}. The same warning applies — what they import looks unconnected.`,
+      );
+    }
+    distances = distancesFrom(graph.neighbours, seeds, hops);
+  } else if (changed.ok && changed.patchUnread !== true) {
     notes.push('Nothing in the working tree has changed, so none of this can be blamed on an edit you just made.');
   }
 
   const ranked = findings.map((finding) => {
     const sealedClass = classOf(finding, guards);
-    const distance = distanceFor(finding, distances, changed.root, opts.touches ?? {});
+    const how = distanceFor(finding, distances, changed.root, opts.touches ?? {}, known);
     /** @type {Finding} */
     const out = {
       ...finding,
       class: sealedClass,
       sealed: sealedClass !== 'ordinary',
-      rank: scoreOf(finding, sealedClass, distance),
-      why: explain(finding, sealedClass, distance, seeds.length > 0),
+      rank: scoreOf(finding, sealedClass, how),
+      why: explain(finding, sealedClass, how, seeds.length > 0, hops),
     };
     const near = nearestFiles(finding, distances, changed.root);
     if (near.length > 0) out.nearFiles = near;
@@ -216,33 +257,78 @@ export function classOf(finding, guards) {
     ...journeysOf(finding),
   ].join(' \n ');
 
+  // The VALUES as well, and this is the half that was missing.
+  //
+  // The doc above this function has always said the words are matched against everything the
+  // finding says about itself. They were not: only its addresses and the sentences written
+  // about it. A finding's title carries at most the first seventy characters of the value, so
+  // a stack trace whose "fatal" is on line four, or a request body whose "currency" comes
+  // after a long url, said nothing at all — and a crash, a charge or a sign-in that changed
+  // was filed `ordinary`, which is precisely the class an agent is allowed to wave through
+  // on its own. Every one of the five sealed classes was blind in the same place.
+  //
+  // Nothing is truncated here and nothing is sampled. A cap would put the blindness back in a
+  // new place, and the cost is one pass over values that have already been normalised, stored
+  // and diffed several times over.
+  /** @type {string[]} */
+  const values = [];
+  for (const d of finding.differences) {
+    if (d.reference !== undefined) values.push(asText(d.reference));
+    if (d.candidate !== undefined) values.push(asText(d.candidate));
+  }
+  /** @param {RegExp} rx */
+  const says = (rx) => rx.test(haystack) || values.some((v) => rx.test(v));
+
   const channels = new Set(finding.differences.map((d) => d.channel));
   for (const name of guards) {
-    if (name && haystack.toLowerCase().includes(name.toLowerCase())) return 'guard';
+    if (!name) continue;
+    const wanted = name.toLowerCase();
+    if (haystack.toLowerCase().includes(wanted)) return 'guard';
+    if (values.some((v) => v.toLowerCase().includes(wanted))) return 'guard';
   }
   if (finding.differences.some((d) => splitPath(d.path)[0] === 'guard')) return 'guard';
-  if (channels.has('complaints') && CRASH.test(haystack)) return 'crash';
-  if (DATA_LOSS_ALWAYS.test(haystack)) return 'data-loss';
+  if (channels.has('complaints') && says(CRASH)) return 'crash';
+  if (says(DATA_LOSS_ALWAYS)) return 'data-loss';
   // The softer words — "delete", "migrate" — only seal when something actually
   // went out or came back. A button labelled Delete that changed colour is not a
   // data-loss incident, and treating it as one is how a safety net gets ignored.
   if (
-    DATA_LOSS_IN_EFFECTS.test(haystack) &&
+    says(DATA_LOSS_IN_EFFECTS) &&
     (channels.has('effects') || channels.has('results') || channels.has('contract'))
   ) {
     return 'data-loss';
   }
-  if (MONEY.test(haystack)) return 'money';
-  if (SIGN_IN.test(haystack)) return 'sign-in';
+  if (says(MONEY)) return 'money';
+  if (says(SIGN_IN)) return 'sign-in';
   return 'ordinary';
+}
+
+/**
+ * One observed value as searchable text.
+ *
+ * A string is itself; anything else is its JSON, so a word inside a nested body is found the
+ * same way as a word in a log line. A value that cannot be turned into JSON — which nothing
+ * that reached here should be, since observations are validated at birth — comes back as the
+ * empty string rather than taking the run down over a sealing check.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function asText(value) {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return '';
+  }
 }
 
 /**
  * @param {Finding} finding
  * @param {FindingClass} sealedClass
- * @param {number|null} distance
+ * @param {HowFar} how
  */
-function scoreOf(finding, sealedClass, distance) {
+function scoreOf(finding, sealedClass, how) {
   if (sealedClass !== 'ordinary') {
     // Sealed findings live above everything else, ordered among themselves by
     // how much damage the class can do. The gap is deliberately enormous, so no
@@ -252,8 +338,14 @@ function scoreOf(finding, sealedClass, distance) {
   }
 
   // Far from the edit is suspicious. Inside the edit is expected, and sorts last.
-  const far = distance === null ? 3 : distance === 0 ? 0 : Math.min(2 + distance * 2, 12);
-  const channel = Math.max(...finding.differences.map((d) => CHANNEL_WEIGHT[d.channel] ?? 2));
+  // `beyond` is farther than the measure walks — the MOST suspicious thing there is — and it
+  // used to be filed as "unknown" and scored in the middle, alongside a finding whose source
+  // file nobody could name. Those are opposite answers.
+  const far = how.beyond ? 14 : how.distance === null ? 3 : how.distance === 0 ? 0 : Math.min(2 + how.distance * 2, 12);
+  // A reduce, not `Math.max(...list)`. Spreading an array into a call blows the stack at
+  // somewhere over a hundred thousand items, and a cluster that big is not hypothetical on a
+  // product whose reference holds fifteen thousand addresses across seventeen journeys.
+  const channel = finding.differences.reduce((best, d) => Math.max(best, CHANNEL_WEIGHT[d.channel] ?? 2), 0);
   // Something appearing or vanishing is worth more than something moving: a
   // whole address arriving or leaving is a shape change, not a value change.
   const shape = finding.differences.some((d) => d.kind !== 'changed') ? 4 : 0;
@@ -264,22 +356,26 @@ function scoreOf(finding, sealedClass, distance) {
 /**
  * @param {Finding} finding
  * @param {FindingClass} sealedClass
- * @param {number|null} distance
+ * @param {HowFar} how
  * @param {boolean} knewWhatChanged
+ * @param {number} hops   How far out the measure walked before it stopped.
  */
-function explain(finding, sealedClass, distance, knewWhatChanged) {
+function explain(finding, sealedClass, how, knewWhatChanged, hops) {
   if (sealedClass !== 'ordinary') {
     return `Nobody may wave this through on their own: it touches ${SEAL_WORDS[sealedClass]}. It goes to a person whatever caused it.`;
   }
   if (!knewWhatChanged) {
     return 'Nothing in the working tree has changed, so there is no edit to measure this against.';
   }
-  if (distance === null) {
+  if (how.beyond) {
+    return `This comes from ${how.beyondFile}, which is source code the project has and which nothing you changed reaches within ${hops} steps. That is as far from your edit as this measure goes — the strongest shape a side effect has.`;
+  }
+  if (how.distance === null) {
     return 'Nothing says which code this comes from, so how far it sits from your edit is unknown. Treat it as unexplained until you have checked.';
   }
-  if (distance === 0) return 'This is in a file you just changed, so it is most likely what you meant to do.';
-  if (distance === 1) return 'This is one step away from a file you changed, so your edit probably reaches it.';
-  return `This is ${distance} steps away from anything you changed. That is what a side effect looks like.`;
+  if (how.distance === 0) return 'This is in a file you just changed, so it is most likely what you meant to do.';
+  if (how.distance === 1) return 'This is one step away from a file you changed, so your edit probably reaches it.';
+  return `This is ${how.distance} steps away from anything you changed. That is what a side effect looks like.`;
 }
 
 /**
@@ -294,12 +390,17 @@ function explain(finding, sealedClass, distance, knewWhatChanged) {
  * @param {Map<string, number>} distances
  * @param {string} root
  * @param {Record<string, string[]>} touches
- * @returns {number|null}
+ * @param {Set<string>} known    Every source file the graph walked, so "we never heard of
+ *                               this file" can be told from "we heard of it and your edit
+ *                               does not reach it".
+ * @returns {HowFar}
  */
-function distanceFor(finding, distances, root, touches) {
-  if (distances.size === 0) return null;
+function distanceFor(finding, distances, root, touches, known) {
+  if (distances.size === 0) return { distance: null, beyond: false };
   /** @type {number[]} */
   const found = [];
+  /** @type {string[]} */
+  const seenButUnreached = [];
 
   /** @param {string|undefined} file */
   const look = (file) => {
@@ -307,18 +408,28 @@ function distanceFor(finding, distances, root, touches) {
     const abs = path.isAbsolute(file) ? file : path.resolve(root, file);
     const hops = distances.get(abs);
     if (typeof hops === 'number') found.push(hops);
+    // The file IS in the project and the walk out from the edit never arrived at it. That is
+    // the farthest a finding can be, and until 2026-08-30 it was scored and worded exactly
+    // like "we have no idea where this came from" — the mid-table answer. So the single most
+    // suspicious finding this tool can produce sorted below one whose source was simply
+    // unknown, and the sentence beside it said nothing named the code, which was untrue.
+    else if (known.has(abs)) seenButUnreached.push(path.relative(root, abs) || abs);
   };
 
   for (const file of finding.nearFiles ?? []) look(file);
 
-  if (found.length === 0) {
+  if (found.length === 0 && seenButUnreached.length === 0) {
     for (const journey of journeysOf(finding)) {
       const files = touches[journey];
       if (!files || files.length === 0 || files.length > 25) continue;
       for (const file of files) look(file);
     }
   }
-  return found.length > 0 ? Math.min(...found) : null;
+  // A reduce for the same reason `scoreOf` uses one: spreading a list into a call has a
+  // ceiling, and a list that is bounded today is bounded by a constant somebody may raise.
+  if (found.length > 0) return { distance: found.reduce((best, n) => (n < best ? n : best), found[0]), beyond: false };
+  if (seenButUnreached.length > 0) return { distance: null, beyond: true, beyondFile: seenButUnreached[0] };
+  return { distance: null, beyond: false };
 }
 
 /**
@@ -380,18 +491,44 @@ export async function whatChanged(cwd) {
     };
   }
 
-  const patch = (await git(['diff', 'HEAD', '-U3', '--no-color', '--no-ext-diff'], cwd, true)) ?? '';
-  const names = (await git(['diff', 'HEAD', '--name-only'], cwd)) ?? '';
-  const others = (await git(['ls-files', '--others', '--exclude-standard'], cwd)) ?? '';
+  const diff = await gitTry(['diff', 'HEAD', '-U3', '--no-color', '--no-ext-diff'], cwd);
+  const names = await gitTry(['diff', 'HEAD', '--name-only'], cwd);
+  const others = await gitTry(['ls-files', '--others', '--exclude-standard'], cwd);
 
-  return {
+  // Not knowing WHICH files changed is a different and worse failure than not being able to
+  // read the diff of them, so it is reported as not knowing anything rather than as an empty
+  // list — an empty list reads as "you changed nothing", and ranking would then quietly stop
+  // measuring distance while saying it had.
+  if (!names.ok) {
+    return {
+      ok: false,
+      why: `git could not say which files you have changed: ${names.why}`,
+      files: [],
+      untracked: lines(others.text),
+      hunks: [],
+      patch: '',
+      root,
+    };
+  }
+
+  /** @type {Changed} */
+  const changed = {
     ok: true,
-    files: lines(names),
-    untracked: lines(others),
-    hunks: parseHunks(patch),
-    patch,
+    files: lines(names.text),
+    untracked: lines(others.text),
+    hunks: diff.ok ? parseHunks(diff.text) : [],
+    patch: diff.ok ? diff.text : '',
     root,
   };
+  if (!diff.ok) {
+    // A diff that is too big for the buffer, or a git that took too long, used to come back
+    // as the empty string — which every reader downstream read as "the working tree is
+    // clean". The causal proof then answered "nothing has changed, so there is nothing to
+    // undo" on a tree with a hundred edits in it, and sounded certain doing it.
+    changed.patchUnread = true;
+    changed.patchUnreadWhy = `git could not hand over the working diff: ${diff.why}`;
+  }
+  return changed;
 }
 
 /**
@@ -479,7 +616,7 @@ export function parseHunks(patch) {
  *
  * @param {string} root
  * @param {{maxFiles?: number}} [opts]
- * @returns {Promise<{neighbours: Map<string, Set<string>>, files: string[], truncated: boolean}>}
+ * @returns {Promise<{neighbours: Map<string, Set<string>>, files: string[], truncated: boolean, tooBig: string[], unreadable: string[]}>}
  */
 export async function importGraph(root, opts = {}) {
   const limit = opts.maxFiles ?? MAX_FILES;
@@ -487,6 +624,15 @@ export async function importGraph(root, opts = {}) {
   /** @type {Map<string, Set<string>>} */
   const neighbours = new Map();
   const known = new Set(files.list);
+  // A file skipped for being large, and a file skipped because it would not open, used to be
+  // the same silent `continue`. That is the exact shape that already cost this project once:
+  // the source reader stepped over a 3.5MB bundle and then reported it had found no source.
+  // Here it does not fake a finding, it warps the ranking — every module that only that file
+  // imports looks unconnected, so a side effect in it sorts as if nothing reached it.
+  /** @type {string[]} */
+  const tooBig = [];
+  /** @type {string[]} */
+  const unreadable = [];
 
   /** @param {string} a @param {string} b */
   const join = (a, b) => {
@@ -499,9 +645,13 @@ export async function importGraph(root, opts = {}) {
     let text = '';
     try {
       const stat = await fsp.stat(file);
-      if (stat.size > MAX_FILE_BYTES) continue;
+      if (stat.size > MAX_FILE_BYTES) {
+        tooBig.push(path.relative(root, file));
+        continue;
+      }
       text = await fsp.readFile(file, 'utf8');
     } catch {
+      unreadable.push(path.relative(root, file));
       continue;
     }
     for (const spec of specifiersIn(text)) {
@@ -515,7 +665,7 @@ export async function importGraph(root, opts = {}) {
     }
   }
 
-  return { neighbours, files: files.list, truncated: files.truncated };
+  return { neighbours, files: files.list, truncated: files.truncated, tooBig, unreadable };
 }
 
 /**
@@ -651,15 +801,34 @@ function resolveNearby(from, spec, known) {
 /**
  * @param {string[]} args
  * @param {string} cwd
- * @param {boolean} [keepBlankLines]
  * @returns {Promise<string|null>}
  */
-async function git(args, cwd, keepBlankLines = false) {
+async function git(args, cwd) {
+  const said = await gitTry(args, cwd);
+  return said.ok ? said.text.trim() : null;
+}
+
+/**
+ * git, with the reason it did not work kept rather than thrown away.
+ *
+ * `git(...)` collapses every failure into `null`, and for "is this a repository at all" that
+ * is the right shape. For reading the diff it is not: an empty answer and a failed answer
+ * mean opposite things and only one of them means "nothing changed".
+ *
+ * @param {string[]} args
+ * @param {string} cwd
+ * @returns {Promise<{ok: boolean, text: string, why: string}>}
+ */
+async function gitTry(args, cwd) {
   try {
     const { stdout } = await run('git', args, { cwd, timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
-    return keepBlankLines ? stdout : stdout.trim();
-  } catch {
-    return null;
+    return { ok: true, text: stdout, why: '' };
+  } catch (e) {
+    const err = /** @type {{stderr?: string, message?: string, killed?: boolean, code?: string}} */ (e);
+    const why = err.killed
+      ? 'it took longer than twenty seconds'
+      : String(err.stderr || err.message || 'it failed').trim().split('\n')[0];
+    return { ok: false, text: '', why };
   }
 }
 

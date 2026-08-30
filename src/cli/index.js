@@ -11,6 +11,7 @@ import { StaysFixedError, EXIT } from '../core/errors.js';
 import { setLogLevel } from '../core/log.js';
 import { V2_COMMANDS } from '../v2/cli.js';
 import { SHIP_COMMANDS } from '../v2/ship.js';
+import { INIT_COMMANDS } from '../v2/init.js';
 
 /** @type {{version?: string}} */
 const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -219,25 +220,35 @@ const COMMANDS = {
   },
   mcp: {
     summary: 'Run as an MCP server so a coding agent can check its own work.',
-    usage: 'staysfixed mcp',
+    usage: 'staysfixed mcp [--v1]',
     describe:
-      'Speaks the Model Context Protocol on standard input and output, so Claude Code,\nCodex, Gemini or Cursor can check the screens right after editing your code.\nApproving still belongs to you: an agent cannot approve its own work.',
-    examples: ['staysfixed mcp'],
-    spec: {},
+      'Speaks the Model Context Protocol on standard input and output, so Claude Code,\nCodex, Gemini or Cursor can check your product right after editing it. It serves\nthe difference engine: ask what can be checked here, seal what you meant to\nchange, check, explain one finding, prove a cause, and record one as intended.\nWhat "working" means is never an agent\'s to move — it is cut by shipping, by you.\n\n--v1 serves the older picture-checking tool set instead, unchanged, for anybody\nwho wired that up and is not ready to move.',
+    options: [['--v1', 'Serve the version 1 picture tools instead of the difference engine.']],
+    examples: ['staysfixed mcp', 'staysfixed mcp --v1'],
+    spec: { booleans: ['v1'] },
   },
 };
 
 /*
- * Version 2 takes over `check` and `doctor`.
+ * Version 2 takes over `check`, `doctor` and `init`, and adds `ship`.
  *
  * It is a takeover rather than a second set of names because the answer to "did I
  * break anything" should be one command, not two — and because everything version 1
  * did is still reachable from it: `--pictures`, `--guards` and `--watch` behave
  * exactly as they always have. Anyone who installed this yesterday types the same
  * thing tomorrow.
+ *
+ * `init` was the last one left out, and leaving it out was not a decision — it was
+ * an omission with a cost. docs/getting-started.md is written entirely around what
+ * version 2's `init --json` returns: `plan.project`, `plan.readiness`,
+ * `plan.needs.person`, `plan.journeys`, `plan.covers.short`. Version 1's init
+ * returns none of that and tells whoever ran it to go and approve pictures. So an
+ * agent following this project's own installation page got an answer with none of
+ * the fields the page told it to read.
  */
 Object.assign(COMMANDS, V2_COMMANDS);
 Object.assign(COMMANDS, SHIP_COMMANDS);
+Object.assign(COMMANDS, INIT_COMMANDS);
 
 /**
  * @param {string[]} argv
@@ -273,10 +284,26 @@ export async function main(argv) {
 
   // An MCP server talks JSON-RPC on stdout. One stray friendly line would break
   // the conversation, so the logger is silenced before the server ever starts.
+  //
+  // `mcp` serves VERSION 2 — the difference engine — because that is what every
+  // document about this tool describes, what `staysfixed_capabilities` explains, and
+  // the only surface where an agent can check without being able to approve. This
+  // line pointed at version 1's picture tools for a day, which meant an agent that
+  // followed the README's own wiring block got a set of tools none of the
+  // documentation mentions, and never reached the engine at all. Version 1's server
+  // is still here behind `--v1` so nobody who wired it up is stranded.
   if (command === 'mcp') {
     setLogLevel({ quiet: true, verbose: false });
-    const { serveMcp } = await import('../mcp/server.js');
-    await serveMcp({ cwd, configFile, version: VERSION });
+    if (parsed.flags.v1 === true) {
+      const { serveMcp } = await import('../mcp/server.js');
+      await serveMcp({ cwd, configFile, version: VERSION });
+      return EXIT.ok;
+    }
+    const { serveMcp } = await import('../v2/mcp/server.js');
+    const { rootForConfig } = await import('../core/paths.js');
+    // A `--config` pointing somewhere else names the project, so it decides the root.
+    // Dropping the flag silently would have the server answer about the wrong folder.
+    await serveMcp({ cwd, root: configFile ? rootForConfig(path.resolve(cwd, configFile)) : undefined, version: VERSION });
     return EXIT.ok;
   }
 

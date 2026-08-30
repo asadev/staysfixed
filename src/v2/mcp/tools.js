@@ -293,17 +293,49 @@ function storeFor(ctx) {
 // ---------------------------------------------------------------------------
 
 /**
+ * What each tool DOES to the machine, in the four flags the protocol defines for it.
+ *
+ * These are not decoration. A client uses them to decide what it may run without stopping
+ * to ask a person, and an agent uses them to tell a question apart from an action. Getting
+ * them wrong in either direction is a real cost: mark a tool read-only when it is not and
+ * something runs unasked; mark a harmless question as an action and every session opens
+ * with a prompt nobody needed.
+ *
+ * They are set honestly here rather than optimistically. `staysfixed_check` reads nothing
+ * but it OPENS YOUR PRODUCT — twice — so it is not read-only, and two runs of it can
+ * legitimately answer differently, so it is not idempotent either. `staysfixed_prove` puts
+ * files back to the reference for one run and restores them afterwards; nothing survives
+ * it, and an agent should still know it touches the working tree.
+ *
+ * `openWorldHint` is false on every one of them, and that is the whole design in one flag:
+ * nothing here reaches a server, an account or the internet. There is nowhere to sign up.
+ *
+ * @param {{title: string, readOnly?: boolean, destructive?: boolean, idempotent?: boolean}} a
+ * @returns {Record<string, unknown>}
+ */
+function behaves({ title, readOnly = false, destructive = false, idempotent = false }) {
+  return { title, readOnlyHint: readOnly, destructiveHint: destructive, idempotentHint: idempotent, openWorldHint: false };
+}
+
+/**
  * The `tools/list` payload. Static, and it never touches disk: an agent listing
  * tools in a project that is not set up must still see
  * `staysfixed_capabilities`, which is the tool that explains why nothing else
  * will work yet.
  *
- * @returns {{name: string, description: string, inputSchema: Record<string, any>}[]}
+ * Every entry carries three things an agent reads before it calls anything: a short
+ * `title` a person would recognise in a permission prompt, a description long enough to
+ * say WHEN to call it and not merely what it is, and `annotations` saying what it does to
+ * the machine. See `behaves`.
+ *
+ * @returns {{name: string, title: string, description: string, inputSchema: Record<string, any>, annotations: Record<string, unknown>}[]}
  */
 export function toolDefinitions() {
   return [
     {
       name: 'staysfixed_capabilities',
+      title: 'What can be checked here',
+      annotations: behaves({ title: 'What can be checked here', readOnly: true, idempotent: true }),
       description:
         'CALL THIS FIRST, once per session. What Stays Fixed can check on this machine right now, what it cannot and why, what is missing that would unlock more, which other machines it can already reach, and the exact shape of every reply you will get back. It runs nothing and changes nothing. After this call you should not need to read any documentation about this tool.',
       inputSchema: {
@@ -319,6 +351,8 @@ export function toolDefinitions() {
     },
     {
       name: 'staysfixed_intent',
+      title: 'Seal what you meant to change',
+      annotations: behaves({ title: 'Seal what you meant to change' }),
       description:
         'Seal what you MEANT to change, BEFORE you run a check. One plain sentence, the files or areas you expect to affect, and the differences you expect to see. This is what makes a later "that one was me" claim checkable instead of a story: you cannot waive a difference outside what you sealed, and you cannot seal an intent after seeing what broke. Call it once per change, right before or right after you edit.',
       inputSchema: {
@@ -338,6 +372,8 @@ export function toolDefinitions() {
     },
     {
       name: 'staysfixed_check',
+      title: 'Check what changed',
+      annotations: behaves({ title: 'Check what changed' }),
       description:
         'Run it. Puts the build you just changed through the same steps as the build that was last shipped, twice, and reports only the differences that are left after the product\'s own wobble is subtracted. Covers what the screen says a control does, what calls go out, what files are written, what errors appear, what the program prints, and what the code exposes. You get back ONLY what you did not account for, ranked with the differences furthest from your edit at the top, because those are side effects. Everything unchanged is silent. Seal an intent first.',
       inputSchema: {
@@ -349,7 +385,11 @@ export function toolDefinitions() {
             type: 'boolean',
             description: 'Boot the old build live and walk it from the start instead of trusting the stored record. Slower and much stronger. Use it before a release, and on the first run of a product with no stored record.',
           },
-          journeys: { type: 'string', description: "Where the steps come from: 'suite', 'code', 'recorded', or a path to a journeys file." },
+          journeys: {
+            type: 'string',
+            description:
+              "Where the steps come from. 'code' is the default and needs nothing: each adapter reads your source and offers what it finds - routes, commands, screens, message channels. The other value is a path to a journeys file naming steps by hand. 'suite' (harvest your own test suite) and 'recorded' (replay a recorded session) are written and not yet wired into a run: ask for either and it says so rather than checking something else.",
+          },
           surface: {
             type: 'string',
             enum: ['auto', 'cli', 'library', 'server', 'web', 'electron', 'android', 'ios'],
@@ -370,6 +410,8 @@ export function toolDefinitions() {
     },
     {
       name: 'staysfixed_explain',
+      title: 'One finding in full',
+      annotations: behaves({ title: 'One finding in full', readOnly: true, idempotent: true }),
       description:
         'One finding, in depth: every address that moved, both values in full, what class it is in, how far it sits from your edit, and the evidence. This is where the heavy material lives - it is never pushed into a check reply, so ask for it on the two or three findings you actually intend to act on.',
       inputSchema: {
@@ -388,6 +430,8 @@ export function toolDefinitions() {
     },
     {
       name: 'staysfixed_prove',
+      title: 'Prove what caused it',
+      annotations: behaves({ title: 'Prove what caused it' }),
       description:
         'Test a causal claim by undoing a change and running again. You believe your edit to a particular file caused a finding: this puts that file back to the reference, re-runs, and tells you whether the difference went away. If it survives the revert, your edit did not cause it and you were about to fix the wrong thing. Nothing is left reverted.',
       inputSchema: {
@@ -402,6 +446,8 @@ export function toolDefinitions() {
     },
     {
       name: 'staysfixed_waive',
+      title: 'Record a difference as intended',
+      annotations: behaves({ title: 'Record a difference as intended' }),
       description:
         'Record that a difference was intended. This is NOT approval and it makes nothing the new normal - only shipping does that. Four rules are enforced and cannot be argued with: differences touching money, signing in, losing data, a crash, or a named guard can never be waived; the difference has to fall inside what you sealed with staysfixed_intent before the run; five between one ship and the next; and every waiver dies the moment the reference moves. If a waiver is refused, that is the answer - fix the code instead.',
       inputSchema: {
@@ -416,6 +462,8 @@ export function toolDefinitions() {
     },
     {
       name: 'staysfixed_coverage',
+      title: 'What was not checked',
+      annotations: behaves({ title: 'What was not checked', readOnly: true, idempotent: true }),
       description:
         'What was NOT checked. The ways in that no journey has ever opened, the surfaces this machine cannot reach at all, anything refused because doing it twice would not have been reversible, and the things this tool can never see on any machine. Read it before you tell anyone a change is safe: a clean check only covers what was walked, and this is the list of what was not.',
       inputSchema: {
@@ -708,6 +756,21 @@ async function toolCheck(ctx, input) {
   const limit = positive(input.limit) ?? DEFAULT_LIMIT;
   const offset = positive(input.offset) ?? 0;
 
+  // A value the engine does not understand must be refused BY NAME. `suite` and
+  // `recorded` are real ideas with real code behind them in src/v2/journeys/, and
+  // nothing on the check path calls that code yet - so passing either one down reaches
+  // the engine as the name of a file, and comes back as "there is no journeys file at
+  // .../suite". That error sends an agent looking for a file it never asked for. The
+  // day the harvest is wired, this refusal is what has to be deleted.
+  const wantedJourneys = text(input.journeys);
+  if (wantedJourneys === 'suite' || wantedJourneys === 'recorded') {
+    return problem(
+      wantedJourneys === 'suite'
+        ? 'Harvesting your own test suite as journeys is written and not wired into a run yet, so nothing was checked. Leave journeys out to use the steps each adapter reads from your source, or pass the path to a journeys file. Saying this rather than quietly checking something else is deliberate: a clean result about the wrong steps is worse than no result.'
+        : 'Replaying a recorded session is written and not wired into a run yet, so nothing was checked. Leave journeys out to use the steps each adapter reads from your source, or pass the path to a journeys file.'
+    );
+  }
+
   const surface = text(input.surface);
   const at = text(input.at);
   const aimed = (surface !== null && surface !== 'auto') || at !== null;
@@ -725,7 +788,7 @@ async function toolCheck(ctx, input) {
     configFile: undefined,
     against: text(input.against) ?? undefined,
     paired: input.paired === true,
-    journeys: text(input.journeys) ?? undefined,
+    journeys: wantedJourneys ?? undefined,
     only: stringList(input.only) ?? [],
     surface: surface && surface !== 'auto' ? surface : undefined,
     at: at ?? undefined,
@@ -893,7 +956,12 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
   // same otherwise, and one of those is a broken tool reporting success.
   /** @type {string[]} */
   const arithmetic = [];
-  if (result?.coverage) arithmetic.push(`${result.coverage.journeys} ${result.coverage.journeys === 1 ? 'way in was' : 'ways in were'} walked`);
+  // "journeys", never "ways in". A DOOR is a way in — a route, a command, an exported
+  // name — and the coverage sentence directly below this one counts doors. Calling both
+  // of them "ways in" put "2 ways in were walked" one line above "2 of the 2 ways into
+  // this product have never been walked through", which is a flat contradiction on screen
+  // even though both numbers are right. Two different things need two different words.
+  if (result?.coverage) arithmetic.push(`${result.coverage.journeys} ${result.coverage.journeys === 1 ? 'journey was' : 'journeys were'} walked`);
   if (typeof result?.differencesNoise === 'number' && result.differencesNoise > 0) arithmetic.push(`${result.differencesNoise} differences subtracted as this product's own wobble`);
   if (waived) arithmetic.push(`${waived} already recorded as intended and not shown again`);
   if (arithmetic.length) out.push(arithmetic.join(', ') + '.');
@@ -910,7 +978,12 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
       'Compared against the STORED RECORD, not against the old build booted live. That is genuinely weaker: it lets back in every difference that comes from the machine and the day rather than from your change. Pass paired: true for the strong comparison.'
     );
   }
-  if (result?.summary) out.push(result.summary);
+  // The engine's summary ends with the same "not everything was checked" sentence that is
+  // already printed under the headline, because both come from the one place that is
+  // allowed to write it. Said twice in one reply it reads as a stutter, and an agent
+  // paying by the token pays for it twice, so the second copy is taken out here rather
+  // than by weakening either of the two rules that put it there.
+  if (result?.summary) out.push(withoutRepeat(result.summary, notChecked));
 
   if (newlyUnstable.length) {
     out.push('');
@@ -1023,6 +1096,24 @@ function coverageSentence(engine, result) {
 }
 
 /**
+ * One sentence, said once.
+ *
+ * Returns `text` with `sentence` removed if it is in there, tidied so the seam does not
+ * show. Both strings come from the engine, so this never edits meaning - it only stops the
+ * same words arriving twice in one reply.
+ *
+ * @param {string} text
+ * @param {string} sentence
+ * @returns {string}
+ */
+function withoutRepeat(text, sentence) {
+  const trimmed = sentence.trim();
+  if (trimmed === '' || !text.includes(trimmed)) return text;
+  const left = text.replace(trimmed, '').replace(/[ \t]{2,}/g, ' ').trim();
+  return left === '' ? text : left;
+}
+
+/**
  * Did the run go where it was aimed?
  *
  * An engine that does not understand `surface` or `at` will not fail — it will
@@ -1118,8 +1209,11 @@ async function toolExplain(ctx, input) {
 
   /** @type {string[]} */
   const out = [];
+  // `classify` returns a whole verdict, not a class name, and interpolating the object
+  // printed "(SEALED: [object Object])" on the one reply an agent reads when it is trying
+  // to understand a difference it is not allowed to waive.
   const sealed = classify(f);
-  out.push(f.title + (sealed ? `  (SEALED: ${sealed} - not yours to waive)` : ''));
+  out.push(f.title + (sealed ? `  (SEALED: ${sealed.says} - not yours to waive)` : ''));
   if (typeof f.distance === 'number') {
     out.push(f.distance === 0 ? 'This sits inside the code you changed.' : `This sits ${f.distance} away from the code you changed, which is why it is ranked where it is. The further away, the more it looks like a side effect.`);
   }
@@ -1132,7 +1226,11 @@ async function toolExplain(ctx, input) {
     if (paths.length > 60) out.push(`  and ${paths.length - 60} more.`);
   }
 
-  if (include.includes('values')) {
+  // The engine's own deep answer lists every address with both values in full. When it is
+  // there, printing a one-address sample above it is the same text twice in one reply -
+  // and an agent pays for both copies.
+  const engineShowsValues = typeof deep?.text === 'string' && f.sample != null && deep.text.includes(stringy(f.sample.candidate).trim());
+  if (include.includes('values') && !engineShowsValues) {
     out.push('');
     if (f.sample) {
       out.push(`BEFORE - ${f.sample.path}`);
@@ -1360,7 +1458,13 @@ async function toolCoverage(ctx, input) {
       // machine could run. A Mac with Xcode on it can run an iPhone app; that says nothing
       // about whether there is an adapter here that knows how to open one.
       cannotBeDriven: (caps?.drivers ?? []).filter((/** @type {any} */ d) => !d.present).map((/** @type {any} */ d) => ({ surface: d.surface, why: d.why })),
-      unopened: (coverage?.gaps ?? []).filter((/** @type {{doors?: number}} */ g) => typeof g.doors !== 'number').map((/** @type {{what: string}} */ g) => g.what),
+      // The whole gap, not just its headline. Several of the caveats the engine raises
+      // share one headline — "This coverage count is less exact than it looks" — and
+      // differ entirely in `why`, so a list of headlines is the same sentence three times
+      // and none of the three reasons. The reason IS the content.
+      unopened: (coverage?.gaps ?? [])
+        .filter((/** @type {{doors?: number}} */ g) => typeof g.doors !== 'number')
+        .map((/** @type {{what: string, why?: string, unlockedBy?: string}} */ g) => ({ what: g.what, why: g.why ?? null, unlockedBy: g.unlockedBy ?? null })),
       surfacesOutOfReach: unreachable.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary, needs: s.needs })),
       surfacesPartial: partial.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary })),
       neverVisible: caps?.limits ?? null,
@@ -1388,10 +1492,11 @@ async function toolCoverage(ctx, input) {
     // not look at it. Printing the sentence keeps the reason attached to the hole. The
     // doors gap is left out here because it is already counted, in its own words, just
     // above — and a number a reader can catch out twice is a number they stop believing.
+    /** @type {{what: string, why: string, unlockedBy: string}[]} */
     const unopened = (coverage.gaps ?? [])
       .filter((/** @type {{doors?: number}} */ g) => typeof g.doors !== 'number')
-      .map((/** @type {{what: string}} */ g) => g.what);
-    out.push(`The last run walked ${coverage.journeys} ${coverage.journeys === 1 ? 'way in' : 'ways in'}.`);
+      .map((/** @type {{what: string, why?: string, unlockedBy?: string}} */ g) => ({ what: String(g.what), why: String(g.why ?? ''), unlockedBy: String(g.unlockedBy ?? '') }));
+    out.push(`The last run walked ${coverage.journeys} ${coverage.journeys === 1 ? 'journey' : 'journeys'}. A journey is one route through the product; a door is one way into it, and they are counted separately below.`);
     const doorsKnown = coverage.doorsKnown ?? 0;
     const never = Math.max(0, doorsKnown - (coverage.doorsWalked ?? 0));
     if (never > 0) {
@@ -1405,7 +1510,15 @@ async function toolCoverage(ctx, input) {
       out.push('It opened every way in that it knows about. That is not the same as every possible state - nothing can enumerate that - but there is no known door it has never been through.');
     } else if (unopened.length > 0) {
       out.push(`${unopened.length} other ${unopened.length === 1 ? 'thing was' : 'things were'} not looked at, so nothing in any check says anything about ${unopened.length === 1 ? 'it' : 'them'}:`);
-      for (const d of unopened.slice(0, 30)) out.push(`- ${trim(String(d), 160)}`);
+      for (const gap of unopened.slice(0, 30)) {
+        out.push(`- ${trim(gap.what, 160)}`);
+        // The reason on its own line and never dropped. Three gaps here can carry the
+        // same headline and three different reasons, and printing only the headline
+        // turned that into the same sentence three times over - which reads as a bug in
+        // the tool rather than as three separate holes in the coverage.
+        if (gap.why) out.push(`  ${trim(gap.why, 400)}`);
+        if (gap.unlockedBy && !/^Read the caveat/i.test(gap.unlockedBy)) out.push(`  What would close it: ${trim(gap.unlockedBy, 300)}`);
+      }
       if (unopened.length > 30) out.push(`- and ${unopened.length - 30} more.`);
     }
   }

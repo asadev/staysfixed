@@ -384,14 +384,66 @@ function productNeeds(product, project) {
         topic: 'app',
       });
     }
+    // Whether this app has a device identity to keep apart is a question the source already
+    // answers, so it is answered here rather than asked.
+    //
+    // WHY THIS ONE MATTERS MORE THAN IT LOOKS. It was written because of a real bug: two
+    // copies of a desktop app claiming one identity displaced each other on a relay's single
+    // slot, over and over, and it read exactly like a broken product. Asking for it is right
+    // — when there is something to ask for. On Terminal Deck there is not: every one of the
+    // settings its main process reads was listed and not one of them carries a device or
+    // machine id, because the identity is generated into the settings folder and the adapter
+    // already gives every run a settings folder of its own. Asking anyway put a line on a
+    // set-up list that nobody could ever tick off, and a list with an impossible item on it
+    // is a list people stop reading.
+    const identity = identityVariables(project.envNames);
+    if (identity.length > 0) {
+      needs.push({
+        what: `whether ${identity.length === 1 ? `${identity[0]} is` : `${identity.slice(0, 3).join(', ')} are`} how this app says who it is`,
+        why: 'If the app registers itself somewhere with a device id, two runs claiming the same id would fight over the same slot — and that fight looks exactly like a bug in the product.',
+        unlocks: 'running the old build and the new one safely, one after the other',
+        fix: `${identity.length === 1 ? 'This name was' : 'These names were'} read out of your own source. If ${identity.length === 1 ? 'it carries' : 'one of them carries'} a device or machine id, put {"identityEnv": {"${identity[0]}": "{identity}"}} under "electron" in the settings and each run gets its own. If not, leave it out and nothing is lost.`,
+        who: 'the agent',
+        product: product.name,
+        topic: 'identity',
+      });
+    }
+  }
+
+  // An iPhone app with no built bundle. Without this the readiness verdict said the iPhone
+  // app "can be checked here now" on a fresh clone that contains no built app at all — a
+  // ready state that nothing could act on, printed beside four honest ones.
+  if (product.kind === 'ios' && !product.built.found) {
+    const generated = product.evidence.some((clue) => /project\.ya?ml$/.test(clue.where));
+    const scheme = typeof product.suggest?.scheme === 'string' ? String(product.suggest.scheme) : null;
     needs.push({
-      what: 'the name of the setting this app uses to know who it is',
-      why: 'If the app registers itself somewhere with a device id, two runs claiming the same id would fight over the same slot — and that fight looks exactly like a bug in the product.',
-      unlocks: 'running the old build and the new one safely, one after the other',
-      fix: 'Look through the main process for an environment variable holding a device or machine id, and put {"identityEnv": {"THAT_VARIABLE": "{identity}"}} under "electron" in the settings. If the app has no such thing, delete the line and nothing is lost.',
+      what: 'the app built for the simulator',
+      why: 'An iPhone app is checked by installing a built bundle on a simulator. There is no built bundle here yet, and a repository usually does not commit one.',
+      unlocks: 'opening the app on a simulator and reading what the screen says every control is and does',
+      fix: scheme
+        ? `cd ${product.where} && ${generated ? 'xcodegen generate && ' : ''}xcodebuild -scheme ${scheme} -sdk iphonesimulator -configuration Debug -derivedDataPath build build    (then set ios.app in the settings to the .app it wrote)`
+        : `cd ${product.where} && ${generated ? 'xcodegen generate && ' : ''}xcodebuild -list    (that names the schemes; build one for the simulator, then set ios.app in the settings to the .app it wrote)`,
       who: 'the agent',
       product: product.name,
-      topic: 'identity',
+      topic: 'app',
+    });
+  }
+
+  // A command-line program that has to be built before it can be run. This is what a product
+  // nothing in package.json names looks like on a fresh clone: the source is there, the
+  // program is real, and the file that would be run does not exist yet.
+  if (product.kind === 'cli' && !product.built.found) {
+    const build = typeof suggest.buildWith === 'string' ? String(suggest.buildWith) : null;
+    needs.push({
+      what: `${product.name}, built`,
+      why: 'It is built into a folder that is not committed, so on a fresh copy of this repository there is nothing to run yet. Nothing in package.json names it either, which is why it is easy to miss entirely.',
+      unlocks: 'every word of its help, what it exits with, and every file it touches',
+      fix: build
+        ? `${build}, then \`staysfixed init --force\` — the commands are filled in exactly from what the build wrote, and nothing has been edited by hand yet.`
+        : `Nothing in package.json says how to build it. Name the command that builds it and the command that runs the result under "process" in the settings.`,
+      who: build ? 'the agent' : 'a person',
+      product: product.name,
+      topic: 'app',
     });
   }
 
@@ -410,7 +462,14 @@ function productNeeds(product, project) {
         topic: 'start',
       });
     }
-    const needing = project.pages.filter((p) => p.needs.length > 0);
+    // Addresses with a changing part in them, whether they came from folder names or from a
+    // router. Both are the same problem and both go in one item, because being asked for the
+    // same thing twice under two headings is how somebody stops reading a list.
+    const fromRouter = /** @type {{url: string, names: string[]}[]} */ (suggest.screensNeedingValues ?? []);
+    const needing = [
+      ...project.pages.filter((p) => p.needs.length > 0),
+      ...fromRouter.map((one) => ({ url: one.url, file: 'the router', needs: one.names })),
+    ];
     if (needing.length > 0) {
       const names = [...new Set(needing.flatMap((p) => p.needs))];
       needs.push({
@@ -427,25 +486,35 @@ function productNeeds(product, project) {
 
   if (product.kind === 'server') {
     if (!suggest.start) {
+      // The product's own blocker where it has one: a server found by reading the code often
+      // has the answer written down beside it, in a deploy script or a container file. That
+      // is work for the agent — it can read the script — rather than a question for a person
+      // who would have to go and read the same script themselves.
+      const written = product.blockers.find((line) => /start/i.test(line) && /\.(sh|bash|ya?ml|mjs|js|ts)\b|Dockerfile/.test(line)) ?? null;
       needs.push({
         what: 'the command that starts the server',
         why: 'The routes can be listed by reading the code, but none of them can be asked anything until something is listening.',
         unlocks: `walking ${project.doors.route > 0 ? `all ${project.doors.route} routes` : 'every route'} and seeing what each one quietly does while answering`,
-        fix: 'Put {"start": "..."} under "http" in the settings, and have it listen on the PORT it is given.',
-        who: project.scripts.start ? 'the agent' : 'a person',
+        fix: written ?? 'Put {"start": "..."} under "http" in the settings, and have it listen on the PORT it is given.',
+        who: project.scripts.start || written ? 'the agent' : 'a person',
         product: product.name,
         topic: 'start',
       });
     }
-    needs.push({
-      what: 'a way to put the data back how it was',
-      why: 'Both builds have to see the same rows. Without that, the second run sees whatever the first one wrote, and every difference after the first write means nothing.',
-      unlocks: 'comparing two builds fairly instead of comparing two different sets of data',
-      fix: 'Put {"restore": "..."} under "http" in the settings: a command that resets the database or the data folder to a known state. It must not be one that destroys data it cannot rebuild — a command that looks destructive is refused rather than run.',
-      who: 'a person',
-      product: product.name,
-      topic: 'data',
-    });
+    // A server with nothing to store needs no way of putting anything back, and asking for
+    // one is the same fault as asking for a device id that does not exist: an item on a
+    // set-up list that can never be ticked off, sitting beside items that can.
+    if (suggest.stateless !== true) {
+      needs.push({
+        what: 'a way to put the data back how it was',
+        why: 'Both builds have to see the same rows. Without that, the second run sees whatever the first one wrote, and every difference after the first write means nothing.',
+        unlocks: 'comparing two builds fairly instead of comparing two different sets of data',
+        fix: 'Put {"restore": "..."} under "http" in the settings: a command that resets the database or the data folder to a known state. It must not be one that destroys data it cannot rebuild — a command that looks destructive is refused rather than run.',
+        who: 'a person',
+        product: product.name,
+        topic: 'data',
+      });
+    }
     const withParts = project.routes.filter((route) => /:[A-Za-z_$]|\[[^\]]+\]|\{[^}]+\}/.test(route.name));
     if (withParts.length > 0) {
       const names = [...new Set(withParts.flatMap((route) => [...route.name.matchAll(/:([A-Za-z_$][\w$]*)|\[\.{0,3}([^\]]+)\]|\{([^}]+)\}/g)].map((hit) => hit[1] ?? hit[2] ?? hit[3])))];
@@ -484,6 +553,21 @@ function productNeeds(product, project) {
 }
 
 /**
+ * Settings this app reads that could be how it says who it is.
+ *
+ * A guess about meaning, but never a guess about existence: every name here was read out of
+ * the project's own source, so the worst case is a question about a real variable rather than
+ * a request for one that was never there.
+ *
+ * @param {string[]} envNames
+ * @returns {string[]}
+ */
+export function identityVariables(envNames) {
+  const looksLikeAnIdentity = /(DEVICE|MACHINE|INSTANCE|INSTALL|CLIENT|NODE|HOST|AGENT|PEER|REPLICA)[_-]?(ID|UUID|GUID|KEY|NAME|SLOT)\b/i;
+  return envNames.filter((name) => looksLikeAnIdentity.test(name));
+}
+
+/**
  * Routes whose NAME says they do something that cannot be taken back.
  *
  * A guess, and it says so. Guessing wrong in this direction costs a route being watched
@@ -519,7 +603,14 @@ function machineNeeds(surface, product, covered) {
       product: product.name,
     }];
   }
+  /** @type {Set<string|undefined>} */
   const already = new Set(covered.map((need) => need.topic).filter(Boolean));
+  // A server with nothing to store has no data to put back, and doctor cannot know that: it
+  // answers "what is missing on this machine", so it asks for a way to restore a database on
+  // behalf of every server it sees. Telling somebody to install Docker for a switchboard that
+  // keeps nothing is the same fault as asking for a device id that does not exist — an item on
+  // a set-up list that can never be ticked off, sitting beside items that can.
+  if (product.suggest?.stateless === true) already.add('data');
   return surface.needs
     // Doctor answers "what is missing on this machine right now", and right now is before
     // this command has written anything. A need whose whole fix is "run staysfixed init",
@@ -591,6 +682,21 @@ function sortNeeds(readiness, project, machine) {
       unlocks: 'every check from then on',
       fix: 'staysfixed check --paired    (or ship once with `staysfixed ship` at the end of your release)',
       who: 'the agent',
+    });
+  }
+  // Room to work. Three of the adapters copy the whole project into a scratch folder before
+  // running anything — which is right, a check must never write into somebody's working copy
+  // — and a repository carrying gigabytes of build output cannot be copied twice on a laptop
+  // that is nearly full. It is not a failure anybody could diagnose from the error: the copy
+  // simply stops. The whole answer is one command, and it is the agent's to run.
+  if (project.bulk.tooBig) {
+    all.push({
+      what: 'somewhere with room to copy this project into',
+      why: `${project.bulk.why} A check copies the project so a run can write anywhere it likes without touching your working copy, and there is not room here for the two copies a comparison needs.`,
+      unlocks: 'every check that runs a command or boots a server or a website',
+      fix: `git worktree add ../${path.basename(project.root)}-check HEAD    (then copy the settings across and run the check in there — a worktree holds the tracked files and none of the build output)`,
+      who: 'the agent',
+      topic: 'room',
     });
   }
   if (!project.isGitRepo) {
@@ -676,7 +782,7 @@ export function proposeJourneys(project) {
         out.push({
           name: String(command.name),
           what: `run \`${String(command.run)}\` and compare what it printed, what it exited with and every file it touched`,
-          from: 'package.json',
+          from: product.where === '.' ? 'package.json' : `the program built in ${product.where}/`,
           surface: 'cli',
           automatic: false,
           ready: true,
@@ -720,12 +826,22 @@ export function proposeJourneys(project) {
       }
       if (Array.isArray(suggest.screens) && suggest.screens.length > 0) {
         const many = suggest.screens.length;
+        const router = product.router?.kind ?? 'files';
+        // Where each screen came from decides what to call it, and one of these is the whole
+        // point: screens reached by clicking are NOT addresses, and a line that calls them
+        // pages would be describing something the run does not do.
+        const from = router === 'tabs' ? 'the strip of tabs in the source'
+          : router === 'hash' ? 'the router in the source'
+            : router === 'declared' ? 'the router in the source'
+              : 'the folder itself';
         out.push({
-          name: many === 1 ? 'the page in this folder' : 'the pages in this folder',
-          what: many === 1 ? 'open the single HTML file sitting in this folder' : `open each of the ${many} HTML files sitting in this folder`,
-          from: 'the folder itself',
+          name: many === 1 ? 'the screen this app has' : 'every screen this app has',
+          what: router === 'tabs'
+            ? `open the app and reach each of its ${many} screens the way a person does — by clicking the control that names it — reading what the screen says every control is and does. The address never changes, so opening one is not an option.`
+            : many === 1 ? 'open the single page in this folder' : `open each of the ${many} addresses this app answers on and read what the screen says every control is and does`,
+          from,
           surface: 'web',
-          automatic: false,
+          automatic: router !== 'files',
           howMany: many,
           ready: Boolean(suggest.start),
         });
@@ -733,7 +849,7 @@ export function proposeJourneys(project) {
     }
     if (product.kind === 'android' && product.adapter === 'android') {
       out.push({
-        name: 'open-the-app',
+        name: `open ${product.name}`,
         what: 'install the app on an emulator of its own, open it, read what the screen says every control is and does, then take it off again',
         from: 'the app itself',
         surface: 'android',
@@ -753,7 +869,7 @@ export function proposeJourneys(project) {
     }
     if (product.kind === 'electron') {
       out.push({
-        name: 'open-the-app',
+        name: `open ${product.name}`,
         what: `open the app and read everything it shows and all ${project.doors.ipc} channels it registers`,
         from: 'the source',
         surface: 'electron',
@@ -830,11 +946,15 @@ function formatOf(file) {
  */
 export function configText(project) {
   const has = (/** @type {string} */ kind) => project.products.find((p) => p.kind === kind) ?? null;
+  // Several of a kind is normal, and it is the case that goes wrong quietly. One repository
+  // here makes two command-line programs; writing the first one's commands and stopping would
+  // have left the second unchecked with nothing anywhere saying so.
+  const all = (/** @type {string} */ kind) => project.products.filter((p) => p.kind === kind);
   const electron = has('electron');
   const web = has('web');
   const server = has('server');
-  const cli = has('cli');
   const library = has('library');
+  const ios = has('ios');
 
   /** @type {string[]} */
   const out = [];
@@ -856,6 +976,27 @@ export function configText(project) {
   w(' *');
   w(' * EVERY OPTION THAT MATTERS IS IN THIS FILE. The ones that do not apply to this project are');
   w(' * commented out rather than left out, so nothing is hidden from you. Delete freely.');
+  if (project.products.length > 1) {
+    w(' *');
+    w(' * EACH ONE, AND WHAT SAID SO:');
+    for (const product of project.products) {
+      w(` *   ${padTo(product.name, 34)} ${product.why}`);
+    }
+  }
+  if (project.bulk.tooBig || project.bulk.capped) {
+    w(' *');
+    w(' * BEFORE THE FIRST RUN, one fact about this folder. Commands, servers and websites are');
+    w(' * checked in a scratch COPY of the project, so a run can write anywhere it likes without');
+    w(' * touching your working copy.');
+    for (const line of wrapProse(project.bulk.why, 92)) w(` * ${line}`);
+    if (project.bulk.tooBig) {
+      w(' * So run the check somewhere with room, which is one command:');
+      w(' *');
+      w(` *     git worktree add ../${path.basename(project.root)}-check HEAD`);
+      w(` *     cp ${path.basename(project.root)}/staysfixed.config.* ../${path.basename(project.root)}-check/`);
+      w(` *     cd ../${path.basename(project.root)}-check && npx staysfixed check`);
+    }
+  }
   w(' */');
   w('');
   w('export default {');
@@ -874,9 +1015,16 @@ export function configText(project) {
   w('  // This is the only channel that sees a door nobody has ever opened.');
   w('  // ───────────────────────────────────────────────────────────────────────');
   w('  source: {');
-  w('    // Folders to read. Left out, it reads the usual ones: src, lib, app, bin, server,');
-  w('    // pages, api, electron, main, packages.');
-  w("    // folders: ['src', 'lib'],");
+  w('    // Folders to read. Left out, it reads the usual ones — src, lib, app, bin, server,');
+  w('    // pages, api, electron, main, packages — which is right for a repository that makes');
+  w('    // one thing, and misses whole products in a repository that makes several. These are');
+  w('    // the folders the products above actually live in, plus any folder of source that no');
+  w('    // product claimed, because an unclaimed folder is exactly where a silent gap lives.');
+  if (project.sourceFolders.length > 0) {
+    w(`    folders: [${project.sourceFolders.map((f) => JSON.stringify(f)).join(', ')}],`);
+  } else {
+    w("    // folders: ['src', 'lib'],");
+  }
   if (project.doors.read) {
     w(`    // Last read: ${project.doors.route} routes, ${project.doors.ipc} private channels, ${project.doors.export} exported names, ${project.doors.command} commands, ${project.doors.env} settings it reads.`);
   }
@@ -890,23 +1038,43 @@ export function configText(project) {
   w('  // connection recorded and then refused.');
   w('  // ───────────────────────────────────────────────────────────────────────');
   w('  process: {');
-  w('    // Commands worth running. Nothing is ever guessed here: a guess would mean running');
-  w('    // something that deletes files. Add any command whose output you would notice changing.');
-  const commands = /** @type {any[]} */ (cli?.suggest?.commands ?? []);
+  w('    // Commands worth running. Only ever `--help`, and that is deliberate: a command listed');
+  w('    // in a manifest could deploy, could publish, could wipe a database, and running one');
+  w('    // because it was there would be this tool causing the very kind of damage it exists to');
+  w('    // catch. Asking a program to describe itself is the one thing every command-line tool');
+  w('    // does safely — and its help text is a precise description of everything it offers, so');
+  w('    // a command that quietly disappears is caught by comparing it.');
+  const cliProducts = all('cli');
+  /** @type {any[]} */
+  const commands = [];
+  for (const one of cliProducts) for (const command of /** @type {any[]} */ (one.suggest?.commands ?? [])) commands.push(command);
+  const unbuilt = cliProducts.filter((one) => !one.built.found);
   if (commands.length > 0) {
     w('    commands: [');
     for (const command of commands) {
       w(`      { name: ${JSON.stringify(String(command.name))}, run: ${JSON.stringify(String(command.run))}, describe: ${JSON.stringify(String(command.describe ?? ''))} },`);
     }
     w('    ],');
-    w('    // Each entry also takes: cwd, stdin, env, timeoutMs, and irreversible: true for a');
-    w('    // command that would spend money or send a message — that one is watched asking and');
-    w('    // never allowed to ask.');
+    w('    // Add any other command whose output you would notice changing. Each entry also takes:');
+    w('    // cwd, stdin, env, timeoutMs, and irreversible: true for a command that would spend');
+    w('    // money or send a message — that one is watched asking and never allowed to ask.');
   } else {
     w("    // commands: [{ name: 'help', run: 'node bin/cli.js --help', describe: 'print the help' }],");
     w('    commands: [],');
   }
+  for (const one of unbuilt) {
+    const build = typeof one.suggest?.buildWith === 'string' ? String(one.suggest.buildWith) : null;
+    w('');
+    w(`    // ${one.where}/ holds a real command-line program that nothing in package.json names, so it`);
+    w('    // was found by reading the code rather than the manifest — and it has not been built here');
+    w(`    // yet${one.suggest?.outDir ? `, so ${String(one.suggest.outDir)}/ is empty` : ''}. There is nothing to run until it is:`);
+    w(`    //     ${build ?? 'build it the way this project builds it'}`);
+    w('    //     staysfixed init --force');
+    w('    // The second line fills these commands in exactly from what the build wrote. Nothing');
+    w('    // in this file has been edited by hand yet, so nothing is lost by rewriting it.');
+  }
   const imports = /** @type {any[]} */ (library?.suggest?.imports ?? []);
+  w('');
   w('    // Modules to import and compare the exports of.');
   if (imports.length > 0) {
     w('    imports: [');
@@ -926,13 +1094,33 @@ export function configText(project) {
   w('  // ───────────────────────────────────────────────────────────────────────');
   w(server ? '  http: {' : '  // http: {');
   const httpOn = server ? '    ' : '  //   ';
+  if (server && server.where !== '.') {
+    w(`${httpOn}// This is ${server.name}. ${server.why}`);
+  }
   w(`${httpOn}// The command that starts it. It must listen on the PORT it is given.`);
   const httpStart = server?.suggest?.start;
-  w(httpStart ? `${httpOn}start: ${JSON.stringify(String(httpStart))},` : `${httpOn}// start: 'npm start',`);
-  w(`${httpOn}// A command that puts the data back how it was, so both builds see the same rows.`);
-  w(`${httpOn}// Without it the second run sees whatever the first one wrote. A command that looks`);
-  w(`${httpOn}// like it destroys data it cannot rebuild is refused rather than run.`);
-  w(`${httpOn}// restore: 'npm run db:reset',`);
+  if (httpStart) {
+    w(`${httpOn}start: ${JSON.stringify(String(httpStart))},`);
+  } else {
+    // The one thing that has to be filled in, and where the answer already is. A server found
+    // by reading the code usually has a deploy script or a container file beside it that says
+    // exactly how it is built and run — naming that file is the difference between work an
+    // agent can finish on its own and a question somebody has to go and answer.
+    for (const line of server?.blockers ?? []) for (const wrapped of wrapProse(line, 76)) w(`${httpOn}// ${wrapped}`);
+    w(`${httpOn}// start: 'npm start',`);
+  }
+  if (server && server.suggest?.stateless === true) {
+    w(`${httpOn}// NO "restore", and that is an answer rather than something left out. A restore command`);
+    w(`${httpOn}// puts the data back so both builds see the same rows — and nothing this server installs`);
+    w(`${httpOn}// stores anything, and there is no database beside it, so there is nothing to put back.`);
+    w(`${httpOn}// If it does keep something in a way nothing here recognised, add it:`);
+    w(`${httpOn}// restore: 'npm run db:reset',`);
+  } else {
+    w(`${httpOn}// A command that puts the data back how it was, so both builds see the same rows.`);
+    w(`${httpOn}// Without it the second run sees whatever the first one wrote. A command that looks`);
+    w(`${httpOn}// like it destroys data it cannot rebuild is refused rather than run.`);
+    w(`${httpOn}// restore: 'npm run db:reset',`);
+  }
   w(`${httpOn}// One real value per changing part of a route address. A route with a part nobody`);
   w(`${httpOn}// has given a value for is reported as never looked at, never quietly skipped.`);
   w(`${httpOn}// samples: { id: '1', slug: 'a-real-one' },`);
@@ -968,6 +1156,12 @@ export function configText(project) {
   const webStart = web?.suggest?.start;
   const flatSite = !webStart && Array.isArray(web?.suggest?.screens) && web.suggest.screens.length > 0;
   if (webStart) {
+    // Why this command and not the obvious one. A development server never exits, serves
+    // unbundled source, and wires a live-reload connection into every page — a second thing
+    // moving under the comparison for reasons that have nothing to do with the change. So
+    // wherever there is a way to build and then serve the build, that is what is written, and
+    // the reason is written beside it.
+    if (web?.startNote) for (const line of wrapProse(web.startNote, 76)) w(`${webOn}// ${line}`);
     w(`${webOn}start: ${JSON.stringify(String(webStart))},`);
   } else if (flatSite) {
     w(`${webOn}// This is a site made of files rather than a program, so anything that serves this`);
@@ -981,12 +1175,26 @@ export function configText(project) {
   w(`${webOn}// url: 'http://localhost:3000',`);
   const screens = /** @type {any[]} */ (web?.suggest?.screens ?? []);
   if (screens.length > 0) {
-    w(`${webOn}// The pages to open. These are the HTML files found sitting in this folder.`);
+    // WHERE THESE CAME FROM, and it is the most important comment in this file. Reading the
+    // folder names finds one screen in a single-page app and reports it as the whole product.
+    // So the router is read instead; and where there is no router at all, the screens are read
+    // off the strip of tabs that switches between them and reached by CLICKING, because a
+    // made-up address would land on the same screen every time and report it as checked.
+    if (web?.router?.why) for (const line of wrapProse(web.router.why, 76)) w(`${webOn}// ${line}`);
     w(`${webOn}screens: [`);
     for (const screen of screens.slice(0, 40)) {
-      w(`${webOn}  { name: ${JSON.stringify(String(screen.name))}, url: ${JSON.stringify(String(screen.url))} },`);
+      const steps = Array.isArray(screen.steps) && screen.steps.length > 0
+        ? `, steps: [${screen.steps.map((/** @type {Record<string, string>} */ step) => `{ ${Object.entries(step).map(([key, value]) => `${key}: ${JSON.stringify(String(value))}`).join(', ')} }`).join(', ')}]`
+        : '';
+      const describe = typeof screen.describe === 'string' ? `, describe: ${JSON.stringify(String(screen.describe))}` : '';
+      w(`${webOn}  { name: ${JSON.stringify(String(screen.name))}, url: ${JSON.stringify(String(screen.url))}${steps}${describe} },`);
     }
     w(`${webOn}],`);
+    if (screens.some((screen) => Array.isArray(screen.steps) && screen.steps.length > 0)) {
+      w(`${webOn}// A click that finds nothing is reported as a screen that was NOT looked at, never as`);
+      w(`${webOn}// a screen that was fine. If one of these names is not what the control actually says,`);
+      w(`${webOn}// the run says so by name and the fix is one word here.`);
+    }
   } else if (project.pages.length > 0) {
     w(`${webOn}// ${project.pages.length} page address${project.pages.length === 1 ? '' : 'es'} are read out of your folder names automatically — nothing to list here.`);
     w(`${webOn}// Add a screen only for something a walk has to DO rather than just open:`);
@@ -994,8 +1202,19 @@ export function configText(project) {
   } else {
     w(`${webOn}// screens: [{ name: 'the front page', url: '/' }],`);
   }
-  w(`${webOn}// One real value per changing part of a page address.`);
-  w(`${webOn}// samples: { slug: 'a-real-one' },`);
+  const waiting = /** @type {{url: string, names: string[]}[]} */ (web?.suggest?.screensNeedingValues ?? []);
+  if (waiting.length > 0) {
+    const names = [...new Set(waiting.flatMap((one) => one.names))];
+    w(`${webOn}// ${waiting.length === 1 ? 'One more address is' : `${waiting.length} more addresses are`} declared and NOT in the list above, because ${waiting.length === 1 ? 'it has' : 'they have'} a part that`);
+    w(`${webOn}// changes — an id, a slug — and only somebody who knows the data knows a value that really`);
+    w(`${webOn}// exists. ${waiting.slice(0, 6).map((one) => one.url).join(', ')}${waiting.length > 6 ? ' and others' : ''}.`);
+    w(`${webOn}// Fill one value in per name and they start being opened. Until then they are reported as`);
+    w(`${webOn}// never looked at, which is the point of naming them here rather than dropping them.`);
+    w(`${webOn}// samples: { ${names.slice(0, 4).map((name) => `${name}: 'a-real-one'`).join(', ')} },`);
+  } else {
+    w(`${webOn}// One real value per changing part of a page address.`);
+    w(`${webOn}// samples: { slug: 'a-real-one' },`);
+  }
   w(`${webOn}// Also: viewport { width, height, deviceScaleFactor }, colorScheme, timezone, locale,`);
   w(`${webOn}// allowHosts (addresses the page is allowed to reach), refuse, allowWrites,`);
   w(`${webOn}// timeoutMs, settleTimeoutMs, startTimeoutMs, env, nodeEnv, restore, everyStep.`);
@@ -1014,16 +1233,54 @@ export function configText(project) {
   w(`${elOn}// The built app. On a Mac that is the .app; on Windows the .exe.`);
   const binary = electron?.suggest?.binary;
   w(binary ? `${elOn}binary: ${JSON.stringify(String(binary))},` : `${elOn}// binary: 'release/mac-arm64/Your App.app',`);
-  w(`${elOn}// If your app tells a server who it is, name the setting that carries the id and it`);
-  w(`${elOn}// is given a different one per run. Without this, two runs can claim the same slot`);
-  w(`${elOn}// and fight over it — which looks exactly like a bug in your product.`);
-  w(`${elOn}// identityEnv: { YOUR_APP_DEVICE_ID: '{identity}' },`);
-  w(`${elOn}// Private channels that are safe to ask — read-only ones. Each becomes its own`);
-  w(`${elOn}// journey, so a channel that stops answering is caught, not just one that stops existing.`);
-  w(`${elOn}// exercise: ['settings:read', 'sessions:list'],`);
+  const appId = electron?.suggest?.appId;
+  if (appId) {
+    w(`${elOn}// The application id, read out of your own packaging config. It is how the run tells the`);
+    w(`${elOn}// window it opened from a window of the same app that was already on your screen.`);
+    w(`${elOn}appId: ${JSON.stringify(String(appId))},`);
+  }
+  // The identity question, answered rather than asked. See identityVariables() for why this
+  // is the shape it is: the whole point of a set-up list is that every line on it can be
+  // ticked off, and a line asking for a variable that does not exist can never be.
+  const identity = electron ? identityVariables(project.envNames) : [];
+  if (identity.length > 0) {
+    w(`${elOn}// This app reads ${identity.length === 1 ? 'a setting' : 'settings'} that could be how it says who it is: ${identity.slice(0, 4).join(', ')}.`);
+    w(`${elOn}// If one of them carries a device or machine id, name it here and every run gets its own,`);
+    w(`${elOn}// so two runs never claim one slot and fight over it — which looks exactly like a bug.`);
+    w(`${elOn}// identityEnv: { ${identity[0]}: '{identity}' },`);
+  } else if (electron && project.doors.read) {
+    w(`${elOn}// NO "identityEnv", and this is an answer rather than something left out. If an app tells`);
+    w(`${elOn}// a server who it is with a device id from its environment, two runs would claim one slot`);
+    w(`${elOn}// and fight over it — that exact bug has happened to a real product. Every setting this app`);
+    w(`${elOn}// reads out of its environment was listed by name, and not one of them carries a device or`);
+    w(`${elOn}// machine id, so there is nothing to pass through. Every run already gets a settings folder`);
+    w(`${elOn}// of its own, which is where an identity generated at first start would live.`);
+  } else {
+    w(`${elOn}// If your app tells a server who it is, name the setting that carries the id and it`);
+    w(`${elOn}// is given a different one per run. Without this, two runs can claim the same slot`);
+    w(`${elOn}// and fight over it — which looks exactly like a bug in your product.`);
+    w(`${elOn}// identityEnv: { YOUR_APP_DEVICE_ID: '{identity}' },`);
+  }
+  const askable = electron ? channelsSafeToAsk(project.channels) : { safe: [], skipped: 0 };
+  w(`${elOn}// Private channels asked to answer. Each becomes a journey of its own, so a channel that`);
+  w(`${elOn}// stops ANSWERING is caught and not only one that stops existing.`);
+  if (askable.safe.length > 0) {
+    w(`${elOn}// These were picked out of the ${project.doors.ipc} channels in your source by NAME — every one of them`);
+    w(`${elOn}// asks for something rather than doing something: get, list, status, read, about. The other`);
+    w(`${elOn}// ${askable.skipped} were left out because their names say they write, or that they carry a secret. That is a`);
+    w(`${elOn}// reading of a name and not a promise: if one of these turns out to change something,`);
+    w(`${elOn}// delete the line. Nothing is ever asked of a channel that is not written here.`);
+    w(`${elOn}exercise: [`);
+    for (const line of chunk(askable.safe, 4)) w(`${elOn}  ${line.map((name) => JSON.stringify(name)).join(', ')},`);
+    w(`${elOn}],`);
+  } else {
+    w(`${elOn}// A channel is only ever asked when it is named here, because knocking on an unknown door`);
+    w(`${elOn}// could do anything.`);
+    w(`${elOn}// exercise: ['settings:read', 'sessions:list'],`);
+  }
   w(`${elOn}// Walks through the window itself.`);
   w(`${elOn}// journeys: [{ name: 'opening a session', steps: [{ click: 'New session' }] }],`);
-  w(`${elOn}// Also: appId, args, env, windowMatch, startTimeoutMs, settleTries, settleGapMs.`);
+  w(`${elOn}// Also: ${appId ? '' : 'appId, '}args, env, windowMatch, startTimeoutMs, settleTries, settleGapMs.`);
   w(electron ? '  },' : '  // },');
   w('');
 
@@ -1072,10 +1329,45 @@ export function configText(project) {
   w(`${winOn}// Also: args, cwd, journeys.`);
   w(windowsHere ? '  },' : '  // },');
   w('');
-  if (has('ios')) {
-    w('  // There is no "ios" section, and that is not an oversight: this copy of the tool has');
-    w('  // no iOS adapter in it, so a setting here would do nothing. The iPhone app in this');
-    w('  // repository is not being checked, and `staysfixed init` says so every time it runs.');
+
+  // ── ios ───────────────────────────────────────────────────────────────────
+  const iosHere = ios?.adapter === 'ios';
+  w('  // ───────────────────────────────────────────────────────────────────────');
+  w('  // iPhone and iPad apps. Installed on a simulator, opened, and read — the same');
+  w('  // roles, names and states a person hears read out to them. One build at a time.');
+  w('  // Two builds on a real phone in your hand can never be compared side by side,');
+  w('  // on any machine, ever — that is a fact about phones, not about this tool.');
+  w('  // ───────────────────────────────────────────────────────────────────────');
+  w(iosHere ? '  ios: {' : '  // ios: {');
+  const iosOn = iosHere ? '    ' : '  //   ';
+  const iosApp = ios?.suggest?.app;
+  w(`${iosOn}// The built app bundle for the simulator. Left out, it looks where builds land.`);
+  w(iosApp ? `${iosOn}app: ${JSON.stringify(String(iosApp))},` : `${iosOn}// app: 'build/Debug-iphonesimulator/YourApp.app',`);
+  w(`${iosOn}// Which simulator to use, and which system to run it on. Left out, it takes a sensible`);
+  w(`${iosOn}// one and says which.`);
+  w(`${iosOn}// deviceType: 'iPhone 17', runtime: 'iOS 26.4',`);
+  w(`${iosOn}// Walks through the app. Left out, it opens the app and reads the first screen.`);
+  w(`${iosOn}// journeys: [{ name: 'signing in', steps: [{ tap: 'Sign in' }] }],`);
+  w(`${iosOn}// Addresses to open the app with, for a screen that is reached by a link.`);
+  w(`${iosOn}// openUrls: ['yourapp://sessions'],`);
+  w(`${iosOn}// Also: device, appearance, reset, logProcess.`);
+  w(iosHere ? '  },' : '  // },');
+  w('');
+
+  // Anything this repository makes that this copy of the tool has nothing to drive. Read from
+  // what is actually loaded, never stated. A sentence hard-coded here would go on telling
+  // somebody their iPhone app cannot be checked on the day the adapter that checks it landed —
+  // and it would contradict the readiness this same command printed two lines earlier.
+  const undrivable = project.products.filter((product) => product.adapter === null);
+  if (undrivable.length > 0) {
+    const one = undrivable.length === 1;
+    w(`  // ${one ? 'One thing this repository makes has no section here' : `${undrivable.length} things this repository makes have no section here`}, and that is not an oversight.`);
+    w(`  // This copy of the tool has nothing in it that can drive ${one ? 'it' : 'them'}, so a setting would do`);
+    w(`  // nothing at all. ${one ? 'It is' : 'They are'} not being checked, \`staysfixed init\` says so every time it`);
+    w(`  // runs, and every clean result stays silent about ${one ? 'it' : 'them'}:`);
+    for (const product of undrivable) {
+      w(`  //   ${padTo(product.name, 30)} ${PRODUCT_KINDS[product.kind].what}`);
+    }
     w('');
   }
 
@@ -1142,8 +1434,18 @@ function nextCommands(readiness, project) {
   /** @type {{command: string, what: string}[]} */
   const next = [];
   next.push({ command: 'staysfixed doctor --json', what: 'What this machine can and cannot drive, as one object. The first call an agent should make.' });
-  if (readiness.some((r) => r.state === 'ready')) {
-    next.push({ command: 'staysfixed check --paired', what: 'The first real run. It records what working looks like, so later runs have something to compare against.' });
+  // The first run is worth taking as soon as ANYTHING here can be reached, not only once
+  // everything can. Holding it back until every product is ready meant a project waiting on
+  // one sample value was never told to start, and a first run that records three products out
+  // of four is three products more than nothing — the reply says which ones it left out.
+  const reachable = readiness.filter((r) => r.state !== 'not possible here');
+  if (reachable.length > 0) {
+    next.push({
+      command: 'staysfixed check --paired',
+      what: reachable.some((r) => r.state === 'ready')
+        ? 'The first real run. It records what working looks like, so later runs have something to compare against.'
+        : 'The first real run. Nothing here is fully set up yet, so it records what it can reach and says plainly what it left out — which is more useful than waiting.',
+    });
   }
   if (project.tests.files > 0) {
     next.push({ command: 'staysfixed check --journeys suite', what: `Walk the ${project.tests.files} test${project.tests.files === 1 ? '' : 's'} this project already has, under instrumentation.` });
@@ -1392,3 +1694,114 @@ export async function run(ctx) {
 // the folder inside a project is called — both owned by src/core/paths.js, both re-stated
 // here because init is the one command whose whole job is those two facts.
 export { CONFIG_NAMES, DEFAULT_DIR };
+
+/**
+ * Which private channels are safe to knock on, read off their names.
+ *
+ * THE RULE THIS BENDS, AND WHY IT IS STILL THE RIGHT CALL. A channel between a desktop app's
+ * two halves is only ever asked to answer when it is named in the settings, because knocking
+ * on an unknown door could do anything. That rule stays. What changes is who does the naming:
+ * leaving the list empty means somebody reads four hundred and fifty registrations by hand
+ * before a single one of them is watched, and until they do, a channel that stops answering is
+ * invisible. Nobody does that, so nothing gets watched.
+ *
+ * So the list is filled in from names that ASK for something rather than do something, and the
+ * settings say plainly that it is a reading of a name rather than a promise about behaviour.
+ * Three lines hold it:
+ *
+ *   - only channels that hand a value back — a listener that answers nothing has nothing to
+ *     compare, and asking it is all risk and no reading;
+ *   - only names whose last word is one of a short list of asking words;
+ *   - and never a name with a secret in it. `browser-password:get` reads as an asking word and
+ *     would put somebody's password into a stored observation, which is the one mistake here
+ *     that cannot be taken back by deleting a line.
+ *
+ * @param {ProjectShape['channels']} channels
+ * @returns {{safe: string[], skipped: number}}
+ */
+export function channelsSafeToAsk(channels) {
+  const asks = /(^|[:.\-/])(get|list|read|status|state|about|info|paths?|version|capabilities|count|summary|describe|available)$/i;
+  // Anything whose name says it DOES something, wherever in the name it appears — not only at
+  // the end. `settings:open-path` ends in a word that reads like asking and opens a window in
+  // front of somebody; `chrome-import:open-privacy-settings` ends in "settings" and opens a
+  // browser page. Both got through a rule that only looked at the last word, and both are the
+  // kind of mistake that has to be impossible rather than unlikely.
+  const acts = /(^|[:.\-/])(open|set|write|save|delete|remove|clear|reset|start|stop|launch|install|uninstall|send|import|export|sync|run|kill|restart|approve|revoke|pair|unpair|update|create|add|apply|move|rename|copy|quit|close|sign|login|logout|connect|disconnect|enable|disable|toggle|upload|download|share|unshare|grant|deny|prompt|ask|select|choose|pick|reveal|focus|show|hide)([:.\-/]|$)/i;
+  // And anything that could hand back something private. A stored observation is written to
+  // disk and read by an agent; a password or an ssh key in one is the single mistake here that
+  // cannot be undone by deleting a line afterwards. Erring wide costs a channel going
+  // unwatched, which is visible in the coverage ledger. Erring narrow costs a secret.
+  const secret = /(password|secret|token|credential|api-?key|\bkeys?\b|keychain|passphrase|cookie|auth|login|account|identity|session-?id|private)/i;
+  /** @type {string[]} */
+  const safe = [];
+  let skipped = 0;
+  for (const channel of channels) {
+    if (!channel.answers) {
+      skipped += 1;
+      continue;
+    }
+    if (secret.test(channel.name) || acts.test(channel.name) || !asks.test(channel.name)) {
+      skipped += 1;
+      continue;
+    }
+    safe.push(channel.name);
+  }
+  safe.sort();
+  // A ceiling, because a settings file with four hundred lines of one array in it is a file
+  // nobody scrolls past, and the coverage ledger names what was left out either way.
+  const most = 60;
+  if (safe.length > most) skipped += safe.length - most;
+  return { safe: safe.slice(0, most), skipped };
+}
+
+/**
+ * A name padded out so a column of them lines up. Purely so a person can read the list.
+ *
+ * @param {string} text
+ * @param {number} width
+ * @returns {string}
+ */
+function padTo(text, width) {
+  return text.length >= width ? text : text + ' '.repeat(width - text.length);
+}
+
+/**
+ * A sentence broken into lines that fit inside a comment.
+ *
+ * @param {string} text
+ * @param {number} width
+ * @returns {string[]}
+ */
+function wrapProse(text, width) {
+  /** @type {string[]} */
+  const lines = [];
+  /** @type {string[]} */
+  let current = [];
+  let length = 0;
+  for (const word of String(text).split(/\s+/).filter(Boolean)) {
+    if (length > 0 && length + 1 + word.length > width) {
+      lines.push(current.join(' '));
+      current = [];
+      length = 0;
+    }
+    current.push(word);
+    length += (length > 0 ? 1 : 0) + word.length;
+  }
+  if (current.length > 0) lines.push(current.join(' '));
+  return lines;
+}
+
+/**
+ * A list broken into rows of a size, so a long array reads as a block rather than a column.
+ *
+ * @template T
+ * @param {T[]} items
+ * @param {number} size
+ * @returns {T[][]}
+ */
+function chunk(items, size) {
+  /** @type {T[][]} */
+  const rows = [];
+  for (let i = 0; i < items.length; i += size) rows.push(items.slice(i, i + size));
+  return rows;
+}

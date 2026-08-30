@@ -1,6 +1,6 @@
 {
   "name": "staysfixed",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Prove that what already worked still works after an agent changed the code. Picture checks, guards for fixed bugs, a pre-release walkthrough, and known-good markers — as a CLI and as an MCP server.",
   "type": "module",
   "license": "MIT",
@@ -35,6 +35,7 @@
     "bin",
     "src",
     "examples",
+    "docs",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -54,8 +55,7 @@
   },
   "dependencies": {
     "pixelmatch": "^7.2.0",
-    "pngjs": "^7.0.0",
-    "playwright": "^1.62.1"
+    "pngjs": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

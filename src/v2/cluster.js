@@ -199,11 +199,20 @@ function buildFinding(signature, members, rename, sources) {
   // Half the differences in a rename are the "vanished" side, so the count of
   // places is the count of pairs, not of rows.
   const count = rename ? Math.max(1, Math.round(members.length / 2)) : members.length;
+  // Do all the members really say the same thing, or only the same KIND of thing?
+  //
+  // The grouping key is coarse on long values on purpose — two five-hundred-character
+  // strings that differ in the middle are one finding, not two hundred — and the sentence
+  // it produced said "The same thing in 12 places" about twelve different values. An agent
+  // reading titles and counts, which is exactly what the design asks it to do, would fix the
+  // one example it was shown and take the count as proof of the other eleven. They are not
+  // the same thing, and now the sentence says so.
+  const identical = members.every((m) => sameValue(m.reference, head.reference) && sameValue(m.candidate, head.candidate));
 
   /** @type {Finding} */
   const finding = {
     id: shortHash(sha256(signature)),
-    title: describe(head, count, rename),
+    title: describe(head, count, rename, identical),
     // Provisional. rank.js replaces this once it knows how far this sits from
     // the edit, which is the only thing that makes the sentence worth reading.
     why: 'Not yet worked out.',
@@ -232,12 +241,20 @@ function buildFinding(signature, members, rename, sources) {
  * @param {Difference} d
  * @param {number} count
  * @param {{from: string, to: string}} [rename]
+ * @param {boolean} [identical]  True when every place in the group moved between the SAME two
+ *                               values. False means the same kind of change with its own
+ *                               values each time, and the sentence has to say which.
  * @returns {string}
  */
-export function describe(d, count, rename) {
+export function describe(d, count, rename, identical = true) {
   const where = CHANNEL_WORDS[d.channel] ?? 'Somewhere';
   const name = smartLeaf(d.path);
-  const spread = count > 1 ? ` The same thing in ${count} places.` : '';
+  const spread =
+    count > 1
+      ? identical
+        ? ` The same thing in ${count} places.`
+        : ` The same kind of change in ${count} places, each with its own values — this is one of them, not all of them.`
+      : '';
 
   if (rename) return `${where}, "${rename.from}" is now called "${rename.to}".${spread}`;
 

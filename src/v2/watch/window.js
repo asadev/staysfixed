@@ -27,10 +27,13 @@
  * look at — and never the newest state.
  *
  * THREE. It never takes the screen. Whoever was in front before this opened is put
- * back in front afterwards, and the same dance is exported so the adapters can use
- * it too — because the complaint that started all of this was not about this panel
- * at all, it was about an app, a simulator and an emulator jumping in front of him
- * while he worked.
+ * back in front afterwards, and the same dance is exported so that anything else
+ * that moves a window can do it too — `check.js` wraps the move that puts a desktop
+ * app out of sight in it. It is only half the answer, and the smaller half: an app
+ * this tool opens is ALLOWED to appear once, because being able to watch it work is
+ * most of how you come to trust it. What must never happen is it coming forward
+ * again after that, and the thing that stops it is the screen guard in
+ * `watch/focus.js`, which runs for the whole of a check.
  *
  * FOUR. It is our own window, not his. Chrome for Testing wherever there is one,
  * a throwaway profile every time, its own port, and nothing on this machine that
@@ -172,10 +175,10 @@ export async function noteTheFrontmost() {
 /**
  * Put the screen back where it was.
  *
- * The other half of `noteTheFrontmost`, and the one implementation of it —
- * the web, Electron, iOS, Android and Windows adapters all call this rather than
- * each writing their own AppleScript, because three copies of this is how one of
- * them ends up subtly not doing it.
+ * The other half of `noteTheFrontmost`, and the one implementation of it. Called
+ * here when the panel opens, and by `check.js` around anything that moves somebody
+ * else's window, rather than each of them writing its own AppleScript — because
+ * three copies of this is how one of them ends up subtly not doing it.
  *
  * Safe to call with null, on any platform, at any time. Never throws.
  *
@@ -335,6 +338,60 @@ export async function moveWindowByPid(pid, current, target) {
     // Usually no accessibility permission, sometimes an app that will not be
     // scripted. Report it as not moved and let the caller say so.
     return false;
+  }
+}
+
+/**
+ * Where a desktop app's biggest window is, asked of macOS by the app's unix id.
+ *
+ * The other half of `moveWindowByPid`, and the reason either of them exists: an
+ * Electron app does not implement the part of the debugging protocol that reads or
+ * moves a window, so a desktop app under check can only be measured through the
+ * window server. Without this the panel has nothing to sit beside and a run has no
+ * way to tell whether the app it opened is on somebody's screen.
+ *
+ * The BIGGEST window, not the first. A desktop app usually has several — a status
+ * item, a hidden helper, a print panel — and the first one macOS hands back is not
+ * reliably the one a person is looking at.
+ *
+ * Null on anything but macOS, and null whenever the machine will not say: no
+ * accessibility permission, an app that refuses to be scripted, an app with no
+ * window yet. Every one of those means "we cannot place this", which is a
+ * disappointment and never a failed check.
+ *
+ * @param {number} pid   The process THIS run started. Never one we attached to.
+ * @returns {Promise<Bounds|null>}
+ */
+export async function windowBoundsByPid(pid) {
+  if (process.platform !== 'darwin') return null;
+  if (!Number.isFinite(Number(pid)) || Number(pid) <= 0) return null;
+  const script = [
+    `tell application "System Events" to tell (first application process whose unix id is ${Math.round(pid)})`,
+    '  set out to ""',
+    '  repeat with w in windows',
+    '    set p to position of w',
+    '    set s to size of w',
+    '    set out to out & (item 1 of p) & "," & (item 2 of p) & "," & (item 1 of s) & "," & (item 2 of s) & linefeed',
+    '  end repeat',
+    '  return out',
+    'end tell',
+  ].join('\n');
+  try {
+    const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 8000 });
+    /** @type {Bounds|null} */
+    let biggest = null;
+    for (const line of String(stdout).split('\n')) {
+      const parts = line.trim().split(',');
+      if (parts.length !== 4) continue;
+      const [left, top, width, height] = parts.map((n) => Math.round(Number(n)));
+      if (![left, top, width, height].every((n) => Number.isFinite(n))) continue;
+      if (!(width > 0) || !(height > 0)) continue;
+      if (biggest && biggest.width * biggest.height >= width * height) continue;
+      biggest = { left, top, width, height };
+    }
+    return biggest;
+  } catch {
+    return null;
   }
 }
 
@@ -562,16 +619,23 @@ function askedHeight(watch) {
 /**
  * Where the panel goes before there is anything to sit beside.
  *
+ * There is deliberately nowhere here to pass an expected app size. Nothing knows it
+ * yet — the app has not been started — and a placement made from a guess is a
+ * window that jumps the moment `snapTo` puts it where it really belongs.
+ *
+ * With no app, `planPlacement` puts the panel against the edge it is given, so the
+ * side is passed straight through rather than flipped. That flip is only needed
+ * when there IS an app, because then the side names the edge the app goes to.
+ *
  * @param {Bounds} screen
  * @param {{width: number, height: number}} size
  * @param {import('../../types.js').WatchOptions|undefined} watch
- * @param {{width: number, height: number}|null} [expectedApp]
  * @returns {Bounds}
  */
-function firstPlace(screen, size, watch, expectedApp = null) {
+function firstPlace(screen, size, watch) {
   const plan = planPlacement({
     screen,
-    appSize: expectedApp,
+    appSize: null,
     panelWidth: size.width,
     side: watch?.side === 'left' ? 'left' : 'right',
     gap: GAP,
@@ -858,6 +922,21 @@ h1 { margin: 8px 0 2px; font-size: 18px; font-weight: 560; letter-spacing: -0.01
  * @property {(beside: BesideThis) => Promise<void>} snapTo
  * @property {() => boolean} placedByHand
  * @property {() => PanelHealth} health
+ * @property {PanelBrowser} browser  Which browser the window is, and whose it is.
+ */
+
+/**
+ * The browser the panel opened in.
+ *
+ * `borrowed` is the field that matters, and it is a safety rule rather than a
+ * detail: when this is the person's own everyday browser, nothing in this tool may
+ * treat its windows as belonging to the tool. The screen guard reads it for exactly
+ * that — claiming a borrowed browser would have it shoving the person out of their
+ * own tabs.
+ *
+ * @typedef {object} PanelBrowser
+ * @property {string} name
+ * @property {boolean} borrowed   True when this is the browser the person uses.
  */
 
 /**
@@ -882,6 +961,10 @@ h1 { margin: 8px 0 2px; font-size: 18px; font-weight: 560; letter-spacing: -0.01
  *
  * @typedef {object} BesideThis
  * @property {number|null} [pid]   The process THIS run started. Never one we attached to.
+ *                                 A desktop app answers no protocol call about its own
+ *                                 window, so its unix id is the only way to find out
+ *                                 where it is — and the only way to move it out of the
+ *                                 panel's way.
  * @property {any} [page]          Its page, when it has one we can ask.
  * @property {Bounds} [window]     Where its window is, when the caller already knows.
  * @property {boolean} [hasWindow] False for anything headless, which is most things.
@@ -1256,7 +1339,7 @@ export async function openPanel(opts = {}) {
     // screen is. A position on the command line is a guess; this is the answer.
     const screen = await readScreen(page);
     const kept = remembered && fitsOnScreen(remembered, screen) ? remembered : null;
-    const first = kept ?? firstPlace(screen, size, watch, null);
+    const first = kept ?? firstPlace(screen, size, watch);
     await moveWindow(page, first);
     await watchForHandMove(page, first);
 
@@ -1284,6 +1367,7 @@ export async function openPanel(opts = {}) {
       // Opened where they left it, so it is already theirs: nothing snaps it.
       byHand: kept !== null,
       foreground: watch.foreground === true,
+      browser: { name: chrome.name, borrowed: chrome.borrowed },
     });
   } catch (e) {
     // Somebody finishing is not something going wrong. A run that ends before its window
@@ -1374,6 +1458,7 @@ const KEEP_NOTES = 120;
  *   placed: Bounds,
  *   byHand: boolean,
  *   foreground: boolean,
+ *   browser: PanelBrowser,
  * }} ctx
  * @returns {Panel}
  */
@@ -1546,16 +1631,48 @@ function makePanel(ctx) {
 
       // Anything headless has a window on paper and nothing on the screen, and
       // snapping against one would leave the panel hugging thin air.
-      const appPage = beside?.hasWindow === false ? null : (beside?.page ?? null);
-      // Ask the protocol first and the page second: a browser answers the first,
-      // and a desktop app only ever answers the second.
+      const headless = beside?.hasWindow === false;
+      const appPage = headless ? null : (beside?.page ?? null);
+      const pid = headless ? 0 : Math.round(Number(beside?.pid) || 0);
+      // Ask the protocol first, the page second, the window server last: a browser
+      // answers the first, a desktop app answers only the second, and a desktop app
+      // whose page we have not got answers only the third.
       const current =
         beside?.window ??
-        (appPage ? ((await readWindowBounds(appPage)) ?? (await readPageWindow(appPage))) : null);
+        (appPage ? ((await readWindowBounds(appPage)) ?? (await readPageWindow(appPage))) : null) ??
+        (pid > 0 ? await windowBoundsByPid(pid) : null);
 
-      const target = current
-        ? panelBeside(current, screen, ctx.panelWidth, ctx.side)
-        : planPlacement({ screen, appSize: null, panelWidth: ctx.panelWidth, side: ctx.side, gap: GAP }).panel;
+      /** @type {Bounds} */
+      let target;
+      if (current && pid > 0) {
+        // This run started that app, so it is ours to move: pin it to its edge and put
+        // the panel flush against it — one shape, two windows. `planPlacement` names the
+        // edge the APP goes to, which is the opposite end of the same arrangement from
+        // the side the PANEL sits on, so the side is flipped on the way in.
+        const plan = planPlacement({
+          screen,
+          appSize: { width: current.width, height: current.height },
+          panelWidth: ctx.panelWidth,
+          side: ctx.side === 'left' ? 'right' : 'left',
+          gap: GAP,
+        });
+        if (plan.app) await moveWindowByPid(pid, current, plan.app);
+        // Where it ACTUALLY ended up, which is not always where it was asked to go: a
+        // window manager may refuse, and there is no accessibility permission on some
+        // machines at all. A panel placed where the app was supposed to be would then
+        // land straight on top of it, which is worse than not snapping.
+        const landed = (await windowBoundsByPid(pid)) ?? current;
+        target = panelBeside(landed, screen, ctx.panelWidth, ctx.side === 'left' ? 'right' : 'left');
+      } else if (current) {
+        // Same flip, same reason: `panelBeside`'s side names which end of the pair the
+        // APP is. Passing the panel's own side through here put the panel on the wrong
+        // side of the app for every run that ever snapped.
+        target = panelBeside(current, screen, ctx.panelWidth, ctx.side === 'left' ? 'right' : 'left');
+      } else {
+        // Nothing to sit beside. With no app, `planPlacement` puts the panel against the
+        // edge it is given, so this one is NOT flipped.
+        target = planPlacement({ screen, appSize: null, panelWidth: ctx.panelWidth, side: ctx.side, gap: GAP }).panel;
+      }
       const bounds = ctx.askedHeight ? { ...target, height: Math.min(ctx.askedHeight, screen.height) } : target;
 
       if (await moveWindow(ctx.page, bounds)) {
@@ -1667,5 +1784,6 @@ function makePanel(ctx) {
     snapTo,
     placedByHand: () => byHand,
     health: () => ({ alive: !dead, pushed, delivered, dropped, stalls, queued: queue.length }),
+    browser: ctx.browser,
   };
 }

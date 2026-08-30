@@ -329,30 +329,65 @@ function isPlainObject(v) {
  * @returns {string}
  */
 export function canonicalJson(value) {
-  return JSON.stringify(canonicalise(value, 0)) ?? 'null';
+  return canonicalForm(value).json;
+}
+
+/**
+ * The canonical string, and whether anything had to be given up to produce it.
+ *
+ * The flag is the whole point. Below `MAX_VALUE_DEPTH` the canonical form stands in for the
+ * value exactly; past it, the deep part is replaced by a marker, and TWO DIFFERENT deep
+ * values collapse to the same string. Comparing those two strings and calling them equal is
+ * the tool saying "these are the same" about a pair it never finished reading, which is the
+ * one sentence it may never say. So the flag travels out and `sameValue` refuses.
+ *
+ * @param {ObservedValue} value
+ * @returns {{json: string, tooDeep: boolean}}
+ */
+function canonicalForm(value) {
+  const how = { tooDeep: false };
+  return { json: JSON.stringify(canonicalise(value, 0, how)) ?? 'null', tooDeep: how.tooDeep };
 }
 
 /**
  * @param {ObservedValue} value
  * @param {number} depth
+ * @param {{tooDeep: boolean}} how
  * @returns {unknown}
  */
-function canonicalise(value, depth) {
-  if (depth > MAX_VALUE_DEPTH) return '<too deep>';
+function canonicalise(value, depth, how) {
+  if (depth > MAX_VALUE_DEPTH) {
+    how.tooDeep = true;
+    return '<too deep>';
+  }
   if (typeof value === 'number' && !Number.isFinite(value)) return `<number:${String(value)}>`;
-  if (Array.isArray(value)) return value.map((v) => canonicalise(v, depth + 1));
+  if (Array.isArray(value)) return value.map((v) => canonicalise(v, depth + 1, how));
   if (isPlainObject(value)) {
-    /** @type {Record<string, unknown>} */
-    const out = {};
+    // Built through a Map and `Object.fromEntries`, because plain assignment cannot hold a
+    // key called `__proto__`: `out['__proto__'] = x` rewires the object instead of storing
+    // anything, so every object with that key canonicalised to `{}` and any two of them
+    // compared EQUAL however different their contents. A JSON body with a `__proto__` field
+    // in it is not exotic; it is what a product prints when it dumps data it was handed.
+    /** @type {Map<string, unknown>} */
+    const out = new Map();
     for (const key of Object.keys(value).sort()) {
-      out[key] = canonicalise(/** @type {ObservedValue} */ (value[key]), depth + 1);
+      out.set(key, canonicalise(/** @type {ObservedValue} */ (value[key]), depth + 1, how));
     }
-    return out;
+    return Object.fromEntries(out);
   }
   return value;
 }
 
 /**
+ * Are these two values the same value?
+ *
+ * "I could not finish reading either of them" is not the same answer as "yes", and until
+ * 2026-08-30 it came back as one: anything nesting deeper than the tool reads was flattened
+ * to the text `<too deep>`, so two completely different deep values compared EQUAL and every
+ * difference inside them vanished without a word. `makeObservation` refuses to make one that
+ * deep, so this only ever happens to a value read back off the disk — which is precisely the
+ * value nobody watched being made.
+ *
  * @param {ObservedValue|undefined} a
  * @param {ObservedValue|undefined} b
  * @returns {boolean}
@@ -360,7 +395,12 @@ function canonicalise(value, depth) {
 export function sameValue(a, b) {
   if (a === undefined || b === undefined) return a === b;
   if (a === b) return true;
-  return canonicalJson(a) === canonicalJson(b);
+  const x = canonicalForm(a);
+  const y = canonicalForm(b);
+  // Different is the safe answer and the honest one: it makes the pair a finding somebody
+  // reads rather than a silence nobody can see.
+  if (x.tooDeep || y.tooDeep) return false;
+  return x.json === y.json;
 }
 
 /**
@@ -823,7 +863,13 @@ export function wobbleStorm(wobble) {
   const looked = unstable + wobble.steady;
   const vanished = wobble.entries.filter((e) => e.kind === 'vanished').length;
   const share = looked === 0 ? 0 : unstable / looked;
-  if (!wobble.measured || looked < STORM_FLOOR || share <= STORM_SHARE) {
+  // Nothing held still at all. This is the one case the share and the floor between them let
+  // through: a journey with eight addresses where all eight wobble is 100% of the comparison
+  // thrown away, and the floor exists to stop three-out-of-four being called a storm, not to
+  // excuse a comparison that ended up empty. Zero steady addresses is not a tuned number; it
+  // is the arithmetic saying there was nothing left to compare.
+  const nothingHeldStill = wobble.measured && wobble.steady === 0 && unstable > 0;
+  if (!wobble.measured || (!nothingHeldStill && (looked < STORM_FLOOR || share <= STORM_SHARE))) {
     return { stormy: false, share, looked, vanished, why: '' };
   }
   const percent = Math.round(share * 100);

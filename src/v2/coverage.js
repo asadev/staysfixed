@@ -660,7 +660,18 @@ export async function ledger(store, product, opts = {}) {
   /** @type {CoverageGap[]} */
   const holes = [];
 
-  const all = await listBuilds(store, { product });
+  const all = await listBuilds(store, {
+    product,
+    // A build folder that could not be read is a build that is simply not in this ledger,
+    // and "not in the ledger" is indistinguishable from "never happened". It is a hole, and
+    // holes are this file's entire subject.
+    onProblem: (message) =>
+      holes.push({
+        what: message,
+        why: 'A door this tool opened during that build therefore reads here as never opened.',
+        unlockedBy: 'Run a check against that build again; a good record replaces the unreadable one.',
+      }),
+  });
   const wanted = opts.builds
     ? all.filter((b) => opts.builds?.includes(b.fingerprint.id))
     : all.slice(0, opts.maxBuilds ?? 20);
@@ -892,10 +903,12 @@ export function describeCoverage(led) {
     lines.push(`All ${led.work} of the unopened ones could be covered.`);
   }
 
+  // Every kind, not the worst four. There are five kinds of door in the whole tool, so
+  // cutting the list saved one line and dropped a whole category of the product out of the
+  // only sentence that says how much of it is covered.
   const kinds = Object.entries(led.byKind)
     .filter(([, k]) => k.doors > 0)
     .sort((a, b) => b[1].never - a[1].never)
-    .slice(0, 4)
     .map(([kind, k]) => `${k.opened} of ${k.doors} ${k.doors === 1 ? KIND_ONE[kind] ?? kind : KIND_MANY[kind] ?? kind}`);
   if (kinds.length > 0) lines.push(`By kind: ${kinds.join(', ')}.`);
 
@@ -1024,7 +1037,29 @@ export function gaps(led, opts = {}) {
     });
   }
 
-  return jobs.sort((a, b) => (b.rank === a.rank ? b.doors - a.doors : b.rank - a.rank)).slice(0, worst);
+  const ranked = jobs.sort((a, b) => (b.rank === a.rank ? b.doors - a.doors : b.rank - a.rank));
+  if (ranked.length <= worst) return ranked;
+
+  // The cut is real and it used to be invisible. `toCoverage` asks for eight jobs; a product
+  // with forty families of unopened doors handed back eight and said nothing about the other
+  // thirty-two, so the coverage list — the one place in this tool whose entire job is naming
+  // what was NOT looked at — was itself quietly truncated. The last slot says what is missing
+  // rather than being one more job.
+  const shown = ranked.slice(0, Math.max(0, worst - 1));
+  const rest = ranked.slice(Math.max(0, worst - 1));
+  const doors = rest.reduce((n, job) => n + job.doors, 0);
+  shown.push({
+    group: 'everything else that is unopened',
+    what: `${rest.length} more ${rest.length === 1 ? 'family' : 'families'} of doors are never opened and are not listed above.`,
+    why: `Between them they hold ${doors} ${doors === 1 ? 'door' : 'doors'} nothing has ever walked through, so a clean run says nothing about any of them either. Only the ${shown.length} worth doing first are named here.`,
+    howTo: `Work through the ones above, or ask for the whole list at once. The families left out start with ${rest.slice(0, 3).map((job) => job.group).join(', ')}.`,
+    doors,
+    openedHere: 0,
+    examples: rest.slice(0, 5).map((job) => job.group),
+    files: [],
+    rank: 0,
+  });
+  return shown;
 }
 
 /**
@@ -1050,7 +1085,7 @@ function howToCover(kind, never, harvested = false) {
     case 'export':
       return harvested
         ? `The project's own tests have already been harvested and they do not reach these, so nothing existing covers them. Either they are dead code worth deleting, or they need a test that calls them — starting with "${first}".`
-        : `Harvest the project's own test suite. Its tests already call most of these, and running them under coverage tells the ledger exactly which — including "${first}".`;
+        : `Write a journeys file that calls them and pass it with --journeys — starting with "${first}". (Harvesting the project's own tests would answer this for free, and that is written and not yet wired into a run.)`;
     default:
       return `Add a journey that reaches "${first}" and the ones beside it.`;
   }
@@ -1076,7 +1111,7 @@ export function toCoverage(led, opts = {}) {
       what: `${led.never} of this product's ${led.doors} doors have never been opened by this tool.`,
       why: 'No journey reaches them, so a break behind one of them would not show up in any run — clean or otherwise.',
       unlockedBy: led.work > 0
-        ? `${led.work} of them could be covered. Harvest the project's own test suite, or switch on the journeys read out of the code.`
+        ? `${led.work} of them could be covered by journeys that reach them — read out of your source, or named by hand in a journeys file.`
         : 'Nothing. Every one of them is a door this tool cannot open from here, and each says why.',
       channel: 'contract',
       doors: led.never,

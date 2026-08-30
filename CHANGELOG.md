@@ -4,6 +4,193 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-08-30
+
+The release where the front door was found to be locked.
+
+Everything written about this tool over MCP was true of code that no client could
+reach: `staysfixed mcp` served version 1's picture tools, and `staysfixed init`
+wrote version 1's picture settings. The README, `docs/mcp.md`,
+`docs/getting-started.md` and the tool's own `capabilities` reply all described
+the difference engine. An agent that followed this project's own wiring block got
+a tool set none of the documentation mentions, and never reached the engine at
+all. Nothing was broken. Nothing was reachable either, which is worse, because it
+looks like it works.
+
+That is fixed, and so is the second half of the same mistake: `doctor` was
+confidently wrong about this machine, in three different ways, all of them
+invisible.
+
+### Changed — the front door
+
+- **`staysfixed mcp` now serves the difference engine.** Seven tools:
+  `staysfixed_capabilities`, `_intent`, `_check`, `_explain`, `_prove`, `_waive`,
+  `_coverage`. There is still no door marked approve.
+- **`staysfixed mcp --v1` serves version 1's picture tools, unchanged.** Nobody who
+  wired those up is stranded, and a test holds them there.
+- **`staysfixed init` now reads your project properly.** It works out what the
+  repository actually makes, writes settings with an explanation beside every
+  option, never overwrites a file you already have, and answers with
+  `plan.project`, `plan.readiness`, `plan.needs.agent`, `plan.needs.person`,
+  `plan.needs.impossible`, `plan.journeys`, `plan.covers.short` and `plan.wiring`
+  under `--json`. `docs/getting-started.md` was written entirely around those
+  fields against a command that did not produce any of them.
+- **Settings for a product with no screen are no longer a puzzle.** `status`,
+  `walk`, `approve`, `mark`, `trace` and `check --pictures` all work by opening
+  something and photographing it, and a command-line tool has nothing to open —
+  which is the correct shape for its settings, not a mistake. They used to answer
+  "Stays Fixed does not know what to open" and tell you to add a web address you do
+  not have. They now say which half of the tool needs a screen, and name the half
+  that covers you without one.
+
+### Added — the MCP surface an agent reads before it calls anything
+
+- **Every tool carries a short title and the protocol's own flags for what it does
+  to your machine.** `staysfixed_capabilities`, `staysfixed_explain` and
+  `staysfixed_coverage` are read-only and idempotent; `staysfixed_check` and
+  `staysfixed_prove` open your product, so they are neither; and none of the seven
+  claims to reach the outside world, because none of them does. A client can now
+  tell a question from an action without reading any documentation.
+- **`journeys: "suite"` and `journeys: "recorded"` are refused by name.** Both are
+  written and tested in `src/v2/journeys/`, and nothing on the check path calls
+  them, so both used to reach the engine as the name of a file and come back as
+  "there is no journeys file at .../suite" — an error that sends an agent looking
+  for a file it never asked for.
+
+### Fixed — `doctor` was wrong about this machine
+
+All three were found by running it on a real Mac and checking every line it
+printed, which is the only way this kind of mistake is ever found.
+
+- **It asked `command -v powershell.exe` over ssh to decide whether Windows sits
+  behind a machine.** That question answers "no" on a machine with a real Windows
+  desktop right there: the path is put on `PATH` by an interactive login shell, and
+  ssh does not run one. The one true Windows runner in this machine's ssh config
+  was reported as not Windows. It asks the filesystem now, for the three places
+  PowerShell actually lives, using the same list the code that later drives it
+  uses — one list, not two.
+- **It read a refusal as an answer.** `ssh github-imza 'echo staysfixed-reachable'`
+  is refused by github.com with `Invalid command: echo staysfixed-reachable`, on
+  stderr, quoting the command back. A probe that looked for its own word anywhere
+  in either stream found it inside the refusal, so three git hosts were listed as
+  machines this tool could run checks on — and, by the same bug, as Windows
+  desktops. It reads standard output only now, and matches the whole line.
+- **It named the first eight machines in an ssh config and dropped the rest without
+  a word.** It dials sixteen, and anything past that is named as not dialled rather
+  than left out. Undercount and say so; never quietly stop short.
+- **It reported Docker as present because the command was on the path**, on a
+  machine where Docker Desktop was shut and nothing it promises would have worked.
+  It asks the engine for its version now.
+- No probe in `doctor` uses a shell variable or a loop any more. One machine in
+  this config reaches Windows through an OpenSSH server that hands the command down
+  through a second shell, and every `$p` is expanded to nothing before the shell
+  meant to read it sees it — `for p in "A"; do echo "$p"; done` prints an empty
+  line there. Literal arguments only.
+
+### Fixed — what an agent actually reads
+
+- **`staysfixed_explain` printed `(SEALED: [object Object])`** on the one reply an
+  agent reads when it is trying to understand a difference it may not waive.
+- **The same sentence arrived twice in one check reply** — "not everything was
+  checked", once under the headline and again inside the summary — and the values
+  of a one-address finding were printed twice in `explain`. Both are said once now.
+- **`staysfixed_coverage` printed the same line three times.** Several of the
+  coverage caveats share one headline and differ entirely in their reason, so a
+  list of headlines was one sentence repeated and none of the three reasons. The
+  reason is printed with each.
+- **"2 journeys were walked" no longer sits one line above "2 of the 2 ways into
+  this product have never been walked through."** Both numbers were right and the
+  two sentences contradicted each other on screen: a journey is one route through
+  the product, a door is one way into it, and they now have two different words.
+- **The tool no longer advises you to do something it cannot do.** Three places
+  told you to harvest your own test suite as journeys. That is written and not
+  wired, so all three now name what does work today.
+
+### Changed — what a fresh install pulls
+
+- **`playwright` is out of `dependencies`.** Nothing in `src/` imports it — browsers
+  are driven over the debugging protocol by code in this repository — and having it
+  there made a fresh `npm install staysfixed` pull about 18MB against a README
+  promising two packages under a megabyte. It stays a `devDependency`, and it is
+  still what `doctor` tells you to install in YOUR project when you want a browser
+  of your own.
+- **`docs/` ships with the package**, so an agent that installed this from npm can
+  read `docs/getting-started.md` without a network.
+
+### Changed — everything else in this batch
+
+- **A check gives your screen back.** An app the tool opens comes to the front once,
+  because that first appearance is how you see what is happening; from the moment
+  you pick something else, anything the tool launched loses the argument
+  permanently. The window it opens is placed beside the app rather than over it,
+  and a window that is going to be left up is waited for while one that is going
+  away is not.
+- **The store writes whole lines or says plainly that it did not.** A full disk is
+  the one storage failure that happens to real people mid-run, and it now reads as
+  a full disk rather than as a corrupt record.
+- **Ranking says which of two answers it has.** When distance from the edit cannot
+  be worked out, the finding is still reported and still counted, and the reply
+  says that its position is a guess rather than letting the order imply a
+  confidence nobody has.
+- **The self-check corpus grew again**, including a case where the store itself
+  cannot be written to — a machine-shaped failure that has to come back as "no
+  answer" rather than as a clean run.
+- **The scratch checkout a causal proof makes is put away, and says so plainly when
+  it will not go.** A file that vanished between git listing it and the copy
+  reaching it is not a failure; a directory that will not delete is, and the two
+  used to share one empty catch.
+
+## [0.6.2] — 2026-08-30
+
+Something to watch it with, and the first proof on a real product that somebody
+else built.
+
+### Added
+
+- **A live panel showing what the tool now is.** Version 1's panel showed screens
+  and pictures, because that is what version 1 did. This one shows a product being
+  proven unchanged: which surface each journey walks, which build it is being
+  measured against and how that build was chosen, addresses ticking up as they are
+  watched, how much wobble was measured and subtracted, the findings that survived,
+  what was **not** checked, and the one or two things only a person may decide. The
+  wobble figure is given room on purpose — it is the number that explains why the
+  tool is quiet.
+- **A focus guard, so watching it work never costs you your screen.** An app the
+  tool opens is allowed to come to the front once, because that first appearance is
+  how you see what is happening. From the moment you pick something else, anything
+  the tool launched loses the argument permanently. There is no flag for it and
+  nothing to configure: an Electron app calls `focus()` from its own main process, a
+  simulator activates when it boots, a browser activates when a window opens, and
+  none of that goes through us — so the only thing that works is watching who is in
+  front and handing the screen straight back. It learns which application is yours
+  by watching what you choose, never by being told, and it says nothing at all
+  unless it actually had to act. Measured on a real desktop app: five grabs over
+  five seconds, five handed straight back.
+
+### Fixed
+
+- Three rendering defects, each of which would have told somebody something untrue:
+  a verdict trimmed twice, so a run with four findings — two of them sealed —
+  announced *"Everything that worked still works"*; a build that lost its name on a
+  second trim and became "an unnamed build"; and a `\b` inside a template literal
+  eaten before the regular expression saw it, so permanent coverage gaps were
+  painted as though a person could act on them.
+- **A check that finished before its window opened waited out a twenty-second
+  timeout.** The check never waited on the panel, but stopping did: a 2.2 second
+  check took 20.7 seconds of wall time. Opening is cancellable now and a window that
+  arrives late closes itself. A 100ms check ends in 277ms.
+
+### Proven
+
+- On a real product that somebody else built: a reference cut at **15,147
+  addresses** across 17 journeys, two agent-shaped breaks caught in 12.6 seconds
+  with the break far from the edit correctly outranking the one inside it, and
+  silence restored when both were undone. Its iPhone app built and driven in a
+  simulator of the tool's own; its Android app built and driven on a throwaway
+  emulator.
+- With the panel open throughout: same verdict, same 1,776 addresses, 110 events
+  pushed, 104 delivered, none dropped. Closing it mid-run changes nothing.
+
 ## [0.6.1] — 2026-08-30
 
 Documentation only, and it is a correction rather than a polish. The README

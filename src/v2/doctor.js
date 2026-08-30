@@ -36,6 +36,7 @@ import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { platformTag } from '../drive/find.js';
 import { isRepo } from '../core/git.js';
 import { surveyBrowsers, INSTALL_COMMAND, PORT_NEVER_USE } from './browsers.js';
+import { POWERSHELL_PATHS } from './remote.js';
 import { messageOf, EXIT } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, mark, shortPath, setLogLevel } from '../core/log.js';
 
@@ -45,8 +46,12 @@ const exec = promisify(execFile);
 const PROBE_MS = 5_000;
 /** Reaching another machine is slower than reaching a binary, but not much. */
 const REACH_MS = 8_000;
-/** More hosts than this in one ssh config and we stop dialling; the list is a menu, not a queue. */
-const MAX_HOSTS = 8;
+/**
+ * More hosts than this in one ssh config and we stop dialling; the list is a menu, not a
+ * queue. They are all dialled at once, so the number costs parallel ssh processes rather
+ * than seconds - and anything past the cap is named in the answer instead of dropped.
+ */
+const MAX_HOSTS = 16;
 
 /**
  * The seven ways this tool can watch a product, in the order the design puts
@@ -82,6 +87,9 @@ export const CHANNELS = [
  * @property {boolean} reachable
  * @property {string} how           How we found out, or why it did not answer.
  * @property {boolean} [windows]    Reaches a real Windows desktop through powershell.exe.
+ * @property {string} [powershell]  The absolute path to powershell.exe that answered, when one did.
+ *                                  Kept because it is the evidence: "there is Windows behind this
+ *                                  host" is a claim, and this is the file that proves it.
  */
 
 /**
@@ -141,6 +149,11 @@ export const CHANNELS = [
  * @property {Need[]} needs
  * @property {string} [instead]     Only on `not possible here`: the nearest honest
  *                                  alternative, so the answer is not just a refusal.
+ * @property {boolean} [notInThisProject]  The reason is that there is nothing of this kind
+ *                                  in this repository — NOT that the machine cannot do it.
+ *                                  Told apart because "your Mac cannot check an iPhone app"
+ *                                  is false on a Mac with Xcode on it, and a reader who is
+ *                                  told that once stops believing the rest of the page.
  */
 
 /**
@@ -362,23 +375,31 @@ export function onPath(name) {
  * timeout as its own answer — a tool that will not reply is not a tool that is
  * missing, and telling somebody to install it would be wrong.
  *
+ * `out` merges the two streams because a version banner may come out of either -
+ * Java announces itself on stderr. `stdout` and `stderr` are kept apart as well,
+ * and anything that has to tell an ANSWER from a REFUSAL must read `stdout`. That
+ * distinction is not fussiness: github.com refuses `ssh github-x 'echo hello'` by
+ * writing `Invalid command: echo hello` to stderr, so a probe reading the merged
+ * text finds its own word in the refusal and calls the refusal a reply.
+ *
  * @param {string} file
  * @param {string[]} args
  * @param {number} [timeoutMs]
- * @returns {Promise<{ok: boolean, out: string, why: string, hung: boolean}>}
+ * @returns {Promise<{ok: boolean, out: string, stdout: string, stderr: string, why: string, hung: boolean}>}
  */
 async function ask(file, args, timeoutMs = PROBE_MS) {
   try {
     const { stdout, stderr } = await exec(file, args, { timeout: timeoutMs, maxBuffer: 4 << 20, windowsHide: true });
     // Java and a few others announce their version on stderr. Take whichever spoke.
-    return { ok: true, out: String(stdout || stderr).trim(), why: '', hung: false };
+    return { ok: true, out: String(stdout || stderr).trim(), stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), why: '', hung: false };
   } catch (error) {
     const e = /** @type {{killed?: boolean, signal?: string, stdout?: string, stderr?: string}} */ (Object(error));
     const hung = e.killed === true || e.signal === 'SIGTERM';
     const spoke = String(e.stdout || e.stderr || '').trim();
+    const streams = { stdout: String(e.stdout ?? ''), stderr: String(e.stderr ?? '') };
     // A non-zero exit that still printed a version is a success for our purposes.
-    if (!hung && spoke !== '') return { ok: true, out: spoke, why: '', hung: false };
-    return { ok: false, out: '', why: hung ? `it did not answer within ${Math.round(timeoutMs / 1000)}s` : messageOf(error), hung };
+    if (!hung && spoke !== '') return { ok: true, out: spoke, ...streams, why: '', hung: false };
+    return { ok: false, out: '', ...streams, why: hung ? `it did not answer within ${Math.round(timeoutMs / 1000)}s` : messageOf(error), hung };
   }
 }
 
@@ -548,13 +569,25 @@ async function findTools(cwd, browsers) {
 
     (async () => {
       const where = onPath('docker');
+      // The binary being there is not the question. Docker only restores a snapshot when
+      // its engine is actually RUNNING, and on a Mac the command sits on the path all day
+      // while Docker Desktop is shut. Asking the engine for its version is the difference
+      // between detecting and assuming, and assuming here promises a server comparison
+      // that would fall over the moment it was asked for.
+      const engine = where ? await ask(where, ['version', '--format', '{{.Server.Version}}']) : null;
+      const running = engine !== null && engine.ok && /\d/.test(engine.stdout);
       add({
         id: 'docker',
         name: 'Docker',
-        found: where !== null,
+        found: running,
         where: where ?? undefined,
+        version: running ? versionIn(engine.stdout) : undefined,
         why: 'The usual way to restore the same database snapshot twice, which is what a server comparison needs.',
-        fix: where ? undefined : 'Only needed to watch a server whose behaviour depends on its data.',
+        fix: running
+          ? undefined
+          : where
+            ? 'Docker is installed but its engine is not answering — start Docker Desktop, or the docker service, and run this again. Only needed to watch a server whose behaviour depends on its data.'
+            : 'Only needed to watch a server whose behaviour depends on its data.',
         automatic: false,
       });
     })(),
@@ -982,27 +1015,117 @@ function androidSdkTool(folder, name) {
  */
 export async function reachableHosts() {
   if (!onPath('ssh')) return [];
-  const names = (await sshConfigHosts()).slice(0, MAX_HOSTS);
+  const names = await sshConfigHosts();
   if (names.length === 0) return [];
 
-  return await Promise.all(
-    names.map(async (name) => {
-      const answer = await ask('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', name, 'echo staysfixed-reachable'], REACH_MS);
-      if (!answer.ok || !answer.out.includes('staysfixed-reachable')) {
-        return /** @type {HostReport} */ ({ name, reachable: false, how: answer.why || 'it did not answer' });
-      }
-      // A Linux shell that can see powershell.exe is a real Windows desktop
-      // behind it — the cheapest Windows runner there is, and one nobody has to
-      // provision. Worth one extra round trip to find out.
-      const windows = await ask('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', name, 'command -v powershell.exe || command -v pwsh.exe'], REACH_MS);
-      return /** @type {HostReport} */ ({
+  const dialled = await Promise.all(names.slice(0, MAX_HOSTS).map((name) => describeHost(name)));
+  // Anything past the cap is NAMED rather than dropped. A machine quietly left out of
+  // this list is the same shape of bug as a folder quietly skipped while reading source:
+  // the answer looks complete, and the runner somebody needed is simply not in it.
+  const skipped = names.slice(MAX_HOSTS).map(
+    (name) =>
+      /** @type {HostReport} */ ({
         name,
-        reachable: true,
-        how: 'it answered over ssh with the key you already have',
-        windows: windows.ok && windows.out.trim() !== '',
-      });
-    })
+        reachable: false,
+        how: `not dialled — your ssh config names ${names.length} machines and this stops after ${MAX_HOSTS} so doctor stays quick. Nothing is known about this one either way.`,
+      })
   );
+  return [...dialled, ...skipped];
+}
+
+/**
+ * The word a machine has to say back before anything it reports is believed, and
+ * it has to say it on standard output, on a line of its own.
+ *
+ * All three halves of that sentence were bought with a wrong answer on this Mac.
+ * `ssh github-imza 'echo staysfixed-reachable'` is refused by github.com with
+ * `Invalid command: echo staysfixed-reachable` — on stderr, and containing the word,
+ * because the refusal quotes the command back. A probe that looked for the word
+ * anywhere in either stream therefore listed github.com among the machines this tool
+ * could run checks on, twice over: once as reachable, and once as a Windows desktop.
+ */
+const ALIVE = 'staysfixed-reachable';
+
+/**
+ * What is on the other end of one ssh host name.
+ *
+ * Two rules, and both of them are scar tissue.
+ *
+ * READ STANDARD OUTPUT, AND MATCH THE WHOLE LINE. See `ALIVE`. A host that refuses
+ * commands is not a machine that can run them, and it must not be listed as one.
+ *
+ * NO SHELL VARIABLES, NO LOOPS, NOTHING BUT LITERAL ARGUMENTS. `imza-pc` in this
+ * machine's ssh config reaches a Windows box whose OpenSSH hands the command down
+ * through a second shell, and every `$p` is expanded to nothing before the shell that
+ * was meant to read it ever sees it: `for p in "A"; do echo "$p"; done` prints an empty
+ * line there. `ls -d` with the paths written out is the same question asked in a way
+ * no extra layer can eat.
+ *
+ * @param {string} name
+ * @returns {Promise<HostReport>}
+ */
+async function describeHost(name) {
+  const ssh = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5'];
+  const alive = await ask('ssh', [...ssh, name, `echo ${ALIVE}`], REACH_MS);
+  if (!answered(alive)) return readHostProbe(name, alive, null);
+
+  // A shell that can SEE powershell.exe on the filesystem has a real Windows desktop
+  // behind it — the cheapest Windows runner there is, and one nobody has to provision.
+  // Asked of the filesystem, never of the path: powershell.exe is not on the PATH of a
+  // non-interactive ssh session even on a machine configured to put it there, so
+  // `command -v powershell.exe` answers "no" on a box with Windows sitting right behind
+  // it. The one list of places to look lives in remote.js, which is the file that later
+  // has to actually run one.
+  const look = await ask('ssh', [...ssh, name, `ls -d ${POWERSHELL_PATHS.map((p) => `'${p}'`).join(' ')}`], REACH_MS);
+  return readHostProbe(name, alive, look);
+}
+
+/**
+ * Did that machine actually say the word, on its own line, on standard output?
+ * @param {{stdout: string}} alive
+ * @returns {boolean}
+ */
+function answered(alive) {
+  return alive.stdout.split('\n').some((line) => line.trim() === ALIVE);
+}
+
+/**
+ * Turn the two probe answers into what we will say about that machine.
+ *
+ * Split out from the dialling so the decision can be tested against the exact bytes real
+ * machines send back — a github.com refusal, an OpenSSH warning banner on stderr, a WSL
+ * shell with Windows behind it — without any test needing a network or an ssh key.
+ *
+ * @param {string} name
+ * @param {{stdout: string, stderr: string, why: string}} alive   The `echo` probe.
+ * @param {{stdout: string}|null} look   The PowerShell probe, or null if we never got that far.
+ * @returns {HostReport}
+ */
+export function readHostProbe(name, alive, look) {
+  if (!answered(alive)) {
+    // Three different silences, and they mean different things to whoever reads this.
+    // A host that talked but would not run the command is a git remote, not a machine
+    // with a shell on it, and telling somebody their ssh key is broken would send them
+    // off fixing something that already works.
+    const spoke = (alive.stdout + alive.stderr).trim() !== '';
+    return {
+      name,
+      reachable: false,
+      how: spoke
+        ? 'it answered, but it does not give you a shell — nothing can be run on it. A git host such as github.com looks exactly like this.'
+        : alive.why || 'it did not answer',
+    };
+  }
+
+  const powershell = (look?.stdout ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => POWERSHELL_PATHS.includes(line));
+
+  /** @type {HostReport} */
+  const report = { name, reachable: true, how: 'it answered over ssh with the key you already have', windows: powershell !== undefined };
+  if (powershell !== undefined) report.powershell = powershell;
+  return report;
 }
 
 /**
@@ -1132,6 +1255,14 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   /** @type {Map<string, string>} */
   const impossible = new Map();
 
+  /**
+   * Of those, the ones whose reason is the PROJECT rather than the machine. A repository
+   * with no iPhone app in it needs no simulator, and saying "iPhone apps cannot be done
+   * here" on a Mac with Xcode installed is simply untrue.
+   * @type {Set<string>}
+   */
+  const notInThisProject = new Set();
+
   surfaces.push({
     id: 'cli',
     name: 'command-line tools and libraries',
@@ -1227,6 +1358,7 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
           ],
   });
   if (desktopApp === null) {
+    notInThisProject.add('electron');
     impossible.set('electron', 'This project has no desktop app in it. If yours is built somewhere else, name the built app in your settings under app.binary and this becomes available — nothing else is needed, and no browser is needed for it at all.');
   }
 
@@ -1266,6 +1398,7 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
     needs: phones.android === null || !canDrive('android') ? [] : androidWants,
   });
   if (phones.android === null) {
+    notInThisProject.add('android');
     impossible.set(
       'android',
       'This project has no Android app in it, so there is nothing here for an emulator to run. If yours is built somewhere else, name the built APK in your settings under android.apk and this becomes available — nothing else is needed.'
@@ -1290,6 +1423,7 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   if (!onAMac) {
     impossible.set('ios', 'An iPhone build can only be run on a Mac. Everything else on this list is unaffected — check the iPhone app from a Mac, and let this machine cover the rest.');
   } else if (phones.ios === null) {
+    notInThisProject.add('ios');
     impossible.set(
       'ios',
       'This project has no iPhone app in it, so there is nothing for the simulator to run. If yours is built somewhere else, name the built .app in your settings under ios.app and this becomes available.'
@@ -1375,7 +1509,11 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
 
   return surfaces.map((surface) => {
     const instead = impossible.get(surface.id);
-    return instead ? { ...surface, state: stateOf(surface, true), instead } : { ...surface, state: stateOf(surface, false) };
+    if (!instead) return { ...surface, state: stateOf(surface, false) };
+    /** @type {SurfaceReport} */
+    const out = { ...surface, state: stateOf(surface, true), instead };
+    if (notInThisProject.has(surface.id)) out.notInThisProject = true;
+    return out;
   });
 }
 
@@ -1433,13 +1571,19 @@ function whatThisRunActuallyCovers(surfaces) {
     // clears its own list without mentioning it; only the rest reaches a person.
     const fixable = missing.filter((s) => s.state === 'the agent can fix this').map((s) => s.name);
     const needsPerson = missing.filter((s) => s.state === 'only a person can do this').map((s) => s.name);
-    const never = missing.filter((s) => s.state === 'not possible here').map((s) => s.name);
+    const never = missing.filter((s) => s.state === 'not possible here');
     if (fixable.length) parts.push(`${plainList(fixable, true)} could be added here without asking anybody — the commands are in nextSteps.`);
     if (needsPerson.length) parts.push(`${plainList(needsPerson, true)} needs a person to do something first, and what that is is written out in full.`);
-    // "here" rather than "on this machine", because sometimes it is the project
-    // and not the machine — a project with no desktop app in it needs no runner,
-    // and telling somebody their Mac cannot do it would be false.
-    if (never.length) parts.push(`${plainList(never, true)} cannot be done here at all, and the reason for each is in notCovered.`);
+    // Two different reasons, said as two different sentences. Rolling them together put
+    // "iPhone apps cannot be done here at all" on a Mac with Xcode and three simulator
+    // runtimes on it, where the real reason was that this repository has no iPhone app in
+    // it. Both sentences are true; only one of them was.
+    const noSuchProduct = never.filter((s) => s.notInThisProject === true).map((s) => s.name);
+    const noSuchMachine = never.filter((s) => s.notInThisProject !== true).map((s) => s.name);
+    if (noSuchProduct.length) {
+      parts.push(`There is nothing of ${noSuchProduct.length === 1 ? 'that kind' : 'those kinds'} in this repository — ${plainList(noSuchProduct)} — so there is nothing here to check, and that is not a limit of this machine.`);
+    }
+    if (noSuchMachine.length) parts.push(`${plainList(noSuchMachine, true)} cannot be done here at all, and the reason for each is in notCovered.`);
   }
   if (out.everything) parts.push('Nothing is being left out on this machine.');
   out.short = parts.join(' ');
@@ -1570,10 +1714,11 @@ export function describeCapabilities(caps) {
     lines.push(`These need a person, and only for the steps listed further down: ${byPerson.join('; ')}.`);
   }
   for (const surface of never) {
-    // "here" rather than "on this machine": sometimes it is the machine, and
-    // sometimes it is this project — a project with no desktop app in it needs
-    // no Electron runner, and telling somebody their Mac cannot do it would be wrong.
-    lines.push(`Not possible here: ${surface.name}. ${surface.instead ?? surface.summary}`);
+    // Which of the two reasons it is, in the heading rather than buried in the sentence
+    // after it. Sometimes it is the machine, and sometimes it is this project — and a
+    // project with no desktop app in it is not a Mac that cannot open one.
+    const why = surface.notInThisProject === true ? 'Nothing of this kind in this repository' : 'Not possible here';
+    lines.push(`${why}: ${surface.name}. ${surface.instead ?? surface.summary}`);
   }
   if (byAgent.length > 0 || byPerson.length > 0 || never.length > 0) lines.push('');
 
@@ -1596,6 +1741,13 @@ export function describeCapabilities(caps) {
   const runners = caps.hosts.filter((h) => h.reachable);
   if (runners.length > 0) {
     lines.push(`Other machines it can already reach: ${runners.map((h) => h.name + (h.windows ? ' (has a real Windows desktop behind it)' : '')).join(', ')}.`);
+    lines.push('');
+  }
+  // Said out loud, because a machine left undialled is a runner somebody may be
+  // looking for, and a list that quietly stops short reads as a list that finished.
+  const undialled = caps.hosts.filter((h) => h.how.startsWith('not dialled'));
+  if (undialled.length > 0) {
+    lines.push(`${undialled.length} more ${undialled.length === 1 ? 'machine in your ssh config was' : 'machines in your ssh config were'} not dialled: ${undialled.map((h) => h.name).join(', ')}. Nothing here says anything about ${undialled.length === 1 ? 'it' : 'them'}.`);
     lines.push('');
   }
 
@@ -1671,6 +1823,10 @@ export async function run(ctx) {
   const runners = caps.hosts.filter((h) => h.reachable);
   if (runners.length > 0) {
     say(paint.grey(`  machines it can already reach: ${runners.map((h) => h.name).join(', ')}`));
+  }
+  const undialled = caps.hosts.filter((h) => h.how.startsWith('not dialled'));
+  if (undialled.length > 0) {
+    say(paint.grey(`  not dialled, so nothing is known about them: ${undialled.map((h) => h.name).join(', ')}`));
   }
 
   const noAdapter = (caps.drivers ?? []).filter((d) => !d.present);

@@ -62,6 +62,89 @@ const alive = new Map();
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---------------------------------------------------------------------------
+// Saying out loud that something was opened
+// ---------------------------------------------------------------------------
+
+/**
+ * What this tool opened, and enough about it to be able to look after it.
+ *
+ * The screen is the reason this exists. A check that starts a desktop app has to be
+ * able to say, afterwards and to something outside this file: THAT application, with
+ * THAT unix id, is mine — I opened it, I will close it, and while it is up it does
+ * not get to keep taking the screen from whoever is using this machine. Nothing else
+ * on the machine can work that out for itself: a scratch copy of an app and the
+ * person's own copy of the same app are indistinguishable from the outside.
+ *
+ * @typedef {object} OpenedApp
+ * @property {string} name     The application's name, as macOS reports it.
+ * @property {number} pid
+ * @property {string} binary   What was actually run.
+ * @property {string} label    Which build it is, in plain English.
+ */
+
+/**
+ * Everybody who wants to be told. A Set rather than a single hook because a check, a
+ * panel and a test can all reasonably want to know at once.
+ * @type {Set<(app: OpenedApp) => void>}
+ */
+const told = new Set();
+
+/**
+ * Be told whenever this tool opens a desktop app.
+ *
+ * Called before anything is started, and the listener runs the moment the process
+ * exists — before the app has drawn a window, which is what makes it early enough to
+ * be useful. A listener that throws is ignored: nothing that merely wants to WATCH a
+ * run may break one.
+ *
+ * @param {(app: OpenedApp) => void} listener
+ * @returns {() => void} stop being told
+ */
+export function onAppStarted(listener) {
+  told.add(listener);
+  return () => {
+    told.delete(listener);
+  };
+}
+
+/**
+ * @param {OpenedApp} app
+ * @returns {void}
+ */
+function announce(app) {
+  for (const listener of [...told]) {
+    try {
+      listener(app);
+    } catch {
+      // Watching is never allowed to be the reason a run fails.
+    }
+  }
+}
+
+/**
+ * The application name macOS will use for this binary.
+ *
+ * A Mac app is run through the executable buried inside its bundle —
+ * `Foo.app/Contents/MacOS/Foo` — but everything that talks about windows and the
+ * foreground talks about "Foo". The bundle is what to read: the executable inside it
+ * is often called something else entirely, and for a development build it is called
+ * `Electron`.
+ *
+ * @param {string} binary
+ * @returns {string}
+ */
+export function appNameFor(binary) {
+  const text = String(binary ?? '');
+  const parts = text.split(path.sep);
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    if (parts[i].toLowerCase().endsWith('.app')) return parts[i].slice(0, -4);
+  }
+  const base = path.basename(text);
+  const dot = base.lastIndexOf('.');
+  return dot > 0 ? base.slice(0, dot) : base;
+}
+
+// ---------------------------------------------------------------------------
 // The shapes
 // ---------------------------------------------------------------------------
 
@@ -515,6 +598,12 @@ export function startIsolated(isolation, opts) {
   child.once('exit', (code, signal) => { ended = { code, signal }; });
   // A quit later on must never take the tool down with an unhandled error event.
   child.on('error', () => {});
+
+  // Said out loud the moment the process exists, and before it has drawn anything.
+  // Whoever is looking after the screen during this check needs to know that this
+  // application belongs to the tool BEFORE it appears, or its first appearance is
+  // read as the person choosing it.
+  announce({ name: appNameFor(opts.binary), pid: child.pid ?? -1, binary: opts.binary, label: isolation.label });
 
   return {
     child,

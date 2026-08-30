@@ -32,6 +32,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import { StaysFixedError, messageOf } from '../core/errors.js';
+import { warn, detail } from '../core/log.js';
 import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { sha256 } from '../core/hash.js';
 
@@ -42,6 +43,13 @@ import { DEFAULT_RULES, machineRules, mergeRules, normaliseCapture, loadRules } 
 import { runCheck, makeCheckEvents } from './run.js';
 import { proveCause } from './cause.js';
 import { whatChanged } from './rank.js';
+
+import { attachWatcher, watchOptionsFrom } from './watch/index.js';
+import { guardTheScreen, describeGuard } from './watch/focus.js';
+import {
+  isOffScreen, moveWindowByPid, offScreen, windowBoundsByPid, withoutTakingTheScreen,
+} from './watch/window.js';
+import { onAppStarted, stillOpen } from './adapters/isolate.js';
 
 import { processAdapter } from './adapters/process.js';
 import { sourceAdapter } from './adapters/source.js';
@@ -65,6 +73,9 @@ const exec = promisify(execFile);
 /** @typedef {import('./run.js').LiveBuild} LiveBuild */
 /** @typedef {import('./run.js').WalkRequest} WalkRequest */
 /** @typedef {import('./run.js').CheckEvents} CheckEvents */
+/** @typedef {import('./watch/index.js').PanelOptions} PanelOptions */
+/** @typedef {import('./watch/index.js').WatchFlags} WatchFlags */
+/** @typedef {import('./adapters/isolate.js').OpenedApp} OpenedApp */
 
 /**
  * What a check hands back.
@@ -107,6 +118,8 @@ const exec = promisify(execFile);
  * @property {string} [product]
  * @property {CheckEvents} [events]
  * @property {AbortSignal} [signal]
+ * @property {WatchFlags} [watch]   What the person typed about the live panel. The settings
+ *                                  file has its say too, and this is merged over it.
  */
 
 /** The adapters compiled into every copy, in the order the engine trusts them. Reading the code is free, so it is first. */
@@ -264,8 +277,14 @@ export async function check(options = {}) {
   const events = options.events ?? makeCheckEvents();
   /** @type {Project|null} */
   let project = null;
+  /** @type {ScreenMinder|null} */
+  let screen = null;
   try {
     project = await openProject(options);
+    // Before a single thing is opened. Everything this run puts on somebody's screen —
+    // the live panel, the desktop app under check — goes through here, and so does the
+    // promise that none of it takes the screen off the person using the machine.
+    screen = await mindTheScreen(project, events);
     const verdict = await runCheck({
       store: project.store,
       product: project.product,
@@ -283,6 +302,11 @@ export async function check(options = {}) {
       events,
       signal: options.signal,
     });
+    // The screen is given back before the answer is written, so anything the guard had
+    // to do lands in the sentence a person reads rather than in a log line after it.
+    const minded = screen ? await screen.handBack() : null;
+    if (minded) verdict.summary = `${verdict.summary} ${minded}`;
+
     // The real ledger, door by door, before anything says how much was covered. The loop
     // only knows how many doors it read out of the source and that no journey named one;
     // this reads what every capture of this build actually touched and works out which
@@ -296,6 +320,17 @@ export async function check(options = {}) {
     // confirmation is what lets a caller tell "it went there and found nothing" from
     // "it checked something else and found nothing", and those are not the same answer.
     if (project.target) outcome.target = project.target;
+
+    // The live window was told the engine's verdict the moment the loop finished — before
+    // the gates were applied to it, before the waived findings were taken out, and before
+    // the coverage sentence went on the end. Left there, a window would show a greener,
+    // shorter answer than the terminal beside it, and the two would disagree about the same
+    // run. So it is told again, with the settled one, and only then put away.
+    events.emit({ type: 'check:done', at: events.elapsed(), message: outcome.summary, verdict: outcome });
+    if (screen) {
+      await screen.finish();
+      screen = null;
+    }
     return outcome;
   } catch (e) {
     const outcome = blocked(options, e);
@@ -305,9 +340,28 @@ export async function check(options = {}) {
     // a folder of its own behind as its parting gesture.
     const store = openStore({ root: projectRootFor(options) });
     if (storeExists(store)) await settle(outcome, store, outcome.product);
+    // And the window hears it too. Without this a check that was blocked leaves a window
+    // sitting there saying "running" for the rest of the day, which is the one thing worse
+    // than no window: it looks like a check that is still going rather than one that never
+    // got anywhere.
+    events.emit({ type: 'check:done', at: events.elapsed(), message: outcome.summary, verdict: outcome });
     return outcome;
   } finally {
+    // A check that threw is exactly when a scratch app is left standing on somebody's
+    // screen and a guard is left polling for it, so this runs whatever happened.
+    if (screen) await screen.finish().catch(() => {});
     if (project) await project.close();
+    // Everything this run opened has to be gone. `project.close` tears the adapters down
+    // and each of them releases its own isolations; if anything is still on the books
+    // after that, the tool has left a copy of somebody's app running, and that is worth
+    // saying out loud rather than discovering as a second app on the screen.
+    const left = stillOpen();
+    if (left > 0) {
+      warn(
+        `${left} ${left === 1 ? 'copy' : 'copies'} of an app this check opened could not be accounted for at the end. ` +
+          'Look for a stray window before running it again: two copies of one app fight over the same settings and the same identity.',
+      );
+    }
   }
 }
 
@@ -667,7 +721,13 @@ export async function explain(options = {}) {
   }
   if (differences.length > 40) out.push(`  and ${differences.length - 40} more.`);
   if (f.nearFiles?.length) out.push('', `Nearest code: ${f.nearFiles.slice(0, 6).join(', ')}.`);
-  if (f.unwaivable === true) out.push('', `This cannot be recorded as intended by anyone: ${f.unwaivableWhy ?? 'a person has to look at it'}.`);
+  // No full stop of our own: the reason is already a whole sentence and adding one gave the
+  // agent "...costs a real person real money.." on the reply it reads when it is trying to
+  // understand something it is not allowed to waive.
+  if (f.unwaivable === true) {
+    const why = String(f.unwaivableWhy ?? 'a person has to look at it').trim();
+    out.push('', `This cannot be recorded as intended by anyone: ${/[.!?]$/.test(why) ? why : `${why}.`}`);
+  }
   if (f.waivedBecause) out.push('', `Already recorded as intended: ${f.waivedBecause}`);
 
   const pictures = differences.map((d) => d.evidence).filter((/** @type {string|undefined} */ e) => typeof e === 'string' && /\.png$/i.test(e));
@@ -681,6 +741,259 @@ export async function explain(options = {}) {
 function short(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
   return text.length > 200 ? `${text.slice(0, 197)}...` : text;
+}
+
+// ---------------------------------------------------------------------------
+// The screen, while a check is running
+// ---------------------------------------------------------------------------
+
+/**
+ * The kinds of product that put something on somebody's screen.
+ *
+ * Everything else — a command, a library, an HTTP route, source read off disk — opens
+ * nothing at all, and a run made only of those must not so much as ask macOS which
+ * application is in front. Asking is not free: the first time anything on this machine
+ * asks, the person gets a permission dialog, and getting one of those out of a check that
+ * was never going to show them anything is its own small betrayal.
+ *
+ * Windows is deliberately NOT on this list even though it drives a real desktop. That probe
+ * runs on another machine over SSH, so whatever it puts in front of anybody is in front of
+ * somebody else's screen, and nothing here can reach it.
+ *
+ * @type {Set<string>}
+ */
+const PUTS_SOMETHING_ON_THE_SCREEN = new Set(['electron', 'ios', 'android']);
+
+/**
+ * How long to keep looking for the window of an app that has just been started.
+ *
+ * A desktop app takes a second or two to draw its first window, and on a cold machine it
+ * takes longer. There is no event to wait for — the window belongs to the window server,
+ * not to us — so this is looked for, slowly, and given up on without a word.
+ */
+const WAIT_FOR_A_WINDOW_MS = 20_000;
+
+/** How often to look for it. Slow on purpose: nothing here is racing. */
+const LOOK_FOR_A_WINDOW_MS = 400;
+
+/**
+ * Everything this run put on the screen, and the promise to give the screen back.
+ *
+ * Two steps rather than one, and the gap between them is the point: the screen is handed
+ * back the moment the walking stops, and the window is left up long enough to be told the
+ * settled answer.
+ *
+ * @typedef {object} ScreenMinder
+ * @property {() => Promise<string|null>} handBack   Stop guarding, and hand back the one
+ *   sentence worth saying — or null when there is nothing worth saying, which is the normal
+ *   case and the whole rule: a person who was not interrupted is not told about the
+ *   machinery that did not interrupt them.
+ * @property {() => Promise<void>} finish   Put the window away. Safe at any point, safe
+ *   twice, and safe without `handBack` ever having been called.
+ */
+
+/**
+ * Look after the screen for the length of one check.
+ *
+ * Three jobs, and they are one job seen from three sides.
+ *
+ * THE GUARD. `watch/focus.js` watches who is in front and puts the person back the moment
+ * something of ours pushes in front of them. It is the answer to the complaint that
+ * started this: an app the tool opens may come up ONCE, because watching it work is most
+ * of how you come to trust it, and after the person has chosen something else it never
+ * comes forward again. Nothing else in this tool can do that job, because nothing else
+ * knows which applications on this machine belong to the run.
+ *
+ * THE PANEL. `--watch` opens the live view beside the app, and the app is pinned to its
+ * edge so the two of them read as one window.
+ *
+ * OUT OF SIGHT. With no panel, nobody asked to watch anything, so a desktop app this run
+ * starts is moved off every screen once its window appears. It still runs, still answers
+ * the debugging protocol and still photographs — the picture comes from the compositor,
+ * which does not care where the window is — it simply never appears in front of anybody.
+ *
+ * Every part of this is best effort and every failure is swallowed. A machine with no
+ * window server, no accessibility permission or no browser still runs the check; it just
+ * does not get looked after, which is a disappointment and never a failed check.
+ *
+ * @param {Project} project
+ * @param {CheckEvents} events
+ * @returns {Promise<ScreenMinder|null>}
+ */
+async function mindTheScreen(project, events) {
+  const watch = project.watch;
+  const wantsPanel = watch.enabled === true;
+  const couldShow = project.journeys.some((j) => PUTS_SOMETHING_ON_THE_SCREEN.has(String(j.surface)));
+  // Nothing will appear and nobody asked for a window: there is no screen to look after.
+  if (!wantsPanel && !couldShow) return null;
+
+  const guard = guardTheScreen();
+  // Said under --verbose rather than always, because a person who was not interrupted
+  // should not be told about the machinery that did not interrupt them. It is here at all
+  // so that "the guard is running" is something anybody can see rather than take on trust.
+  detail(
+    'The screen guard is watching. Anything this check opens may come to the front once; from the moment you pick something else, it stays behind you.',
+  );
+
+  const watcher = wantsPanel
+    ? await attachWatcher(events, {
+        product: project.product,
+        project: project.root,
+        journeys: project.journeys,
+        watch,
+        dir: project.store.dir,
+        // The panel's own window is ours, so the guard has to know about it — with two
+        // exceptions, and both of them are cases where pushing that window back would be
+        // the tool overruling somebody.
+        //
+        // A BORROWED browser is the person's own. There was no Chrome for Testing here, so
+        // the panel opened in the browser they actually use; claiming it would have the
+        // guard shoving them out of their own tabs every time they clicked into them.
+        //
+        // AND --watch-front is somebody asking, in so many words, for this window in front.
+        // Claiming it would have the guard undoing the flag a second after it was obeyed.
+        onOpen: (browser) => {
+          if (browser.borrowed || watch.foreground === true) return;
+          guard.claim(browser.name);
+        },
+      })
+    : null;
+
+  /** @type {Promise<void>[]} */
+  const placing = [];
+  // Read by the wait below, so a check that ends while an app is still deciding whether
+  // to draw a window does not sit there for another twenty seconds over the arrangement
+  // of a window nobody is going to see.
+  let stopped = false;
+  const stopListening = onAppStarted((app) => {
+    // Claimed the instant the process exists, before it has drawn anything. A moment
+    // later and its first appearance is read as the person choosing it.
+    guard.claim(app.name);
+    events.emit({
+      type: 'note',
+      at: events.elapsed(),
+      message: `${app.label} is open as "${app.name}". It is a scratch copy, on its own settings, and it is not your own install.`,
+    });
+    placing.push(place(app, watcher, events, () => stopped));
+  });
+
+  /** @type {Promise<string|null>|null} */
+  let handingBack = null;
+  /** @type {Promise<void>|null} */
+  let finishing = null;
+
+  const handBack = () => {
+    handingBack ??= (async () => {
+      stopped = true;
+      stopListening();
+      await guard.release();
+      const line = describeGuard(guard.report());
+      if (line) events.emit({ type: 'note', at: events.elapsed(), message: line });
+      await Promise.allSettled(placing);
+      return line;
+    })();
+    return handingBack;
+  };
+
+  return {
+    handBack,
+    finish: () => {
+      finishing ??= (async () => {
+        await handBack();
+        if (watcher) {
+          try {
+            await watcher.stop();
+          } catch {
+            // A window that will not close is never a reason to change a verdict.
+          }
+          // The claim this whole arrangement makes — that the window never held the check
+          // up — is worth a number rather than trust. Under --verbose, because a person who
+          // is not asking how it went does not need to be told.
+          const health = watcher.open() ? watcher.health() : null;
+          // Silence here is the worst answer: somebody asked to watch this and got
+          // nothing, with no idea whether the window failed or they typed it wrong. Every
+          // way this can go actually WRONG says so in its own words as it happens, so the
+          // only case left for this line is the one nothing else covers: a window called
+          // off because it was going to be closed the moment it arrived.
+          if (!health && watch.keepOpen === false) {
+            warn(
+              'You asked to watch this and no window came up. With --no-keep-open, a window still opening when the check finishes is ' +
+                'called off, because it would only be closed again a second later. Leave --no-keep-open out and it waits, then comes up ' +
+                'with the finished result on it.',
+            );
+          }
+          if (health) {
+            detail(
+              `The watch window took ${health.delivered} of ${health.pushed} updates` +
+                `${health.dropped > 0 ? `, folded ${health.dropped} away while it was catching up` : ''}` +
+                `${health.stalls > 0 ? `, and gave up on ${health.stalls} that ran past their moment` : ''}` +
+                '. The check waited on none of them.',
+            );
+          }
+        }
+      })();
+      return finishing;
+    },
+  };
+}
+
+/**
+ * Put one just-started desktop app where it belongs.
+ *
+ * With a panel: beside it, both windows pinned to one edge, one shape. Without: out of
+ * sight, because nobody asked to watch anything.
+ *
+ * @param {OpenedApp} app
+ * @param {import('./watch/index.js').Watcher|null} watcher
+ * @param {CheckEvents} events
+ * @param {() => boolean} stopped
+ * @returns {Promise<void>}
+ */
+async function place(app, watcher, events, stopped) {
+  if (watcher) {
+    // The panel knows how to find the window itself, and it is the thing that has to be
+    // moved either way, so the whole arrangement is done on that side.
+    await watcher.snapTo({ pid: app.pid, hasWindow: true }).catch(() => {});
+    return;
+  }
+  const where = await waitForItsWindow(app.pid, stopped);
+  if (stopped()) return;
+  if (!where) return;
+  if (isOffScreen(where)) return;
+  // Moving a window can pull the application it belongs to in front of everything else,
+  // so whoever had the screen gets it straight back.
+  const moved = await withoutTakingTheScreen(async () => moveWindowByPid(app.pid, where, offScreen(where)));
+  if (moved) {
+    events.emit({
+      type: 'note',
+      at: events.elapsed(),
+      message: `Nobody asked to watch this run, so ${app.label} was moved off the screen. It is still running and still being read; it is just not in front of you. Run this with --watch to see it work.`,
+    });
+  } else {
+    detail(`${app.label} could not be moved out of sight, so its window is on the screen. The screen guard will keep it from taking the foreground.`);
+  }
+}
+
+/**
+ * Wait for an app to draw its first window, and give up quietly.
+ *
+ * @param {number} pid
+ * @param {() => boolean} stopped
+ * @returns {Promise<import('../watch/place.js').Bounds|null>}
+ */
+async function waitForItsWindow(pid, stopped) {
+  const deadline = Date.now() + WAIT_FOR_A_WINDOW_MS;
+  for (;;) {
+    if (stopped()) return null;
+    const seen = await windowBoundsByPid(pid);
+    if (seen) return seen;
+    if (Date.now() > deadline || stopped()) return null;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, LOOK_FOR_A_WINDOW_MS);
+      // Never the reason a finished program stays open.
+      if (typeof timer.unref === 'function') timer.unref();
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +1017,9 @@ function short(value) {
  * @property {import('./run.js').Walker} walk
  * @property {(reference: BuildFingerprint, ctx: {events?: CheckEvents, signal?: AbortSignal}) => Promise<LiveBuild|null>} bootReference
  * @property {(capture: Capture) => Capture} normalise
+ * @property {PanelOptions} watch   What the settings file and the command line, together,
+ *   said about the live panel. Settled once here so the command line and the MCP server
+ *   cannot disagree about what `--watch` meant.
  * @property {{surface: string, at: string|null}} [target]  Set only when the run was aimed
  *   at one kind of product AND something here can actually drive it.
  * @property {() => Promise<void>} close
@@ -807,6 +1123,9 @@ async function openProject(options) {
     walk,
     bootReference,
     normalise,
+    // The settings file first, then whatever was typed. `--watch` can only ever turn the
+    // panel ON: somebody who did not type it has not said no to it, they have said nothing.
+    watch: watchOptionsFrom(/** @type {{watch?: import('../types.js').WatchOptions|boolean}} */ (config), options.watch ?? null),
     close: async () => {
       for (const done of cleanUps.reverse()) {
         try {
@@ -1212,6 +1531,29 @@ async function readConfig(configFile) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Everything this tool writes about your project, kept out of what your project IS.
+ *
+ * This one line is load-bearing and it was missing, and the bug it caused reached all the
+ * way to the front door. A build is told from another build by what git says is in the
+ * working tree — the diff, plus the list of files git does not know about. Stays Fixed's own
+ * folder is a file git does not know about, and it gains files every single time the tool
+ * runs. So the untracked list changed on every run, the digest changed with it, and every
+ * run of an UNCHANGED project produced a brand new build id.
+ *
+ * The consequences were all silent. Two runs on identical source were two different builds,
+ * so the second could never find the first one's record. A clean checkout was never clean, so
+ * it never got its commit's id, so `--against HEAD` matched nothing and the stored-record
+ * comparison — the fast path the whole design rests on — could not work at all. Measured on
+ * a scratch product: five runs, one unchanged source file, five different build ids and five
+ * runs reporting NOTHING WAS ACTUALLY COMPARED.
+ *
+ * Excluded rather than gitignored, and that difference matters: gitignoring it would fix the
+ * fingerprint and would also throw away the observation files the design says to keep
+ * forever. What a project's own tooling wrote about a project is never part of the project.
+ */
+const NOT_THE_TOOLS_OWN_FOLDER = ':(exclude).staysfixed';
+
+/**
  * The build you have, named by what is actually in it.
  *
  * A dirty working tree gets an id that includes a digest of the diff, so editing a file
@@ -1245,8 +1587,8 @@ async function fingerprintWorkingTree(root, product) {
   // big uncommitted change therefore got the id of the commit it sat on top of; if that
   // commit was the reference, the check compared the build against itself and reported that
   // nothing had changed. Nothing about a diff's size may ever decide whether a change exists.
-  const diff = await gitDigest(root, ['diff', 'HEAD']);
-  const untracked = await gitDigest(root, ['ls-files', '--others', '--exclude-standard']);
+  const diff = await gitDigest(root, ['diff', 'HEAD', '--', NOT_THE_TOOLS_OWN_FOLDER]);
+  const untracked = await gitDigest(root, ['ls-files', '--others', '--exclude-standard', '--', NOT_THE_TOOLS_OWN_FOLDER]);
   if (!diff.ok || !untracked.ok) {
     throw new StaysFixedError(
       `Git could not say what has changed in this working tree, so there is no way to tell this build apart from the last one. ${diff.why ?? untracked.why ?? ''}`.trim(),

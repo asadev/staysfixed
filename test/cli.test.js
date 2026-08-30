@@ -14,6 +14,8 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
+import { pathToFileURL } from 'node:url';
+
 import { EXIT } from '../src/core/errors.js';
 import { VERSION } from '../src/run.js';
 import { findConfigFile } from '../src/core/paths.js';
@@ -103,57 +105,101 @@ describe('the front door', () => {
 });
 
 describe('init', () => {
-  test('everything it says it made is actually there, and the settings load', async () => {
-    const dir = await scratchDir('staysfixed-init');
+  /**
+   * A folder that looks like something. `init` reads a project rather than assuming one,
+   * so an empty directory is a fair question with a boring answer — and these tests are
+   * about what it writes when there IS something to watch.
+   *
+   * @param {string} name
+   * @returns {Promise<string>}
+   */
+  async function aTinyProject(name) {
+    const dir = await scratchDir(name);
+    // A real repository, because half of what `init` writes only makes sense in one — a
+    // .gitignore for the throwaway results, and a reference that is named by a commit.
+    await new Promise((resolve) => execFile('git', ['init', '-q'], { cwd: dir }, () => resolve(null)));
+    await fsp.writeFile(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'tiny', version: '1.0.0', type: 'module', bin: { tiny: 'cli.js' } }, null, 2) + '\n',
+    );
+    await fsp.writeFile(path.join(dir, 'cli.js'), "console.log('hello');\n");
+    return dir;
+  }
+
+  test('everything it says it wrote is actually there, and the settings load', async () => {
+    const dir = await aTinyProject('staysfixed-init');
     const { code, stdout } = await cli(['init'], { cwd: dir });
     assert.equal(code, EXIT.ok);
 
-    // It lists what it made. Every one of those has to exist, or the first thing
-    // a new user does is look for a file that was never written.
-    const promised = [...stdout.matchAll(/^\s*made (.+)$/gm)].map((m) => m[1].trim());
-    assert.ok(promised.length >= 4, `init only claimed to make ${promised.length} things`);
-    for (const made of promised) {
-      assert.ok(fs.existsSync(path.join(dir, made)), `init said it made ${made}, and it is not there`);
+    // It lists what it wrote. Every one of those has to exist, or the first thing
+    // somebody does is go looking for a file that was never written.
+    const line = /^\s*(?:ok\s+)?Written: (.+)$/m.exec(stdout);
+    assert.ok(line, `init never said what it wrote. It said:\n${stdout}`);
+    const written = line[1].split(',').map((f) => f.trim()).filter(Boolean);
+    assert.ok(written.length >= 1, `init claimed to write nothing: ${line[1]}`);
+    for (const made of written) {
+      assert.ok(fs.existsSync(path.resolve(dir, made)), `init said it wrote ${made}, and it is not there`);
     }
 
-    // The things a project cannot work without, named rather than inferred.
     const configFile = findConfigFile(dir);
     assert.ok(configFile, 'init did not leave a settings file behind');
-    assert.ok(fs.statSync(path.join(dir, '.staysfixed')).isDirectory());
-    assert.ok(fs.statSync(path.join(dir, '.staysfixed', 'guards')).isDirectory());
 
-    // The settings it wrote have to be settings the tool can actually read.
-    const project = await loadProject({ cwd: dir });
-    assert.ok(project.config.app.kind === 'web' || project.config.app.kind === 'electron');
-    assert.equal(project.paths.root, dir);
+    // The settings it wrote have to be settings the tool can actually read back — as a
+    // module, because they are JavaScript, and with the product it found named in them.
+    const settings = (await import(`${pathToFileURL(String(configFile)).href}?t=${Date.now()}`)).default;
+    assert.equal(typeof settings, 'object');
+    assert.equal(settings.product, 'tiny');
+    assert.ok(Array.isArray(settings.process?.commands) && settings.process.commands.length > 0, 'it found a command to run and did not write it down');
 
-    // Results are throwaway and must never be committed; approved pictures must.
+    // Results are throwaway and must never be committed. Nothing else in that folder is
+    // ignored, because the record of what working looks like belongs in the repository.
     const gitignore = await fsp.readFile(path.join(dir, '.gitignore'), 'utf8');
     assert.match(gitignore, /\.staysfixed\/results\//);
-    assert.ok(!/approved/.test(gitignore));
+    assert.ok(!/^\.staysfixed\/$/m.test(gitignore), 'the whole folder must not be ignored — the stored record lives in it');
   });
 
   test('running it twice does not overwrite what is already there', async () => {
-    const dir = await scratchDir('staysfixed-init-twice');
+    const dir = await aTinyProject('staysfixed-init-twice');
     await cli(['init'], { cwd: dir });
 
     const configFile = String(findConfigFile(dir));
-    await fsp.writeFile(
-      configFile,
-      "export default { app: { kind: 'web', url: 'http://localhost:9999' }, screens: [] };\n",
-    );
+    const mine = await fsp.readFile(configFile, 'utf8');
+    await fsp.writeFile(configFile, `${mine}\n// a line somebody added by hand\n`);
 
     const again = await cli(['init'], { cwd: dir });
     assert.equal(again.code, EXIT.ok);
-    assert.match(again.stdout, /left alone/);
+    // Both streams: "written" is good news and goes to stdout, "left alone" is a warning
+    // and goes to stderr, and a reader of this test should not have to know which.
+    assert.match(again.stdout + again.stderr, /Left exactly as it was/);
 
     const kept = await fsp.readFile(configFile, 'utf8');
-    assert.match(kept, /localhost:9999/, 'init overwrote settings somebody had already edited');
+    assert.match(kept, /a line somebody added by hand/, 'init overwrote settings somebody had already edited');
   });
 
-  test('status works in a freshly made project and says nothing has been checked', async () => {
-    const dir = await scratchDir('staysfixed-status');
+  test('the picture commands say plainly why they do not apply to a product with no screen', async () => {
+    // `status`, `walk`, `approve`, `mark`, `trace` and `check --pictures` all work by
+    // opening something and photographing it, and settings written for a command-line tool
+    // name nothing to open — which is correct, not a mistake. What they must never do is
+    // tell somebody to go and add a web address they do not have.
+    const dir = await aTinyProject('staysfixed-status');
     await cli(['init'], { cwd: dir });
+
+    const { stdout, stderr } = await cli(['status'], { cwd: dir });
+    const said = stdout + stderr;
+    assert.match(said, /do not name anything to open/);
+    assert.match(said, /staysfixed check/, 'it has to name the half of the tool that DOES cover this project');
+  });
+
+  test('status still works where there is something to open', async () => {
+    // The version 1 promise, held: a project with an `app` block keeps every picture
+    // command exactly as it was. Nobody who was using them has to stop.
+    const dir = await scratchDir('staysfixed-status-pictures');
+    await fsp.writeFile(
+      path.join(dir, 'staysfixed.config.js'),
+      "export default { app: { kind: 'web', url: 'http://localhost:3000' }, screens: [{ name: 'home', url: '/' }] };\n",
+    );
+    const project = await loadProject({ cwd: dir });
+    assert.equal(project.paths.root, dir);
 
     const { code, stdout } = await cli(['status'], { cwd: dir });
     assert.equal(code, EXIT.ok);
@@ -162,10 +208,37 @@ describe('init', () => {
   });
 
   test('the settings file it writes is commented for a person to edit', async () => {
-    const dir = await scratchDir('staysfixed-init-comments');
+    const dir = await aTinyProject('staysfixed-init-comments');
     await cli(['init'], { cwd: dir });
     const text = await fsp.readFile(String(findConfigFile(dir)), 'utf8');
     assert.ok(text.split('\n').filter((l) => /^\s*(\/\/|\*|\/\*)/.test(l)).length > 10, text.slice(0, 400));
+  });
+
+  test('and it says the same thing as one object, which is what an agent reads', async () => {
+    // docs/getting-started.md is written entirely around these fields. A page that tells
+    // an agent to read `plan.readiness` against a command that does not produce it is
+    // worse than no page, so the names are asserted here rather than trusted.
+    const dir = await aTinyProject('staysfixed-init-json');
+    const { code, stdout } = await cli(['init', '--json'], { cwd: dir });
+    assert.equal(code, EXIT.ok);
+    const answer = JSON.parse(stdout);
+    assert.equal(answer.ok, true, stdout.slice(0, 400));
+    for (const field of ['project', 'readiness', 'needs', 'journeys', 'config', 'covers', 'wiring']) {
+      assert.ok(field in answer.plan, `init --json has no plan.${field}, and getting-started.md tells an agent to read it`);
+    }
+    assert.ok(Array.isArray(answer.plan.project.products), 'a repository usually makes more than one thing, so this is a list');
+    for (const who of ['agent', 'person', 'impossible']) {
+      assert.ok(Array.isArray(answer.plan.needs[who]), `needs.${who} has to be a list, even an empty one`);
+    }
+    assert.equal(typeof answer.plan.covers.short, 'string');
+    assert.ok(answer.plan.covers.short.length > 20, 'the paragraph an agent repeats to a person cannot be empty');
+  });
+
+  test('--dry-run works everything out and writes nothing', async () => {
+    const dir = await aTinyProject('staysfixed-init-dry');
+    const { code } = await cli(['init', '--dry-run'], { cwd: dir });
+    assert.equal(code, EXIT.ok);
+    assert.equal(findConfigFile(dir), null, '--dry-run wrote a settings file');
   });
 });
 

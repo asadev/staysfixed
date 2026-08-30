@@ -34,6 +34,13 @@ import { canonicalJson, matchPath } from './observation.js';
 /** Where in a value we are, when a rule needs to say. */
 const ROOT = '$';
 
+/**
+ * How deep into a value the tidying goes. It matches the depth an observation is allowed to
+ * be in the first place (MAX_VALUE_DEPTH in observation.js), so on anything this tool made
+ * itself the limit is never reached; it only bites on a value read back off the disk.
+ */
+const MAX_WALK_DEPTH = 64;
+
 /** Sentinel for a value a `drop` rule removed. Never appears in a result. */
 const DROPPED = Symbol('dropped');
 
@@ -632,7 +639,24 @@ export function normaliseCapture(capture, rules) {
  * @returns {ObservedValue|typeof DROPPED}
  */
 function walk(node, at, rules, record, depth) {
-  if (depth > 64) return node;
+  if (depth > MAX_WALK_DEPTH) {
+    // Everything from here down goes into the comparison exactly as it arrived: no clock is
+    // rubbed out, no id is flattened. That is churn arriving as findings rather than a real
+    // finding disappearing, so it is the safe direction — but it is still a piece of the
+    // value nothing looked at, and a receipt is the only reason anybody would ever know.
+    if (record) {
+      record.push({
+        ruleId: 'depth.limit',
+        what: `Part of this value nests deeper than ${MAX_WALK_DEPTH} levels.`,
+        why: 'Tidying stops there, so nothing below it was rewritten before comparing.',
+        wouldHide: 'Nothing. It hides the opposite: timestamps and ids down there are compared as they are, so they will report as differences on every run.',
+        at,
+        before: '(not rewritten)',
+        after: '(not rewritten)',
+      });
+    }
+    return node;
+  }
 
   for (const rule of rules) {
     if (rule.kind === 'drop' && ruleAppliesAt(rule, at)) {
@@ -670,17 +694,40 @@ function walk(node, at, rules, record, depth) {
     return items;
   }
 
-  /** @type {Record<string, ObservedValue>} */
-  const out = {};
+  // A Map, not an object, and this is not a style choice. `newKey in out` asks the whole
+  // prototype chain, so on a plain `{}` the answer for `toString`, `constructor`, `valueOf`
+  // and `hasOwnProperty` is always yes — and every one of those entries was silently thrown
+  // away, on BOTH sides of the comparison, so a change inside one of them could never be
+  // seen. Worse, `out['__proto__'] = value` sets the prototype instead of storing anything,
+  // which loses the entry and quietly rewires the object. A Map has neither problem.
+  /** @type {Map<string, ObservedValue>} */
+  const kept = new Map();
   for (const [key, child] of Object.entries(node)) {
     const newKey = rewriteKey(key, at, rules, record);
     const value = walk(/** @type {ObservedValue} */ (child), `${at}.${key}`, rules, record, depth + 1);
     if (value === DROPPED) continue;
-    // First key wins on a collision. Losing an entry silently is exactly why `keys` is off by
-    // default; when a project switches it on anyway, the loss is at least deterministic.
-    if (!(newKey in out)) out[newKey] = value;
+    if (!kept.has(newKey)) {
+      kept.set(newKey, value);
+      continue;
+    }
+    // Two keys tidied down to one name. The first wins, and the second is GONE — never
+    // compared with anything, at an address that no longer exists. This is the loss `keys`
+    // is off by default because of, and when a project switches it on anyway the loss is at
+    // least written down instead of happening in silence.
+    const first = kept.get(newKey);
+    if (record && canonicalJson(/** @type {ObservedValue} */ (first)) !== canonicalJson(value)) {
+      record.push({
+        ruleId: 'keys.collision',
+        what: `Two entries here ended up with the same name, "${newKey}".`,
+        why: 'A rule that rewrites keys turned two different names into one, and only the first entry survives.',
+        wouldHide: 'The second entry entirely. Nothing compares it against anything, so a change inside it cannot be seen. Sort the collection and observe its members by position instead.',
+        at: `${at}.${key} (key)`,
+        before: clip(canonicalJson(value)),
+        after: '<lost to a name it now shares>',
+      });
+    }
   }
-  return out;
+  return Object.fromEntries(kept);
 }
 
 /**

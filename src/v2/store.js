@@ -108,14 +108,84 @@ export function newCaptureId(run, now = new Date()) {
 
 /**
  * Write a file so nobody can ever read it half-finished.
+ *
+ * Three things happen here that a plain `writeFile` does not do, and all three exist because
+ * his disk hit zero bytes on 2026-08-30.
+ *
+ *   - The bytes are counted back off the disk before the file is renamed into place. A write
+ *     onto a full disk can come back without throwing and with only some of the text on the
+ *     platter, and a half-written references.json that gets renamed into place is a store that
+ *     has quietly forgotten which build was working.
+ *   - A failure says, in words, that the disk is full, rather than handing back a five-letter
+ *     error code to somebody who is not a programmer.
+ *   - The half-written temporary file is removed on the way out. Otherwise every failed write
+ *     leaves its wreckage behind and the disk that was already full gets fuller.
+ *
  * @param {string} file
  * @param {string} text
  */
 async function writeAtomic(file, text) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.part`;
-  await fsp.writeFile(temp, text);
-  await fsp.rename(temp, file);
+  const wanted = Buffer.byteLength(text, 'utf8');
+  try {
+    await fsp.writeFile(temp, text);
+    const landed = (await fsp.stat(temp)).size;
+    if (landed !== wanted) {
+      throw new StaysFixedError(
+        `Only ${landed} of ${wanted} bytes of ${path.basename(file)} reached the disk, so it was not saved.`,
+        { hint: 'The disk this project sits on is full, or something else is writing to the same folder. Free some space and run it again.' },
+      );
+    }
+    await fsp.rename(temp, file);
+  } catch (e) {
+    await fsp.rm(temp, { force: true }).catch(() => {});
+    throw noRoom(e, file);
+  }
+}
+
+/**
+ * The same failure, said in a way somebody who is not a programmer can act on.
+ *
+ * A full disk is the one storage failure that happens to real people mid-run, and ENOSPC on
+ * its own tells them nothing. Anything else is passed through untouched rather than dressed
+ * up as something it is not.
+ *
+ * @param {unknown} e
+ * @param {string} file
+ * @returns {unknown}
+ */
+function noRoom(e, file) {
+  const code = /** @type {{code?: string}} */ (e)?.code;
+  if (code === 'ENOSPC') {
+    return new StaysFixedError(`There was no room left on the disk to save ${path.basename(file)}.`, {
+      hint: 'Free some space and run the check again. Nothing was lost except this record; the answer the run already worked out is still good.',
+    });
+  }
+  if (code === 'EDQUOT') {
+    return new StaysFixedError(`This account has used up its disk allowance, so ${path.basename(file)} could not be saved.`, {
+      hint: 'Ask for more space, or delete something, and run the check again.',
+    });
+  }
+  return e;
+}
+
+/**
+ * Is this the ordinary "there is no such file" that means nothing is wrong?
+ *
+ * Everything else — a permission that was taken away, a folder where a file should be, a
+ * disk that will not read — is a file that EXISTS and cannot be read, and those two answers
+ * must never come back as the same `null`. One of them means "this product has never been
+ * shipped"; the other means "the record of what working looks like is damaged", and a tool
+ * that reports the second as the first tells somebody to start from scratch when what they
+ * needed to hear was that their evidence is hurt.
+ *
+ * @param {unknown} e
+ * @returns {boolean}
+ */
+function justNotThere(e) {
+  const code = /** @type {{code?: string}} */ (e)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 /**
@@ -134,7 +204,18 @@ export async function saveBuild(store, fingerprint, opts = {}) {
   if (!fingerprint.product) throw new StaysFixedError(`Build ${fingerprint.id} does not say which product it is of.`);
 
   const at = opts.at ?? new Date().toISOString();
-  const existing = await loadBuild(store, fingerprint.id);
+  // A damaged record is loud everywhere else — a reader must never mistake it for a build
+  // nobody has heard of. Here it is different: this function is about to write a correct
+  // record over the top of it, and refusing would leave the damage in place for good and
+  // break every future run against that build. What is lost is the first-seen date and the
+  // journey list, which are rebuilt from the next few runs.
+  /** @type {BuildRecord|null} */
+  let existing = null;
+  try {
+    existing = await loadBuild(store, fingerprint.id);
+  } catch {
+    existing = null;
+  }
   const journeys = new Set(existing?.journeys ?? []);
   if (opts.journey) journeys.add(opts.journey);
 
@@ -203,27 +284,75 @@ export async function openCaptureWriter(store, opts) {
   if (opts.rules) shell.rules = opts.rules;
   await handle.write(JSON.stringify(headerOf(shell)) + '\n');
 
+  let open = true;
+  /** Close once, and never let a failure to close hide the failure that caused it. */
+  const shut = async () => {
+    if (!open) return;
+    open = false;
+    await handle.close().catch(() => {});
+  };
+
   return {
     ref,
     async append(o) {
       count++;
-      await handle.write(JSON.stringify(o) + '\n');
+      await writeLine(handle, JSON.stringify(o) + '\n', temp, shut);
     },
     async close(end = {}) {
       const finished = { ...shell, durationMs: end.durationMs ?? Date.now() - started };
       if (end.coverage) finished.coverage = end.coverage;
       if (end.note) finished.note = end.note;
-      await handle.write(JSON.stringify(endOf(finished, count)) + '\n');
-      await handle.close();
-      await fsp.rename(temp, ref.file);
+      await writeLine(handle, JSON.stringify(endOf(finished, count)) + '\n', temp, shut);
+      await shut();
+      try {
+        await fsp.rename(temp, ref.file);
+      } catch (e) {
+        await fsp.rm(temp, { force: true }).catch(() => {});
+        throw noRoom(e, ref.file);
+      }
       await bumpBuild(store, finished);
       return ref;
     },
     async abandon() {
-      await handle.close();
-      await fsp.rm(temp, { force: true });
+      // The file comes off the disk whatever the handle does. A close that throws used to
+      // leave the half-written capture sitting there for the sweeper to find an hour later.
+      await shut();
+      await fsp.rm(temp, { force: true }).catch(() => {});
     },
   };
+}
+
+/**
+ * Write one whole line, or say plainly that it did not go on the disk.
+ *
+ * `handle.write` is allowed to write only part of what it was given and come back without
+ * throwing — which is exactly what a disk with a few hundred bytes left on it does. The half
+ * line that lands takes the newline with it, so the NEXT line is joined onto it and two
+ * observations are lost inside one unreadable line. `loadCapture` would still notice, because
+ * the end line counts what should be there; this stops it happening at all, and stops the
+ * run pretending the capture is finished.
+ *
+ * @param {import('node:fs/promises').FileHandle} handle
+ * @param {string} line
+ * @param {string} temp
+ * @param {() => Promise<void>} shut
+ * @returns {Promise<void>}
+ */
+async function writeLine(handle, line, temp, shut) {
+  const wanted = Buffer.byteLength(line, 'utf8');
+  try {
+    const { bytesWritten } = await handle.write(line, null, 'utf8');
+    if (bytesWritten !== wanted) {
+      throw new StaysFixedError(
+        `Only ${bytesWritten} of ${wanted} bytes of this observation reached the disk, so the capture was abandoned rather than finished half-written.`,
+        { hint: 'The disk is full. Free some space and run the check again.' },
+      );
+    }
+  } catch (e) {
+    await shut();
+    await fsp.rm(temp, { force: true }).catch(() => {});
+    throw noRoom(e, temp);
+  }
 }
 
 /**
@@ -315,8 +444,17 @@ export async function loadCapture(store, where) {
   let raw;
   try {
     raw = await fsp.readFile(file, 'utf8');
-  } catch {
-    return null;
+  } catch (e) {
+    // A capture that is not there and a capture that is there and unreadable came back as
+    // the same `null` until 2026-08-30, and they are opposite answers. "Not there" is the
+    // cold start and is fine. "There and unreadable" — a permission taken away, a folder
+    // where a file should be, a disk that will not read — means the record of what working
+    // looks like is damaged, and swallowing it turns damaged evidence into "no evidence",
+    // which reads as a clean start and lets a release through.
+    if (justNotThere(e)) return null;
+    throw new StaysFixedError(`${file} is there and could not be read: ${e instanceof Error ? e.message : String(e)}`, {
+      hint: 'This is a record of what the old build did. It is not missing, it is damaged, so nothing should be compared against it until it is either readable or deleted.',
+    });
   }
 
   const lines = raw.split('\n');
@@ -420,7 +558,10 @@ export async function listCaptures(store, opts) {
 /**
  * The most recent capture of one journey against one build.
  * @param {Store} store
- * @param {{buildId: string, journey: string, run?: CaptureRun}} opts
+ * @param {{buildId: string, journey: string, run?: CaptureRun, onProblem?: (message: string) => void}} opts
+ *   `onProblem` is told about every record that had to be stepped over on the way back. The
+ *   stepping over is right — one bad file must not cost the whole reference — but it means
+ *   the answer is an OLDER record than the newest one, and nothing said so.
  * @returns {Promise<Capture|null>}
  */
 export async function latestCapture(store, opts) {
@@ -430,12 +571,15 @@ export async function latestCapture(store, opts) {
     let capture = null;
     try {
       capture = await loadCapture(store, refs[i]);
-    } catch {
+    } catch (e) {
       // One file nobody can read must never take the whole reference with it. Asking for
       // a named capture that turns out not to be one is an error and stays one; scanning
       // for the newest usable record steps over it and keeps looking. Otherwise a single
       // interrupted run leaves the next check with "nothing to compare against", which
       // reads as a pass and lets a release through.
+      opts.onProblem?.(
+        `The newest stored record of "${opts.journey}" (${refs[i].captureId}) could not be read: ${e instanceof Error ? e.message : String(e)}. An older one was used instead, so this comparison is against something further back than it looks.`,
+      );
       continue;
     }
     if (!capture) continue;
@@ -451,11 +595,24 @@ export async function latestCapture(store, opts) {
  * @returns {Promise<BuildRecord|null>}
  */
 export async function loadBuild(store, buildId) {
+  const file = path.join(buildDir(store, buildId), 'build.json');
+  /** @type {string} */
+  let raw;
   try {
-    const raw = await fsp.readFile(path.join(buildDir(store, buildId), 'build.json'), 'utf8');
+    raw = await fsp.readFile(file, 'utf8');
+  } catch (e) {
+    // Never seen is null. Seen and damaged is loud — see justNotThere.
+    if (justNotThere(e)) return null;
+    throw new StaysFixedError(`${file} is there and could not be read: ${e instanceof Error ? e.message : String(e)}`, {
+      hint: 'Nothing should treat this build as unknown while its record is sitting there damaged.',
+    });
+  }
+  try {
     return /** @type {BuildRecord} */ (JSON.parse(raw));
-  } catch {
-    return null;
+  } catch (e) {
+    throw new StaysFixedError(`${file} is not readable as JSON: ${e instanceof Error ? e.message : String(e)}`, {
+      hint: 'A half-written build record means a run was interrupted. Delete the file and run the check again; it will be rewritten.',
+    });
   }
 }
 
@@ -463,7 +620,11 @@ export async function loadBuild(store, buildId) {
  * Every build the store knows about, newest first.
  *
  * @param {Store} store
- * @param {{product?: string}} [opts]
+ * @param {{product?: string, onProblem?: (message: string) => void}} [opts]
+ *   `onProblem` is told about every build folder that had to be skipped. Without it a build
+ *   whose record is damaged simply is not in the list, and "not in the list" is how every
+ *   caller spells "never existed" — so a build that HAS captures and a broken record reads
+ *   as a build nobody ever made, in the coverage ledger and in `--against` alike.
  * @returns {Promise<BuildRecord[]>}
  */
 export async function listBuilds(store, opts = {}) {
@@ -476,9 +637,16 @@ export async function listBuilds(store, opts = {}) {
     try {
       const raw = await fsp.readFile(path.join(store.buildsDir, dirName, 'build.json'), 'utf8');
       record = /** @type {BuildRecord} */ (JSON.parse(raw));
-    } catch {
+    } catch (e) {
       // A build folder with no readable record is not worth failing a run over. It happens
       // when a write was interrupted, and the next capture against that build rewrites it.
+      // It IS worth saying out loud, because everything above reads a missing build as a
+      // build that never existed.
+      opts.onProblem?.(
+        justNotThere(e)
+          ? `The build folder ${dirName} has no record in it, so whatever was stored against that build is not counted here.`
+          : `The build folder ${dirName} has a record that could not be read (${e instanceof Error ? e.message : String(e)}), so whatever was stored against that build is not counted here.`,
+      );
       continue;
     }
     const product = record.fingerprint?.product;
@@ -498,13 +666,36 @@ export async function listBuilds(store, opts = {}) {
  * @returns {Promise<Record<string, ReferencePointer>>}
  */
 async function loadReferences(store) {
+  /** @type {string} */
+  let raw;
   try {
-    const raw = await fsp.readFile(store.referencesFile, 'utf8');
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
+    raw = await fsp.readFile(store.referencesFile, 'utf8');
+  } catch (e) {
+    // No file at all is the honest cold start: nothing has ever been shipped with the hook
+    // in place. A file that is there and cannot be read is the opposite — this product HAS a
+    // reference and the pointer to it is damaged — and returning an empty map for both meant
+    // a damaged store reported itself as a brand new one and every run after it compared
+    // against nothing while saying so in the gentlest possible words.
+    if (justNotThere(e)) return {};
+    throw new StaysFixedError(`${store.referencesFile} is there and could not be read: ${e instanceof Error ? e.message : String(e)}`, {
+      hint: 'This file is the only record of which build you called working. Until it can be read, no run can honestly say what it is comparing against.',
+    });
   }
+  /** @type {unknown} */
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new StaysFixedError(`${store.referencesFile} is not readable as JSON: ${e instanceof Error ? e.message : String(e)}`, {
+      hint: 'It says which build of each product counts as working. Restore it from git, or ship again to write a fresh one. Treating it as empty would quietly turn every check into a first run.',
+    });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new StaysFixedError(`${store.referencesFile} does not hold a set of reference pointers.`, {
+      hint: 'It should be an object keyed by product name. Delete it and ship again rather than letting a check run against nothing.',
+    });
+  }
+  return /** @type {Record<string, ReferencePointer>} */ (parsed);
 }
 
 /**
@@ -598,9 +789,23 @@ export async function pruneBuild(store, buildId, opts = {}) {
   const keep = Math.max(1, opts.keepPerJourney ?? 4);
   const record = await loadBuild(store, buildId);
   const references = await loadReferences(store);
-  if (record && references[record.fingerprint.product]?.buildId === buildId) {
-    throw new StaysFixedError(`${buildId} is the reference for ${record.fingerprint.product}, so its observations cannot be pruned.`, {
-      hint: 'Point the reference at a newer build first, with setReference.',
+
+  // Asked of the POINTERS, not of the build's own record. Reading it the other way round —
+  // "what product does this build say it is of, and is that product's reference this build" —
+  // has a hole in it exactly where it matters: a build whose build.json is missing answers
+  // nothing, the guard is skipped, and the captures that are the only record of what working
+  // looks like get deleted. Every pointer is checked here, so an unreadable record can never
+  // be the reason a reference is thrown away.
+  const pointedAt = Object.values(references).filter((p) => p?.buildId === buildId);
+  if (pointedAt.length > 0) {
+    throw new StaysFixedError(
+      `${buildId} is the reference for ${pointedAt.map((p) => p.product).join(', ')}, so its observations cannot be pruned.`,
+      { hint: 'Point the reference at a newer build first, with setReference.' },
+    );
+  }
+  if (!record) {
+    throw new StaysFixedError(`Nothing here says what ${buildId} is, so its observations will not be thrown away.`, {
+      hint: 'Its build.json is missing. Deleting captures on the strength of a record nobody can read is how the evidence for "this used to work" disappears. Run a check against that build to rewrite the record, or delete the whole folder deliberately.',
     });
   }
 
@@ -636,25 +841,34 @@ export async function pruneBuild(store, buildId, opts = {}) {
 export async function sweepIncomplete(store, opts = {}) {
   const cutoff = Date.now() - (opts.olderThanMs ?? 60 * 60 * 1000);
   let removed = 0;
+
+  /** @param {string} dir */
+  const sweep = async (dir) => {
+    for (const name of await entries(dir)) {
+      if (!name.endsWith('.part')) continue;
+      const file = path.join(dir, name);
+      try {
+        const stat = await fsp.stat(file);
+        if (stat.mtimeMs > cutoff) continue;
+        await fsp.rm(file, { force: true });
+        removed++;
+      } catch {
+        // Gone while we looked at it. Somebody else's cleanup, and none of our business.
+      }
+    }
+  };
+
   const dirs = opts.buildId ? [safeName(opts.buildId)] : await subdirs(store.buildsDir);
   for (const buildDirName of dirs) {
     const base = path.join(store.buildsDir, buildDirName);
-    for (const journeyDir of await subdirs(base)) {
-      const full = path.join(base, journeyDir);
-      for (const name of await entries(full)) {
-        if (!name.endsWith('.part')) continue;
-        const file = path.join(full, name);
-        try {
-          const stat = await fsp.stat(file);
-          if (stat.mtimeMs > cutoff) continue;
-          await fsp.rm(file, { force: true });
-          removed++;
-        } catch {
-          // Gone while we looked at it. Somebody else's cleanup, and none of our business.
-        }
-      }
-    }
+    // The build's own folder as well as each journey's. A half-written build.json lands
+    // beside the journey folders rather than inside one, so sweeping only the journeys left
+    // those behind for good — invisible, and counting against a disk that was already full.
+    await sweep(base);
+    for (const journeyDir of await subdirs(base)) await sweep(path.join(base, journeyDir));
   }
+  // And the store's own root, where a half-written references.json lands.
+  if (!opts.buildId) await sweep(store.dir);
   return { removed };
 }
 
@@ -683,8 +897,15 @@ async function subdirs(dir) {
   try {
     const items = await fsp.readdir(dir, { withFileTypes: true });
     return items.filter((d) => d.isDirectory()).map((d) => d.name);
-  } catch {
-    return [];
+  } catch (e) {
+    // Not there is an empty list and always was. A folder that IS there and will not open —
+    // a permission taken away, a mount that went — used to come back as the same empty list,
+    // and an empty list here means "this product has never been walked". Everything above
+    // then reports a store full of evidence as a store with nothing in it.
+    if (justNotThere(e)) return [];
+    throw new StaysFixedError(`${dir} is there and could not be listed: ${e instanceof Error ? e.message : String(e)}`, {
+      hint: 'Reading it as empty would report everything already stored in it as never having been walked.',
+    });
   }
 }
 
@@ -697,7 +918,10 @@ async function entries(dir) {
   try {
     const items = await fsp.readdir(dir, { withFileTypes: true });
     return items.filter((d) => d.isFile()).map((d) => d.name);
-  } catch {
-    return [];
+  } catch (e) {
+    if (justNotThere(e)) return [];
+    throw new StaysFixedError(`${dir} is there and could not be listed: ${e instanceof Error ? e.message : String(e)}`, {
+      hint: 'Reading it as empty would report every capture inside it as never having been taken.',
+    });
   }
 }

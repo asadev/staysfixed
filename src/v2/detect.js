@@ -31,6 +31,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** @typedef {import('./types.js').Surface} Surface */
 
@@ -76,8 +77,11 @@ export const PRODUCT_KINDS = Object.freeze({
 export function adaptersHere() {
   /** @type {Set<string>} */
   const here = new Set();
+  // `fileURLToPath` rather than reading `.pathname` off the URL: on Windows a module URL's
+  // pathname is `/C:/...`, which is not a path any filesystem call accepts, so the listing
+  // below threw and every adapter went missing on the one platform nobody tests on.
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'adapters');
   try {
-    const dir = path.join(path.dirname(new URL(import.meta.url).pathname), 'adapters');
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith('.js')) continue;
       const id = name.slice(0, -3);
@@ -86,12 +90,36 @@ export function adaptersHere() {
       if (id === 'contract' || id === 'isolate' || id.endsWith('-driver')) continue;
       here.add(id);
     }
+    return here;
   } catch {
-    // A copy of the tool whose own folder cannot be read tells us nothing, and claiming no
-    // adapter exists would be a worse answer than claiming the usual ones do.
-    return new Set(['process', 'source', 'http', 'web', 'electron']);
+    // Fall through. A listing can be refused where a single file can still be asked about.
+  }
+  // Second angle, and it is still a reading rather than a claim: ask about each adapter this
+  // tool has a name for, one file at a time. A hard-coded answer here would be the thing this
+  // whole file exists to avoid — it would go on saying "there is no iOS adapter" on the day
+  // one landed, and a stranger would be told their iPhone app cannot be checked by a copy of
+  // the tool that could check it.
+  for (const id of everyAdapterNamed()) {
+    try {
+      if (fs.existsSync(path.join(dir, `${id}.js`))) here.add(id);
+    } catch {
+      // Nothing readable about this one either. It stays out, which is the honest direction.
+    }
   }
   return here;
+}
+
+/**
+ * Every adapter this tool has a name for, taken from the product table rather than typed out
+ * a second time, so the two can never disagree.
+ *
+ * @returns {string[]}
+ */
+function everyAdapterNamed() {
+  /** @type {Set<string>} */
+  const names = new Set(['source']);
+  for (const kind of Object.values(PRODUCT_KINDS)) if (kind.adapter) names.add(kind.adapter);
+  return [...names];
 }
 
 /** Folders never worth walking into. Walking `node_modules` is how a detector takes a minute. */
@@ -157,6 +185,10 @@ const ALREADY_COVERED = new Set([
  *                                   Whether a built artifact is sitting there ready to be opened.
  * @property {string[]} blockers     Plain sentences: what stands between this and being checked.
  * @property {Record<string, any>} [suggest]   The config slice init would write for it.
+ * @property {Router} [router]       For a web app: how it decides which screen to show, and so
+ *                                   whether a screen has an address at all or only a click.
+ * @property {string} [startNote]    Why the start command is the one it is, so the settings can
+ *                                   say it beside the line itself.
  */
 
 /**
@@ -177,6 +209,18 @@ const ALREADY_COVERED = new Set([
  * @property {{dev: string|null, start: string|null, build: string|null, test: string|null, typecheck: string|null, package: string|null}} scripts
  * @property {{ipc: number, route: number, export: number, command: number, env: number, unnamed: number, filesRead: number, read: boolean, why: string}} doors
  * @property {{name: string, method: string, file: string}[]} routes   Every route, by name. Capped.
+ * @property {{name: string, answers: boolean, file: string}[]} channels
+ *                                   Every private channel between a desktop app's two halves,
+ *                                   by name. Capped. `answers` is true for the ones that hand
+ *                                   a value back, which are the only ones worth asking.
+ * @property {string[]} envNames     Every setting the code reads out of the environment, by
+ *                                   name. Capped. Asking for one that does not exist is how a
+ *                                   set-up list gets a line nobody can ever tick off.
+ * @property {string[]} sourceFolders  The folders the contract channel should read, worked out
+ *                                   from where the products actually are.
+ * @property {{bytes: number, files: number, capped: boolean, biggest: {folder: string, bytes: number}[], freeBytes: number|null, tooBig: boolean, why: string}} bulk
+ *                                   What copying this project would cost, and whether there is
+ *                                   room. Three adapters copy it before running anything.
  * @property {{url: string, file: string, needs: string[]}[]} pages
  * @property {{dockerfile: string|null, compose: string|null}} containers
  * @property {Clue[]} evidence       Everything found, including clues no product claimed.
@@ -226,9 +270,11 @@ export async function detectProject(options = {}) {
   // The source read, once, for two answers — how many doors there are, and what the routes
   // are called. Reading Terminal Deck's 1,416 files twice because two functions each wanted
   // their own copy cost a second and a half of the two this whole detection takes.
-  const reading = readCode ? await readTheSource(root) : { doors: notRead(), routes: [] };
+  const reading = readCode ? await readTheSource(root) : { doors: notRead(), routes: [], channels: [], envNames: [] };
   const doors = reading.doors;
   const routes = reading.routes;
+  const channels = reading.channels;
+  const envNames = reading.envNames;
   const pages = readCode ? await readThePages(root) : [];
   if (doors.read && doors.route + doors.ipc > 0) {
     evidence.push({ where: 'the source', means: `${doors.route} route${doors.route === 1 ? '' : 's'} and ${doors.ipc} private channel${doors.ipc === 1 ? '' : 's'} are written in the code.` });
@@ -276,6 +322,12 @@ export async function detectProject(options = {}) {
       available,
     })));
   }
+
+  // Products no manifest advertises: a command-line program built into a folder nobody
+  // commits, and a server that is three files and a socket. Both are real, both are shipped,
+  // and both were invisible to everything above, which reads what a project SAYS about itself.
+  if (deep) products.push(...(await findCommandPrograms({ root, listing, scripts: pkg?.scripts ?? {}, available, claimed: products.map((p) => p.where) })));
+  if (deep) products.push(...(await findServersInCode({ root, listing, products, available })));
 
   const merged = mergeProducts(products);
   if (merged.length === 0) {
@@ -327,8 +379,8 @@ export async function detectProject(options = {}) {
     languages: await languagesIn(root),
     tests,
     scripts: scriptsOf(pkg?.scripts ?? {}),
-    doors,
-    routes,
+    ...(await theSourceAgain({ root, readCode, merged, listing, first: { doors, routes, channels, envNames } })),
+    bulk: await measureBulk(root),
     pages,
     containers,
     evidence: dedupeClues(evidence),
@@ -421,6 +473,8 @@ async function productsIn(input) {
    * @param {{found: boolean, where: string|null, how: string}} [spec.built]
    * @param {string[]} [spec.blockers]
    * @param {Record<string, any>} [spec.suggest]
+   * @param {Router} [spec.router]
+   * @param {string} [spec.startNote]
    */
   const add = (kind, spec) => {
     const meta = PRODUCT_KINDS[kind];
@@ -436,6 +490,8 @@ async function productsIn(input) {
       built: spec.built ?? { found: false, where: null, how: 'nothing to build — it runs from source' },
       blockers: spec.blockers ?? [],
       suggest: spec.suggest,
+      router: spec.router,
+      startNote: spec.startNote,
     });
   };
 
@@ -448,7 +504,11 @@ async function productsIn(input) {
     const clues = [];
     if (has('electron')) clues.push({ where: at('package.json'), means: 'It depends on Electron, which is how desktop apps are built out of web code.' });
     if (builderFile) clues.push({ where: at(builderFile), means: 'There is a packaging config, so this repository produces an installable desktop app.' });
-    if (pkg?.build?.appId) clues.push({ where: at('package.json'), means: `It has an application id (${String(pkg.build.appId)}), which only a packaged desktop app has.` });
+    // The application id lives in package.json in one project and in the packaging config in
+    // the next, and Terminal Deck is the second kind — reading only the first said 'no id
+    // here' about a repository whose id is on line one of electron-builder.yml.
+    const appId = typeof pkg?.build?.appId === 'string' ? String(pkg.build.appId) : appIdInConfig(dir, builderFile);
+    if (appId) clues.push({ where: at(typeof pkg?.build?.appId === 'string' ? 'package.json' : String(builderFile)), means: `It has an application id (${appId}), which only a packaged desktop app has.` });
     if (app.where) clues.push({ where: path.relative(root, app.where), means: 'A built desktop app is sitting here already, so it can be opened and read straight away.' });
     add('electron', {
       name: 'the desktop app',
@@ -457,7 +517,15 @@ async function productsIn(input) {
       evidence: clues,
       built: { found: Boolean(app.where), where: app.where ? path.relative(root, app.where) : null, how: app.how },
       blockers: app.where ? [] : ['The app has not been built. A desktop app can only be checked once there is a built copy to open — build it the way you normally do, then point the settings at the result.'],
-      suggest: app.where ? { binary: path.relative(root, app.where) } : {},
+      // The application id goes in beside the binary when the manifest carries one. The
+      // adapter uses it to find the window it opened rather than any other window of the same
+      // app that was already on screen, and it is written in package.json already — asking
+      // somebody for a value that is sitting in their own manifest is the exact shape of
+      // question this command exists to stop asking.
+      suggest: {
+        ...(app.where ? { binary: path.relative(root, app.where) } : {}),
+        ...(appId ? { appId } : {}),
+      },
     });
   }
 
@@ -465,24 +533,43 @@ async function productsIn(input) {
   const xcode = listing.dirs.find((d) => d.endsWith('.xcodeproj')) ?? listing.dirs.find((d) => d.endsWith('.xcworkspace')) ?? null;
   const swiftPackage = file('Package.swift');
   const podfile = file('Podfile');
-  const xcodegen = file('project.yml') && listing.dirs.some((d) => /^[A-Z]/.test(d));
+  // An `.xcodeproj` is very often NOT committed. It is the one file in an Xcode repository no
+  // two people can edit at once — it carries a random identity per file and settles conflicts
+  // by corrupting itself — so a great many projects generate it from an XcodeGen spec and keep
+  // only the spec in git. Terminal Deck does exactly that, and the effect was that the iPhone
+  // app existed on the machine it was last built on and vanished from every fresh clone: three
+  // products found where there are five, and no word said about the missing two.
+  const xcodegen = isXcodeGenSpec(dir, listing);
   // React Native and Expo are one codebase that becomes two apps. Both are reported, because
   // reporting one would leave the other silently unchecked.
   const reactNative = has('react-native') || has('expo');
-  if (xcode || (swiftPackage && (podfile || folder('Sources'))) || (podfile && !xcode) || (xcodegen && podfile) || reactNative) {
+  if (xcode || (swiftPackage && (podfile || folder('Sources'))) || (podfile && !xcode) || xcodegen || reactNative) {
     /** @type {Clue[]} */
     const clues = [];
     if (xcode) clues.push({ where: at(xcode), means: 'An Xcode project, which is how an Apple app is built.' });
     if (swiftPackage) clues.push({ where: at('Package.swift'), means: 'Swift source organised as a package.' });
     if (podfile) clues.push({ where: at('Podfile'), means: 'CocoaPods dependencies, which are used by iOS apps.' });
+    if (xcodegen) clues.push({ where: at('project.yml'), means: 'An XcodeGen spec. The Xcode project itself is generated from this and is usually not committed, which is why looking only for an .xcodeproj misses the app entirely on a fresh clone.' });
     if (reactNative) clues.push({ where: at('package.json'), means: 'It depends on React Native, so one codebase becomes both an iPhone app and an Android app.' });
     const ipa = await findFirst(dir, /\.(ipa|app)$/, ['build', 'DerivedData', 'Products']);
     add('ios', {
       name: 'the iPhone app',
-      confidence: xcode ? 1 : reactNative ? 0.8 : 0.6,
-      why: xcode ? `There is an Xcode project at ${at(xcode)}.` : reactNative ? 'It depends on React Native, which builds an iPhone app.' : 'There is Swift and iOS tooling here, though no Xcode project was found in the usual place.',
+      confidence: xcode ? 1 : xcodegen ? 0.95 : reactNative ? 0.8 : 0.6,
+      why: xcode ? `There is an Xcode project at ${at(xcode)}.` : xcodegen ? `${at('project.yml')} is an XcodeGen spec, so the Xcode project is generated from it rather than committed.` : reactNative ? 'It depends on React Native, which builds an iPhone app.' : 'There is Swift and iOS tooling here, though no Xcode project was found in the usual place.',
       evidence: clues,
       built: { found: Boolean(ipa), where: ipa ? path.relative(root, ipa) : null, how: ipa ? 'a built app was found' : 'nothing built was found' },
+      // Only a folder ending .app is worth naming: the simulator installs a bundle, and an
+      // .ipa is a signed archive for a real phone, which is the one thing that can never be
+      // driven two builds at a time anyway.
+      suggest: {
+        ...(ipa && ipa.endsWith('.app') ? { app: path.relative(root, ipa) } : {}),
+        // The scheme, which is the one word `xcodebuild` cannot be run without. It is written
+        // in the project name — in the XcodeGen spec where there is one, in the .xcodeproj's
+        // own name otherwise — so handing somebody a command with a blank in it, for a value
+        // sitting in their own repository, would be exactly the kind of asking this command
+        // exists to stop.
+        ...(schemeName(dir, listing, xcode) ? { scheme: schemeName(dir, listing, xcode) } : {}),
+      },
       blockers: available.has('ios')
         ? ['It runs on the simulator. Two builds on a real phone in your hand can never be compared side by side, on any machine.']
         : ['Nothing in this copy of the tool can drive an iPhone app yet. When it can, it will run on the simulator; two builds on a real phone in your hand can never be compared side by side.'],
@@ -553,30 +640,55 @@ async function productsIn(input) {
     // has its own pages, its own host config, or its own package.
     const isTheElectronWindow = electronish && where === '.' && !hostConfig && pages.length === 0;
     if (!isTheElectronWindow) {
-      const dev = scripts.dev ?? scripts.start ?? scripts.serve ?? null;
-      const start = dev ? inFolder(npmRun(scripts, dev), where) : null;
+      // How to boot it. Build-then-serve wherever there is a way to, and the development
+      // server only when there is not — see {@link startCommandFor} for why that order and
+      // not the other one.
+      const booting = startCommandFor({ scripts, has, dir, listing });
+      const start = booting.command ? inFolder(booting.command, where) : null;
       // A site made of plain .html files has no framework and no dev server, and every one
       // of those files is a page somebody can open. Listing them is what turns "there is a
       // website here" into journeys that can actually be walked.
       const flat = listing.files.filter((f) => f.endsWith('.html')).map((f) => (f === 'index.html' ? '/' : `/${f}`));
       if (flat.length > 1) clues.push({ where: at('*.html'), means: `${flat.length} pages are plain HTML files sitting in this folder.` });
+
+      // Where the screens come from. Folder names answer for a framework that builds its
+      // addresses out of them; for everything else the router is read, and where there is no
+      // router the screens are read off the control that switches between them. Reading the
+      // folder names and stopping there is what reported a four-screen app as a one-page one.
+      const reading = pages.length > 0
+        ? { screens: /** @type {Screen[]} */ ([]), needValues: /** @type {{url: string, names: string[]}[]} */ ([]), router: /** @type {Router} */ ({ kind: 'files', where: 'the page folders', why: `${pages.length} addresses are built out of folder names, the way Next.js and its cousins do it, and every one of them is opened.` }) }
+        : fromHere(await readScreens(dir, has), where);
+      /** @type {Screen[]} */
+      const screens = flat.length > 1
+        ? flat.map((url) => ({ name: url === '/' ? 'the front page' : url, url }))
+        : reading.screens;
+      if (reading.router.kind === 'tabs' || reading.router.kind === 'hash' || reading.router.kind === 'declared') {
+        clues.push({ where: at(reading.router.where ?? 'the source'), means: reading.router.why });
+      }
+
       add('web', {
         name: where === '.' ? 'the website' : `the website in ${where}/`,
         confidence: onlyBuildsWebsites || ((webFramework || indexHtml) && (bundler || hostConfig || pages.length > 0)) ? 0.95 : 0.6,
         why: [
           webFramework ? `It uses ${webFramework}` : 'There is a page here',
           pages.length > 0 ? ` and ${pages.length} page address${pages.length === 1 ? '' : 'es'} were read out of the folder names` : '',
+          pages.length === 0 && screens.length > 0 ? ` and ${screens.length} screen${screens.length === 1 ? '' : 's'} were read out of ${reading.router.kind === 'tabs' ? 'the strip of tabs that switches between them' : reading.router.kind === 'files' ? 'the folder names' : 'its router'}` : '',
           flat.length > 1 && pages.length === 0 ? ` and ${flat.length} more are plain HTML files` : '',
           hostConfig ? `, it is set up to deploy to ${hostConfig.split('.')[0]}` : '',
           start ? `, and \`${start}\` starts it` : '',
         ].join('') + '.',
         evidence: clues,
+        router: pages.length > 0 || flat.length > 1
+          ? { kind: 'files', where: null, why: 'Every page here is a file with an address of its own, so each one is opened directly.' }
+          : reading.router,
+        startNote: booting.why,
         blockers: start
           ? []
           : ['There is no command that starts it, so each build cannot be booted on its own. Without that, both halves of a comparison would read the same running copy and prove nothing. A static site only needs a static file server — anything that serves this folder on the PORT it is given will do.'],
         suggest: {
           ...(start ? { start } : {}),
-          ...(flat.length > 0 && pages.length === 0 ? { screens: flat.map((url) => ({ name: url === '/' ? 'the front page' : url, url })) } : {}),
+          ...(screens.length > 0 ? { screens } : {}),
+          ...(reading.needValues.length > 0 ? { screensNeedingValues: reading.needValues } : {}),
         },
       });
     }
@@ -602,7 +714,14 @@ async function productsIn(input) {
         why: serverFramework ? `It uses ${serverFramework} and ${doors.route} route${doors.route === 1 ? '' : 's'} are written in the code.` : `${doors.route} route${doors.route === 1 ? '' : 's'} are written in the code, though no web framework is installed.`,
         evidence: clues,
         blockers: scripts.start ? [] : ['There is no command that starts it. The routes can be listed from the source without one, but none of them can be walked.'],
-        suggest: scripts.start ? { start: inFolder(npmRun(scripts, scripts.start), where) } : {},
+        suggest: {
+          ...(scripts.start ? { start: inFolder(npmRun(scripts, scripts.start), where) } : {}),
+          // Whether this server keeps anything. Both builds have to see the same rows, so a
+          // server with a database needs a command that puts the data back — and a server
+          // with NO database needs no such command, and must not be asked for one. Asking is
+          // how a set-up list grows a line nobody can ever tick off.
+          stateless: !keepsData(deps, containers),
+        },
       });
     }
   }
@@ -797,12 +916,15 @@ async function findMembers(root, globs, listing) {
  * uses so the number here and the number in a check can never disagree.
  *
  * @param {string} root
- * @returns {Promise<{doors: ProjectShape['doors'], routes: ProjectShape['routes']}>}
+ * @param {string[]} [folders]   Which folders to read. Left out, the reader uses its own usual
+ *                               list, which is right for a repository that makes one thing and
+ *                               misses whole products in one that makes several.
+ * @returns {Promise<{doors: ProjectShape['doors'], routes: ProjectShape['routes'], channels: ProjectShape['channels'], envNames: ProjectShape['envNames']}>}
  */
-async function readTheSource(root) {
+async function readTheSource(root, folders) {
   try {
     const { readContract, readFileRoutes, readPackageCommands } = await import('./adapters/source.js');
-    const reading = await readContract({ root });
+    const reading = await readContract({ root, folders });
     const fileRoutes = await readFileRoutes(root);
     const commands = await readPackageCommands(root);
     const doors = [...reading.doors, ...fileRoutes.doors, ...commands];
@@ -822,7 +944,33 @@ async function readTheSource(root) {
       if (routes.size >= 200) break;
     }
 
+    // The private channels, by name, and whether each one hands a value back. Kept because
+    // the count alone cannot answer the only question worth asking about them — which ones
+    // are safe to knock on — and because a settings file that lists them saves somebody
+    // reading four hundred and fifty registrations by hand.
+    /** @type {Map<string, {name: string, answers: boolean, file: string}>} */
+    const channels = new Map();
+    for (const door of doors) {
+      if (door.kind !== 'ipc' || !door.named || door.inTest) continue;
+      if (channels.has(door.name)) continue;
+      channels.set(door.name, { name: door.name, answers: door.detail.startsWith('answers'), file: door.file });
+      if (channels.size >= 800) break;
+    }
+
+    // Every setting the code reads out of the environment. This is what stops the set-up list
+    // asking for a variable that does not exist: a name nobody can find is a line nobody can
+    // ever tick off, and it makes every other line on the list less believable.
+    /** @type {Set<string>} */
+    const envNames = new Set();
+    for (const door of doors) {
+      if (door.kind !== 'env' || !door.named) continue;
+      envNames.add(door.name);
+      if (envNames.size >= 400) break;
+    }
+
     return {
+      channels: [...channels.values()],
+      envNames: [...envNames].sort(),
       doors: {
         ipc: counts.ipc ?? 0,
         route: counts.route ?? 0,
@@ -842,6 +990,8 @@ async function readTheSource(root) {
     return {
       doors: { ...notRead(), why: `The source could not be read: ${error instanceof Error ? error.message : String(error)}` },
       routes: [],
+      channels: [],
+      envNames: [],
     };
   }
 }
@@ -1196,4 +1346,1247 @@ function dedupeClues(clues) {
     if (!seen.has(key)) seen.set(key, clue);
   }
   return [...seen.values()];
+}
+
+// ---------------------------------------------------------------------------
+// Reading what the code IS, rather than what package.json advertises
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a build puts what it made. Looked in for products that exist only after a build —
+ * the ones no manifest at the top of the repository mentions.
+ */
+const BUILD_OUTPUT_DIRS = ['out', 'dist', 'build', 'lib', 'release', 'target', 'bin', '.output'];
+
+/**
+ * Folders whose command-line-looking files are machinery rather than a product: the scripts
+ * that release the thing, the tests that check it, the samples that show it off. Every one of
+ * these normally holds a file with a shebang on it, and calling those a product would fill the
+ * report with things nobody ships.
+ */
+const NOT_A_SHIPPED_PROGRAM = new Set([
+  'scripts', 'script', 'tools', 'tooling', 'build', 'ci', 'test', 'tests', '__tests__', 'spec',
+  'e2e', 'fixtures', 'examples', 'example', 'demo', 'demos', 'docs', 'doc', 'benchmarks', 'bench',
+  'migrations', 'seeds', 'infra', 'deploy', 'types', 'typings', 'assets', 'public', 'static',
+]);
+
+/**
+ * How much of one file is worth reading to work out what kind of thing it is.
+ *
+ * Two megabytes, and the number was chosen by measuring rather than by feel. A single-page
+ * app that keeps its whole client in one file is normal — the phone client this was tested
+ * against is 315KB in one file, and it holds the entire list of screens. At the 400KB this
+ * started at, an app half again as big would have had its router go unread, and the answer
+ * would have been "this is one page" with nothing anywhere saying a file had been skipped.
+ * That is the exact shape of silence this whole tool exists to remove, so the ceiling is
+ * generous AND anything above it is named out loud.
+ */
+const MOST_BYTES_PER_FILE = 2_000_000;
+
+/**
+ * Read a file, but only if it is small enough to be worth reading.
+ *
+ * @param {string} file
+ * @param {number} [limit]
+ * @returns {Promise<string|null>}
+ */
+async function readTextIfSmall(file, limit = MOST_BYTES_PER_FILE) {
+  try {
+    const info = await fsp.stat(file);
+    if (!info.isFile() || info.size > limit) return null;
+    return await fsp.readFile(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every source file under one folder, bounded, with its text.
+ *
+ * Bounded twice over — a file count and a byte ceiling per file — because this runs inside
+ * somebody else's repository, and a detector that takes twenty seconds is a detector people
+ * turn off.
+ *
+ * @param {string} dir
+ * @param {object} [opts]
+ * @param {RegExp} [opts.match]      Which filenames are worth opening.
+ * @param {number} [opts.most]       How many files to open before stopping.
+ * @param {number} [opts.depth]      How deep to go.
+ * @returns {Promise<{files: {file: string, rel: string, text: string}[], tooBig: string[]}>}
+ *   `tooBig` names anything skipped for size. Every reading built on this has to be able to
+ *   say what it did not open, because a reader that quietly skips a file and then reports
+ *   what it found is indistinguishable from one that found nothing.
+ */
+async function readSome(dir, opts = {}) {
+  const match = opts.match ?? /\.([cm]?[jt]sx?|svelte|vue)$/;
+  const most = opts.most ?? 300;
+  const maxDepth = opts.depth ?? 4;
+  /** @type {{file: string, rel: string, text: string}[]} */
+  const out = [];
+  /** @type {string[]} */
+  const tooBig = [];
+  /**
+   * @param {string} here
+   * @param {number} depth
+   * @returns {Promise<void>}
+   */
+  const walk = async (here, depth) => {
+    if (out.length >= most || depth > maxDepth) return;
+    /** @type {import('node:fs').Dirent[]} */
+    let entries;
+    try {
+      entries = await fsp.readdir(here, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= most) return;
+      if (entry.name.startsWith('.') || entry.isSymbolicLink()) continue;
+      const full = path.join(here, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) await walk(full, depth + 1);
+        continue;
+      }
+      if (!match.test(entry.name)) continue;
+      const text = await readTextIfSmall(full);
+      if (text === null) {
+        tooBig.push(path.relative(dir, full));
+        continue;
+      }
+      out.push({ file: full, rel: path.relative(dir, full), text });
+    }
+  };
+  await walk(dir, 0);
+  return { files: out, tooBig };
+}
+
+/**
+ * The first bytes of a file, for the one question a shebang answers.
+ *
+ * @param {string} file
+ * @param {number} bytes
+ * @returns {Promise<string>}
+ */
+async function readHead(file, bytes) {
+  /** @type {import('node:fs/promises').FileHandle|null} */
+  let handle = null;
+  try {
+    handle = await fsp.open(file, 'r');
+    const buffer = Buffer.alloc(bytes);
+    const read = await handle.read(buffer, 0, bytes, 0);
+    return buffer.subarray(0, read.bytesRead).toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+/**
+ * Which script builds the thing in this folder, and where it lands.
+ *
+ * Matched on the folder's own word — `src/headless` against `build:headless` against
+ * `vite.headless.config.ts` — because that is how every repository that builds a second
+ * program out of one tree actually names things. The output folder is read out of the build
+ * config rather than guessed, so what the settings say is where the file will be.
+ *
+ * @param {string} root
+ * @param {string} where
+ * @param {{files: string[], dirs: string[]}} listing
+ * @param {Record<string, string>} scripts
+ * @returns {{command: string|null, outDir: string|null}}
+ */
+function buildFor(root, where, listing, scripts) {
+  const word = path.basename(where).toLowerCase();
+  /** @type {string|null} */
+  let command = null;
+  for (const [name, line] of Object.entries(scripts)) {
+    if (typeof line !== 'string') continue;
+    const lower = name.toLowerCase();
+    if (lower.includes(word) && /build|bundle|compile|dist|pack/.test(lower)) {
+      command = `npm run ${name}`;
+      break;
+    }
+  }
+  if (!command) {
+    for (const [name, line] of Object.entries(scripts)) {
+      if (typeof line !== 'string') continue;
+      const lower = line.toLowerCase();
+      if (lower.includes(word) && /build|bundle|compile|esbuild|tsc|vite|rollup|webpack/.test(lower)) {
+        command = `npm run ${name}`;
+        break;
+      }
+    }
+  }
+
+  /** @type {string|null} */
+  let outDir = null;
+  for (const file of listing.files) {
+    if (!file.toLowerCase().includes(word)) continue;
+    if (!/\.(js|cjs|mjs|ts|mts|json|yml|yaml)$/.test(file)) continue;
+    /** @type {string} */
+    let text = '';
+    try {
+      const info = fs.statSync(path.join(root, file));
+      if (info.size > MOST_BYTES_PER_FILE) continue;
+      text = fs.readFileSync(path.join(root, file), 'utf8');
+    } catch {
+      continue;
+    }
+    const hit = /out(?:Dir|dir|put|putDir|putDirectory|File|file)\s*[:=]\s*['"]([^'"]+)['"]/.exec(text);
+    if (hit) {
+      const named = hit[1].replace(/\/+$/, '');
+      // Some builds name the file rather than the folder — `outfile: 'dist/bundle.js'`. The
+      // folder is what is wanted either way, and a folder with a .js on the end of it would
+      // read like a mistake in the settings.
+      outDir = /\.[a-z]{1,4}$/i.test(named) ? path.posix.dirname(named) : named;
+      break;
+    }
+  }
+  return { command, outDir };
+}
+
+/**
+ * The command-line programs this repository makes, found by what the code IS.
+ *
+ * THIS IS THE ANSWER TO A PRODUCT GOING MISSING. Terminal Deck ships a headless host: a real
+ * command-line program with its own help, its own `status`, `devices`, `pair`, `folders` and
+ * `stop`, which runs agent sessions on a server with no window. Nothing in the repository's
+ * own `package.json` mentions it — no `bin`, no entry point — because it is built by a config
+ * of its own into an `out/` folder nobody commits, and the manifest naming its commands is
+ * written BY that build. A detector that reads only the manifest at the top of the repository
+ * reports four products out of five, says nothing at all about the fifth, and the clean run
+ * that follows looks complete.
+ *
+ * So three readings, strongest first.
+ *
+ *   1. A MANIFEST A BUILD WROTE. A `package.json` inside a build output folder with a `bin`
+ *      map in it. Exact: it names each command and the file that runs it. It also draws the
+ *      line the build drew — Terminal Deck's build emits a third program, a public demo host,
+ *      and deliberately keeps it out of `bin`. Reading `bin` inherits that decision; scanning
+ *      for shebangs would have proposed running it.
+ *   2. A BUILT FILE THAT ANNOUNCES ITSELF. A JavaScript file in a build output folder whose
+ *      first line is a shebang. That is what makes a file something an operating system will
+ *      run, and nothing else puts one there.
+ *   3. SOURCE THAT READS ITS OWN ARGUMENTS. A folder holding a file that reads the command
+ *      line and a file that mentions a help flag. That is a command-line program before
+ *      anybody has built it, and saying so is what turns silence into "build it first".
+ *
+ * A shipped program and a release script look identical from a distance — both are a file
+ * with a shebang on it. They are told apart by where they live: {@link NOT_A_SHIPPED_PROGRAM}.
+ *
+ * @param {object} input
+ * @param {string} input.root
+ * @param {{files: string[], dirs: string[]}} input.listing
+ * @param {Record<string, string>} input.scripts
+ * @param {Set<string>} input.available
+ * @param {string[]} input.claimed   Folders another product already spoke for. A phone app folder
+ *                                   holds build scripts with shebangs on them, and calling one
+ *                                   of those a second product would report the same tree twice.
+ * @returns {Promise<Product[]>}
+ */
+async function findCommandPrograms(input) {
+  const { root, listing, scripts, available, claimed } = input;
+  const spokenFor = (/** @type {string} */ where) =>
+    claimed.some((taken) => taken !== "." && (where === taken || where.startsWith(`${taken}/`)));
+  /** @type {Product[]} */
+  const found = [];
+
+  // ── 1 and 2: what a build left behind ─────────────────────────────────────
+  //
+  // "Built" is decided by the repository's own ignore list rather than by the folder's name.
+  // `build/` in one repository is where a bundler writes and in the next it is committed
+  // artwork scripts; the difference is whether git is told to leave it alone. Reading the
+  // ignore list is exact, free, and it is the project's own answer rather than this file's
+  // opinion — without it, a folder of committed release scripts gets reported as a product.
+  const ignored = await readIgnoreList(root);
+  /** @type {string[]} */
+  const outputFolders = [];
+  for (const name of BUILD_OUTPUT_DIRS) {
+    if (!listing.dirs.includes(name)) continue;
+    const inner = await listOnce(path.join(root, name));
+    /** @type {string[]} */
+    const here = [name, ...inner.dirs.filter((deeper) => !deeper.startsWith('.')).map((deeper) => path.posix.join(name, deeper))];
+    if (ignored.has(name)) {
+      outputFolders.push(...here);
+      continue;
+    }
+    // Not ignored, so the shebang reading would be guessing. A manifest with a `bin` map in it
+    // is not a guess, so those folders still go in and the shebang reading skips them.
+    for (const folder of here) {
+      if (fs.existsSync(path.join(root, folder, 'package.json'))) outputFolders.push(folder);
+    }
+  }
+
+  for (const where of outputFolders) {
+    const dir = path.join(root, where);
+    const manifest = await readJson(path.join(dir, 'package.json'));
+    /** @type {{command: string, file: string}[]} */
+    const commands = [];
+    /** @type {Clue[]} */
+    const clues = [];
+
+    if (manifest?.bin) {
+      const bins = typeof manifest.bin === 'string'
+        ? { [String(manifest.name ?? path.basename(where))]: manifest.bin }
+        : manifest.bin;
+      for (const [command, file] of Object.entries(bins)) {
+        if (typeof file !== 'string') continue;
+        const full = path.join(dir, file);
+        if (!fs.existsSync(full)) continue;
+        commands.push({ command, file: path.relative(root, full) });
+      }
+      if (commands.length > 0) {
+        clues.push({
+          where: path.posix.join(where, 'package.json'),
+          means: `A package written by a build, installing ${commands.length === 1 ? 'a command' : `${commands.length} commands`}: ${commands.map((c) => c.command).join(', ')}. Nothing at the top of this repository mentions any of them.`,
+        });
+      }
+    }
+
+    if (commands.length < 1 && ignored.has(where.split('/')[0])) {
+      const inner = await listOnce(dir);
+      for (const name of inner.files) {
+        if (!/\.[cm]?js$/.test(name)) continue;
+        const head = await readHead(path.join(dir, name), 64);
+        if (!head.startsWith('#!')) continue;
+        commands.push({ command: name.replace(/\.[cm]?js$/, ''), file: path.posix.join(where, name) });
+      }
+      if (commands.length > 0) {
+        clues.push({
+          where: commands[0].file,
+          means: `${commands.length === 1 ? 'A built file starts' : `${commands.length} built files start`} with a shebang, which is the thing that makes a file runnable as a command.`,
+        });
+      }
+    }
+
+    if (commands.length === 0) continue;
+    found.push({
+      kind: 'cli',
+      name: commands.length === 1 ? `the \`${commands[0].command}\` command` : `the command-line program in ${where}/`,
+      surface: 'cli',
+      adapter: available.has('process') ? 'process' : null,
+      confidence: 1,
+      why: `${where}/ holds a built command-line program that nothing in this repository's own package.json names: ${commands.map((c) => `\`${c.command}\``).join(', ')}.`,
+      where,
+      evidence: clues,
+      built: { found: true, where, how: `it is built and sitting in ${where}/` },
+      blockers: [],
+      // `--help` and nothing else, exactly as for a command named in package.json. A command
+      // this tool found for itself has even less business being run: nobody wrote it down, so
+      // nobody has said it is safe.
+      suggest: {
+        commands: commands.map((one) => ({
+          name: `${one.command} --help`,
+          run: `node ${one.file} --help`,
+          describe: `ask ${one.command} to print its help, and compare every word of it`,
+        })),
+      },
+    });
+  }
+
+  // ── 3: source that reads its own arguments ────────────────────────────────
+  const holdsOtherFolders = new Set(['src', 'source', 'lib', 'packages', 'apps', 'app']);
+  /** @type {string[]} */
+  const sourceFolders = [];
+  for (const top of ['src', 'source', 'lib', 'packages', 'apps', '.']) {
+    if (top !== '.' && !listing.dirs.includes(top)) continue;
+    const inner = top === '.' ? listing : await listOnce(path.join(root, top));
+    for (const name of inner.dirs) {
+      if (SKIP_DIRS.has(name) || name.startsWith('.') || NOT_A_SHIPPED_PROGRAM.has(name)) continue;
+      // A folder that only holds other folders is not itself the program. Descending into it
+      // is what finds the program; naming it as well reports the same one twice, under a name
+      // that tells nobody anything.
+      if (top === '.' && holdsOtherFolders.has(name)) continue;
+      sourceFolders.push(top === '.' ? name : path.posix.join(top, name));
+    }
+  }
+
+  for (const where of sourceFolders) {
+    if (spokenFor(where)) continue;
+    const dir = path.join(root, where);
+    const files = (await readSome(dir, { most: 60, depth: 1 })).files.filter((f) => !/\.(test|spec)\.[cm]?[jt]sx?$/.test(f.rel));
+    if (files.length === 0) continue;
+    // The file that reads the command line has to be one somebody would run — the entry
+    // point, by the name every project gives it. Any file at all reading `process.argv` is
+    // far too weak: a test helper does it, a build script does it, and each one of those
+    // would arrive as a product this repository does not make.
+    const readsArguments = files.find((f) => /^(cli|main|bin|index|program|command|cmd|run|app)\.[cm]?[jt]sx?$/.test(path.basename(f.rel)) && /process\.argv|Deno\.args|Bun\.argv/.test(f.text));
+    const printsHelp = files.find((f) => /(['"`])(-h|--help|help)\1|Usage:|usage:/.test(f.text));
+    if (!readsArguments || !printsHelp) continue;
+
+    const build = buildFor(root, where, listing, scripts);
+    // A built copy of this same program was already found above. The built one is the exact
+    // answer and this one is the guess, so the guess stays quiet.
+    if (build.outDir && found.some((p) => p.where === build.outDir || p.where.startsWith(`${build.outDir}/`))) continue;
+
+    found.push({
+      kind: 'cli',
+      name: `the command-line program in ${where}/`,
+      surface: 'cli',
+      adapter: available.has('process') ? 'process' : null,
+      confidence: 0.8,
+      why: `${path.posix.join(where, readsArguments.rel)} reads the command line and ${path.posix.join(where, printsHelp.rel)} carries a help text, which is a command-line program whatever package.json says.`,
+      where,
+      evidence: [
+        { where: path.posix.join(where, readsArguments.rel), means: 'This file reads the arguments it was started with, which only a program somebody types does.' },
+        { where: path.posix.join(where, printsHelp.rel), means: 'This file holds the help text, so the program describes itself when asked — the one thing every command-line tool can safely be asked to do.' },
+      ],
+      built: { found: false, where: null, how: build.outDir ? `it builds into ${build.outDir}/, and there is nothing there yet` : 'nothing built was found' },
+      blockers: [
+        build.command
+          ? `It has not been built yet. Run \`${build.command}\`${build.outDir ? `, which puts it in ${build.outDir}/,` : ''} and then \`staysfixed init --force\`: the commands are filled in exactly from what the build wrote. Nothing has been edited by hand at that point, so nothing is lost.`
+          : 'It has not been built, and nothing in package.json says how. Name the command that builds it and the command that runs the result under "process" in the settings.',
+      ],
+      suggest: { buildWith: build.command, outDir: build.outDir },
+    });
+  }
+
+  return found;
+}
+
+/**
+ * Does a folder hold something that listens on a port?
+ *
+ * The third product a manifest never mentions. Terminal Deck's relay is three TypeScript
+ * files, no package.json, no framework and no script — and it is the one machine every phone
+ * depends on. Everything before this reported it as "a folder nothing could work out", which
+ * is honest and useless. What the code says plainly is that it opens a socket and reads the
+ * port out of the environment, and that is a server whatever else is missing.
+ *
+ * @param {string} dir
+ * @returns {Promise<{yes: boolean, file: string|null, readsPort: boolean, why: string}>}
+ */
+async function looksLikeAServer(dir) {
+  const { files } = await readSome(dir, { most: 60, depth: 3 });
+  for (const one of files) {
+    if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(one.rel)) continue;
+    const listens = /\.listen\s*\(|createServer\s*\(|Deno\.serve\s*\(|Bun\.serve\s*\(|serve\s*\(\s*\{[^}]*port/.test(one.text);
+    if (!listens) continue;
+    const readsPort = /process\.env\.PORT|Deno\.env\.get\(\s*['"]PORT|env\.PORT/.test(one.text);
+    return {
+      yes: true,
+      file: one.rel,
+      readsPort,
+      why: readsPort
+        ? `${one.rel} opens a socket and takes its port out of the environment, which is a server that can be booted on a spare port.`
+        : `${one.rel} opens a socket, which is a server — though it does not read a PORT out of the environment, so the port it uses has to be given to it another way.`,
+    };
+  }
+  return { yes: false, file: null, readsPort: false, why: 'Nothing here opens a socket.' };
+}
+
+// ---------------------------------------------------------------------------
+// Screens: read the router, not the folder names
+// ---------------------------------------------------------------------------
+
+/**
+ * How this web app decides what to show, and what that means for reaching a screen.
+ *
+ * @typedef {object} Router
+ * @property {'files'|'declared'|'hash'|'tabs'|'single'} kind
+ * @property {string|null} where   The file the answer came out of.
+ * @property {string} why          One plain sentence, safe to put in front of a person.
+ */
+
+/**
+ * One screen worth walking, and how to get to it.
+ *
+ * @typedef {object} Screen
+ * @property {string} name
+ * @property {string} url
+ * @property {Record<string, string>[]} [steps]
+ * @property {string} [describe]
+ */
+
+/**
+ * Every route a router declares, plus the screens a router does not declare at all.
+ *
+ * THE FAILURE THIS EXISTS TO STOP. A single-page app is one HTML file, so reading folder
+ * names finds one screen and reports it as the whole product. Terminal Deck's phone client is
+ * exactly that: one `index.html`, and four screens a person moves between all day. It was
+ * checked for months of pretend coverage — one page walked, three unwatched, and a clean run
+ * every time. Where the app declares a router, the router is read. Where it does not, the
+ * screens are read out of the strip of tabs that switches between them — and the fact that
+ * they are reached by CLICKING rather than by an address is said out loud, because a made-up
+ * `#address` that silently lands on the same page is worse than nothing: it turns three
+ * unchecked screens into three identical checks that agree with each other forever.
+ *
+ * Four readings, and every one names the file it came from:
+ *
+ *   1. DECLARED ROUTES — `path: '/x'` in a route table, `<Route path="/x">`, the shape every
+ *      router library from React Router to Vue Router to Angular writes.
+ *   2. HASH ROUTES — a `#name` compared against the address bar. A real address, reachable by
+ *      opening it, and only reported when the code actually reads `location.hash`.
+ *   3. TABS — an object literal pairing a screen name with the label on the control that
+ *      switches to it. Not an address: a click, and it is written as one.
+ *   4. NOTHING FOUND — one page, said plainly, so the coverage ledger can say so too.
+ *
+ * @param {string} dir
+ * @param {(name: string) => boolean} [has]   Is this package a dependency? A project that
+ *   installs a router library is a project whose route tables mean what they say, and that
+ *   fact lives in package.json rather than in the file the table is written in.
+ * @returns {Promise<{screens: Screen[], router: Router, needValues: {url: string, names: string[]}[]}>}
+ */
+async function readScreens(dir, has = () => false) {
+  const { files, tooBig } = await readSome(dir, { most: 200, depth: 5 });
+  const source = files.filter((f) => !/\.(test|spec)\.[cm]?[jt]sx?$/.test(f.rel));
+
+  // ── 1: routes a router library declares ───────────────────────────────────
+  /** @type {Map<string, Screen>} */
+  const declared = new Map();
+  /** @type {string|null} */
+  let declaredIn = null;
+  const routerInstalled = ['react-router', 'react-router-dom', 'vue-router', '@tanstack/react-router', '@tanstack/router', 'wouter', 'svelte-spa-router', 'svelte-routing', '@reach/router', '@angular/router', 'vue-router-next'].some(has);
+  const looksLikeARouter = /react-router|vue-router|@tanstack\/(react-)?router|wouter|svelte-spa-router|@angular\/router|createBrowserRouter|createHashRouter|createMemoryRouter|createRouter|createWebHistory|useRoutes|RouterModule|\b[Rr]outes\s*[:=]\s*\[|defineRoutes/;
+  for (const one of source) {
+    /** @type {string[]} */
+    const paths = [];
+    // A JSX route element says what it is on its own. A bare `path:` does not — it turns up in
+    // build configs, in file helpers, in anything — so it only counts inside a file that names
+    // a router. Two path-shaped strings in an unrelated file were enough to invent a list of
+    // screens and to hide the fact that the app had no addresses at all.
+    for (const hit of one.text.matchAll(/<Route\b[^>]*\bpath\s*=\s*["'{`]([^"'`}]+)/g)) paths.push(hit[1]);
+    if (routerInstalled || looksLikeARouter.test(one.text)) {
+      for (const hit of one.text.matchAll(/\bpath\s*:\s*['"]([^'"]*)['"]/g)) paths.push(hit[1]);
+      for (const hit of one.text.matchAll(/^\s*['"](\/[^'"]*)['"]\s*:\s*[A-Za-z_$]/gm)) paths.push(hit[1]);
+    }
+    for (const raw of paths) {
+      const url = tidyRoute(raw);
+      if (!url) continue;
+      if (declared.has(url)) continue;
+      declared.set(url, { name: url === '/' ? 'the front page' : url, url });
+      declaredIn = declaredIn ?? one.rel;
+    }
+    if (declared.size >= 60) break;
+  }
+  if (declared.size >= 2) {
+    // An address with a changing part in it — /reports/:id — cannot be opened until somebody
+    // says which report. Writing it into the settings as it stands would open a page that
+    // does not exist and report a difference nobody caused, so it is held back and named
+    // instead: the settings say which addresses are waiting on a value, and the set-up list
+    // asks for one. Dropping them silently would be the worse half of the same choice.
+    /** @type {{url: string, names: string[]}[]} */
+    const needValues = [];
+    /** @type {Screen[]} */
+    const openable = [];
+    for (const screen of declared.values()) {
+      const names = [...screen.url.matchAll(/:([A-Za-z_$][\w$]*)|\[\.{0,3}([^\]]+)\]|\{([^}]+)\}/g)].map((hit) => hit[1] ?? hit[2] ?? hit[3]);
+      if (names.length > 0) needValues.push({ url: screen.url, names });
+      else openable.push(screen);
+    }
+    return {
+      screens: openable,
+      needValues,
+      router: {
+        kind: 'declared',
+        where: declaredIn,
+        why: `${declared.size} addresses are declared in a router, starting in ${declaredIn}. Each one is opened directly${needValues.length > 0 ? (needValues.length === 1 ? ', except one that has a changing part in it and is waiting on a real value' : `, except ${needValues.length} that have a changing part in them and are waiting on a real value`) : ''}.`,
+      },
+    };
+  }
+
+  // ── 2: hash routes ────────────────────────────────────────────────────────
+  const readsHash = source.find((f) => /location\.hash|hashchange|useHashLocation|createWebHashHistory|HashRouter/.test(f.text));
+  if (readsHash) {
+    /** @type {Map<string, Screen>} */
+    const hashes = new Map();
+    for (const one of source) {
+      for (const hit of one.text.matchAll(/['"`]#([A-Za-z][\w-]{0,40})['"`]/g)) {
+        const url = `/#${hit[1]}`;
+        if (!hashes.has(url)) hashes.set(url, { name: `the ${hit[1]} screen`, url });
+      }
+      if (hashes.size >= 40) break;
+    }
+    if (hashes.size >= 2) {
+      return {
+        screens: [{ name: 'the front page', url: '/' }, ...hashes.values()],
+        needValues: [],
+        router: {
+          kind: 'hash',
+          where: readsHash.rel,
+          why: `${readsHash.rel} switches screens on the part of the address after the #, so each screen has an address of its own and is opened directly.`,
+        },
+      };
+    }
+  }
+
+  // ── 3: a strip of tabs ────────────────────────────────────────────────────
+  /** @type {Map<string, Screen>} */
+  const tabs = new Map();
+  /** @type {string|null} */
+  let tabsIn = null;
+  const pair = /\{[^{}]*?\b(?:screen|view|tab|page|panel|route)\s*:\s*['"]([A-Za-z][\w-]{0,40})['"][^{}]*?\b(?:label|title|text|name|caption)\s*:\s*['"]([^'"]{1,40})['"][^{}]*?\}/g;
+  const flipped = /\{[^{}]*?\b(?:label|title|text|caption)\s*:\s*['"]([^'"]{1,40})['"][^{}]*?\b(?:screen|view|tab|page|panel|route)\s*:\s*['"]([A-Za-z][\w-]{0,40})['"][^{}]*?\}/g;
+  for (const one of source) {
+    for (const hit of one.text.matchAll(pair)) {
+      if (!tabs.has(hit[1])) tabs.set(hit[1], tabScreen(hit[1], hit[2]));
+      tabsIn = tabsIn ?? one.rel;
+    }
+    for (const hit of one.text.matchAll(flipped)) {
+      if (!tabs.has(hit[2])) tabs.set(hit[2], tabScreen(hit[2], hit[1]));
+      tabsIn = tabsIn ?? one.rel;
+    }
+    if (tabs.size >= 20) break;
+  }
+  if (tabs.size >= 2) {
+    return {
+      screens: [{ name: 'the page as it opens', url: '/' }, ...tabs.values()],
+      needValues: [],
+      router: {
+        kind: 'tabs',
+        where: tabsIn,
+        why: `The address never changes: ${tabsIn} switches between ${tabs.size} screens in code, and each one is reached by clicking the control that says its name. That is why they are written as clicks and not as addresses — opening a made-up address would land on the same screen every time and report it as checked. The list below is the page as it opens, and then those ${tabs.size}.`,
+      },
+    };
+  }
+
+  return {
+    screens: [],
+    needValues: [],
+    router: {
+      kind: 'single',
+      where: null,
+      why: tooBig.length > 0
+        ? `Nothing that was read declares an address for a second screen, so this is read as one page — but ${plainly(tooBig.slice(0, 3))}${tooBig.length > 3 ? ' and others' : ''} ${tooBig.length === 1 ? 'was' : 'were'} too big to open, and a router in there would not have been seen. Name the screens under "web.screens" rather than trusting this.`
+        : 'Nothing here declares an address for a second screen, so this is read as one page. If it has more, name them under "web.screens" with the clicks that reach them.',
+    },
+  };
+}
+
+/**
+ * One screen reached by clicking the tab that names it.
+ *
+ * The click is written as Playwright's text selector rather than a CSS one, because the name
+ * on the control is the only thing known here — and it is the right thing to aim at anyway,
+ * since it is what a person reads and what a screen reader says.
+ *
+ * @param {string} id
+ * @param {string} label   The words actually on the control, taken from the same object the
+ *                         screen's own name came out of. Reconstructing a label from the id
+ *                         would guess at capitalisation and spacing and be wrong about both.
+ * @returns {Screen}
+ */
+function tabScreen(id, label) {
+  return {
+    name: `the ${id.replace(/[-_]/g, ' ')} screen`,
+    url: '/',
+    steps: [{ click: `text=${label}` }],
+    describe: `open the front page, click ${label}, and read what that screen says every control is and does`,
+  };
+}
+
+/**
+ * A route as an address somebody can open, or nothing at all.
+ *
+ * Route tables are full of strings that are not addresses — a `path` in a build config, a
+ * relative fragment, a catch-all. Anything that is not plainly an address is dropped rather
+ * than opened, because an address that 404s reports a difference nobody caused.
+ *
+ * @param {string} raw
+ * @returns {string|null}
+ */
+function tidyRoute(raw) {
+  const text = String(raw).trim();
+  if (text === '' || text === '*' || text === '**') return null;
+  if (!text.startsWith('/')) return null;
+  if (/[\\<>{}()\s]/.test(text)) return null;
+  if (/\.(js|ts|tsx|jsx|css|json|png|svg|html)$/.test(text)) return null;
+  if (text.includes('*')) return null;
+  if (text.length > 120) return null;
+  return text;
+}
+
+// ---------------------------------------------------------------------------
+// Starting a web app without hanging
+// ---------------------------------------------------------------------------
+
+/**
+ * The command that boots this web app for a check, and why it is that one.
+ *
+ * THE FAULT THIS FIXES. The first answer here was "whatever `npm run dev` is", and a dev
+ * server never exits. That is fine for the browser check, which waits for the port and then
+ * walks the page — and it is a hang anywhere the same command is treated as something that
+ * finishes. Worse, a dev server is not the thing anybody ships: it serves unbundled source
+ * with a live-reload socket wired into every page, which is a second thing changing under the
+ * comparison for reasons that have nothing to do with the change.
+ *
+ * So the order is: build it and then serve what was built; and only if there is no way to do
+ * that, the dev server — with the reason written down, because the run has to say which of
+ * the two it used.
+ *
+ * @param {object} input
+ * @param {Record<string, string>} input.scripts
+ * @param {(name: string) => boolean} input.has     Is this package a dependency?
+ * @param {string} input.dir                        The folder this product lives in, absolute.
+ * @param {{files: string[], dirs: string[]}} input.listing
+ * @returns {{command: string|null, kind: 'build-and-serve'|'build-and-start'|'dev'|'static'|'none', why: string}}
+ */
+function startCommandFor(input) {
+  const { scripts, has, dir, listing } = input;
+  const script = (/** @type {string} */ name) => (typeof scripts[name] === 'string' ? `npm run ${name}` : null);
+  const build = script('build');
+
+  // A framework that serves its own build, and reads PORT while doing it. `next start`,
+  // `nuxt start` and their cousins are the real thing a person deploys, not an approximation
+  // of it.
+  const servesItsOwnBuild = ['next', 'nuxt', '@remix-run/serve', '@remix-run/node', '@adonisjs/core'].some(has);
+  if (build && servesItsOwnBuild && script('start')) {
+    return {
+      command: `${build} && ${script('start')}`,
+      kind: 'build-and-start',
+      why: 'It is built and then started the way it is deployed, so what is checked is what ships. The framework reads the PORT it is given.',
+    };
+  }
+
+  // Vite and everything built on it ship a `preview` command whose whole job is to serve the
+  // build. It takes the port as a flag, so nothing has to be downloaded to serve the files.
+  if (build && script('preview') && (has('vite') || has('astro') || has('@sveltejs/kit'))) {
+    return {
+      command: `${build} && ${script('preview')} -- --port $PORT --strictPort`,
+      kind: 'build-and-serve',
+      why: 'It is built, and then the build is served by the tool that made it. That is what ships — a dev server serves unbundled source with a live-reload connection in every page, which is a second thing moving under the comparison.',
+    };
+  }
+
+  // Built, but with nothing that serves the result. Anything that serves a folder on the port
+  // it is given will do, and the folder is read out of the build config rather than guessed.
+  if (build) {
+    const outDir = staticOutputOf(dir, listing, has);
+    if (outDir) {
+      return {
+        command: `${build} && npx --yes serve -s ${outDir} -l $PORT`,
+        kind: 'build-and-serve',
+        why: `It is built into ${outDir}/, and those files are then served on the port the check gives it. \`serve\` is fetched the first time this runs and cached after that.`,
+      };
+    }
+  }
+
+  const dev = script('dev') ?? script('serve') ?? script('start');
+  if (dev) {
+    return {
+      command: dev,
+      kind: 'dev',
+      why: 'Nothing here builds a copy that can be served on its own, so the development server is used. It never exits, and it is not meant to: the check knows it is ready when the port answers, not when the command finishes. What is checked is the development build rather than the one that ships.',
+    };
+  }
+
+  const flat = listing.files.filter((f) => f.endsWith('.html'));
+  if (flat.length > 0) {
+    return {
+      command: 'npx --yes serve -l $PORT .',
+      kind: 'static',
+      why: 'These are plain files with nothing to build, so anything that serves this folder on the port it is given will do.',
+    };
+  }
+
+  return { command: null, kind: 'none', why: 'Nothing here says how to start it.' };
+}
+
+/**
+ * Where a build puts the files a browser asks for, read out of the build config where it says
+ * so and taken from the framework's own habit where it does not.
+ *
+ * @param {string} dir
+ * @param {{files: string[], dirs: string[]}} listing
+ * @param {(name: string) => boolean} has
+ * @returns {string|null}
+ */
+function staticOutputOf(dir, listing, has) {
+  for (const file of listing.files) {
+    if (!/^(vite|rollup|webpack|rsbuild|parcel|astro|svelte)\.config\.[cm]?[jt]s$/.test(file)) continue;
+    /** @type {string} */
+    let text = '';
+    try {
+      text = fs.readFileSync(path.join(dir, file), 'utf8');
+    } catch {
+      continue;
+    }
+    const hit = /out(?:Dir|dir|put(?:Dir|Path))\s*:\s*['"]([^'"]+)['"]/.exec(text);
+    if (hit) return hit[1].replace(/\/+$/, '');
+  }
+  /** @type {string[]} */
+  const guesses = has('react-scripts') ? ['build', 'dist'] : ['dist', 'build', 'public', 'out'];
+  for (const guess of guesses) {
+    if (fs.existsSync(path.join(dir, guess, 'index.html'))) return guess;
+  }
+  // Nothing built yet, so the habit of whatever built it is the best that can be said, and
+  // the settings say which one was assumed.
+  if (has('vite') || has('astro') || has('rollup') || has('parcel')) return 'dist';
+  if (has('react-scripts')) return 'build';
+  if (has('webpack')) return 'dist';
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// How big this repository is, which decides whether a check can copy it
+// ---------------------------------------------------------------------------
+
+/**
+ * What copying this project would cost, and whether there is room for it.
+ *
+ * Three of the adapters copy the whole project into a scratch folder before running it, which
+ * is the right thing to do — a check must never write into somebody's working copy. It also
+ * means a repository carrying nine gigabytes of Xcode build output and a folder of installers
+ * cannot be checked in place on a laptop with twelve gigabytes free. That is not a bug in the
+ * copy, it is a fact about the folder, and the only useful moment to say it is now: the whole
+ * answer is one line — run the check from a `git worktree`, which holds the tracked files and
+ * nothing else.
+ *
+ * Bounded and early-stopping: the question is only "is this big", and once the answer is yes
+ * there is nothing left to learn by counting further.
+ *
+ * @param {string} root
+ * @returns {Promise<{bytes: number, files: number, capped: boolean, biggest: {folder: string, bytes: number}[], freeBytes: number|null, tooBig: boolean, why: string}>}
+ */
+async function measureBulk(root) {
+  /** @type {number|null} */
+  let freeBytes = null;
+  try {
+    const stats = await fsp.statfs(root);
+    freeBytes = Number(stats.bavail) * Number(stats.bsize);
+  } catch {
+    freeBytes = null;
+  }
+
+  // Stop as soon as the answer is settled rather than at a round number. A paired run holds
+  // two copies at once, so the moment two and a half copies would not fit, counting further
+  // tells nobody anything new — and on a folder that is genuinely enormous, counting further
+  // is the slowest thing this file does.
+  const wouldNotFit = freeBytes === null ? 25 * 1024 * 1024 * 1024 : freeBytes / 2.5;
+  const STOP_AT = Math.min(25 * 1024 * 1024 * 1024, Math.max(wouldNotFit * 1.05, 2 * 1024 * 1024 * 1024));
+  const MOST = 60_000;
+  let bytes = 0;
+  let files = 0;
+  let capped = false;
+  /** @type {Map<string, number>} */
+  const perFolder = new Map();
+
+  const top = await listOnce(root);
+  for (const folder of [...top.dirs, '.']) {
+    if (folder === '.git' || (folder !== '.' && folder.startsWith('.') && folder !== '.output')) continue;
+    let here = 0;
+    /**
+     * @param {string} dir
+     * @param {number} depth
+     * @returns {Promise<void>}
+     */
+    const walk = async (dir, depth) => {
+      if (files > MOST || bytes > STOP_AT || depth > 12) return;
+      /** @type {import('node:fs').Dirent[]} */
+      let entries;
+      try {
+        entries = await fsp.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (files > MOST || bytes > STOP_AT) {
+          capped = true;
+          return;
+        }
+        if (entry.isSymbolicLink() || entry.name === '.git') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (folder === '.' && depth === 0) continue;   // the top-level folders get their own turn
+          await walk(full, depth + 1);
+          continue;
+        }
+        files += 1;
+        try {
+          const info = await fsp.stat(full);
+          bytes += info.size;
+          here += info.size;
+        } catch {
+          // A file that cannot be measured is a file that will not copy either; the copy says
+          // so at the time, and guessing a size for it here would help nobody.
+        }
+      }
+    };
+    await walk(folder === '.' ? root : path.join(root, folder), 0);
+    if (here > 0) perFolder.set(folder === '.' ? 'the files at the top' : folder, here);
+  }
+
+  const biggest = [...perFolder.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([folder, size]) => ({ folder, bytes: size }));
+
+  // Two copies at once is the shape a paired run takes, so the room needed is twice the size
+  // plus a margin. Under a gigabyte nothing is worth saying.
+  const tooBig = bytes > 1024 * 1024 * 1024 && (freeBytes === null || freeBytes < bytes * 2.5);
+  return {
+    bytes,
+    files,
+    capped,
+    biggest,
+    freeBytes,
+    tooBig,
+    why: tooBig
+      ? `This folder is ${inGigabytes(bytes)}${capped ? ' or more' : ''}${biggest.length > 0 ? ` — most of it in ${plainly(biggest.map((b) => `${b.folder}/ (${inGigabytes(b.bytes)})`))}` : ''}, and a check copies the whole thing before running it${freeBytes === null ? '' : `, with only ${inGigabytes(freeBytes)} free on this disk`}. Two copies will not fit.`
+      : capped
+        ? `This folder is at least ${inGigabytes(bytes)}${biggest.length > 0 ? `, most of it in ${plainly(biggest.map((b) => `${b.folder}/`))}` : ''}, and counting stopped there. A check copies the whole thing before running it${freeBytes === null ? '' : `, and there is ${inGigabytes(freeBytes)} free`}. If one ever runs out of room, run it from a \`git worktree\` copy, which holds only the tracked files.`
+        : `This folder is ${inGigabytes(bytes)}, which copies without trouble.`,
+  };
+}
+
+/**
+ * A size a person can read.
+ * @param {number} bytes
+ * @returns {string}
+ */
+function inGigabytes(bytes) {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))}MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+}
+
+/**
+ * Which folders the contract channel should read.
+ *
+ * The default list is the usual ones — src, lib, app and so on — and on a repository that
+ * makes one thing that is right. On a repository that makes five, it reads the desktop app
+ * and misses the phone client, the relay and the host, and every door behind them is counted
+ * as absent rather than unread. So the folders every product lives in are named, plus any
+ * folder holding real source that no product claimed, because an unclaimed folder is exactly
+ * where a silent gap lives.
+ *
+ * @param {string} root
+ * @param {Product[]} products
+ * @param {{files: string[], dirs: string[]}} listing
+ * @returns {Promise<string[]>}
+ */
+async function proposeSourceFolders(root, products, listing) {
+  /** @type {Set<string>} */
+  const folders = new Set();
+  const usual = ['src', 'lib', 'app', 'bin', 'server', 'pages', 'api', 'electron', 'main', 'packages'];
+  for (const name of usual) if (listing.dirs.includes(name)) folders.add(name);
+
+  for (const product of products) {
+    if (product.where === '.' || product.where === '') continue;
+    if (BUILD_OUTPUT_DIRS.some((out) => product.where === out || product.where.startsWith(`${out}/`))) continue;
+    // A phone app is Swift or Kotlin, and this reader reads neither. Its own adapter reads
+    // it. Naming its folder here would send the contract channel into a tree it can find
+    // nothing in, and a folder that answers with nothing reads exactly like one that has
+    // gone empty.
+    if (product.kind === 'ios' || product.kind === 'android' || product.kind === 'desktopNative') continue;
+    // A product's own source, one level in where there is one, so a folder of build output
+    // beside it is not read as source.
+    /** @type {string|null} */
+    let pick = null;
+    for (const inner of ['src', 'source', 'lib']) {
+      if (fs.existsSync(path.join(root, product.where, inner))) {
+        pick = path.posix.join(product.where, inner);
+        break;
+      }
+    }
+    folders.add(pick ?? product.where);
+  }
+
+  for (const folder of listing.dirs) {
+    if (SKIP_DIRS.has(folder) || folder.startsWith('.')) continue;
+    if (NOT_A_SHIPPED_PROGRAM.has(folder) && folder !== 'scripts' && folder !== 'tools') continue;
+    // Already covered, either by name or by something more precise inside it. A product that
+    // said "read pwa/src" must not have "read pwa" added over the top of it — that would pull
+    // in pwa/dist, and a folder of bundled output read as source is thousands of doors that
+    // do not exist.
+    if ([...folders].some((f) => f === folder || f.startsWith(`${folder}/`))) continue;
+    // A folder a product already spoke for is not an unclaimed one. A phone app's folder
+    // holds a handful of build scripts, which is enough files to look like source, and it is
+    // read by the adapter that understands the language it is written in.
+    if (products.some((p) => p.where === folder)) continue;
+    const code = await countMatching(path.join(root, folder), /\.[cm]?[jt]sx?$/);
+    if (code >= 3) folders.add(folder);
+  }
+
+  // Only folders with code the reader can actually read, and never one that sits inside
+  // another one already on the list. An iPhone app's Swift and an Android app's Kotlin are
+  // real source and are read by their own adapters; naming them here would put two folders in
+  // the settings that the contract channel opens, walks and finds nothing in, which reads
+  // exactly like a folder that has gone empty.
+  /** @type {string[]} */
+  const kept = [];
+  for (const folder of [...folders].sort()) {
+    if (kept.some((already) => folder === already || folder.startsWith(`${already}/`))) continue;
+    const code = await countMatching(path.join(root, folder), /\.[cm]?[jt]sx?$/);
+    if (code === 0) continue;
+    kept.push(folder);
+  }
+  return kept;
+}
+
+/**
+ * Servers hiding in folders nothing claimed.
+ *
+ * Runs after every other reading, on the folders nobody spoke for. Terminal Deck's `relay/` is
+ * the case: three TypeScript files, no package.json, no framework, no script — and it is the
+ * switchboard every phone in the product connects through. It was reported as "a folder
+ * nothing could work out", which is honest and useless, while its routes went uncounted and a
+ * clean run said nothing about it.
+ *
+ * @param {object} input
+ * @param {string} input.root
+ * @param {{files: string[], dirs: string[]}} input.listing
+ * @param {Product[]} input.products
+ * @param {Set<string>} input.available
+ * @returns {Promise<Product[]>}
+ */
+async function findServersInCode(input) {
+  const { root, listing, products, available } = input;
+  /** @type {Product[]} */
+  const found = [];
+  const claimed = new Set(products.map((p) => p.where));
+
+  for (const folder of listing.dirs) {
+    if (SKIP_DIRS.has(folder) || folder.startsWith('.') || claimed.has(folder)) continue;
+    if (ALREADY_COVERED.has(folder) || NOT_A_SHIPPED_PROGRAM.has(folder)) continue;
+    const dir = path.join(root, folder);
+    const reading = await looksLikeAServer(dir);
+    if (!reading.yes) continue;
+
+    // How it is started, if anything here says. A shell script or a container file beside the
+    // code is not a command this tool can run, but it IS the answer written down — so it is
+    // named, and the agent that reads it can write one line of settings instead of a person
+    // being asked a question they would have to go and look up.
+    const local = await listOnce(dir);
+    const recipe = local.files.find((f) => /^(deploy|start|run|serve)\.(sh|bash|mjs|js|ts)$/.test(f))
+      ?? local.files.find((f) => f === 'Dockerfile' || /^(docker-)?compose\.ya?ml$/.test(f))
+      ?? null;
+
+    found.push({
+      kind: 'server',
+      name: `the server in ${folder}/`,
+      surface: 'server',
+      adapter: available.has('http') ? 'http' : null,
+      confidence: 0.7,
+      why: reading.why.replace(reading.file ?? '', path.posix.join(folder, reading.file ?? '')),
+      where: folder,
+      evidence: [
+        { where: path.posix.join(folder, reading.file ?? ''), means: 'This file opens a socket and waits for requests, which is a server whatever else is or is not here.' },
+        ...(recipe ? [{ where: path.posix.join(folder, recipe), means: `${recipe} says how this is built and started. It is not a command this tool can run, but it is the answer written down.` }] : []),
+      ],
+      built: { found: false, where: null, how: 'nothing to build — it runs from source' },
+      blockers: [
+        recipe
+          ? `Nothing in package.json starts it. ${path.posix.join(folder, recipe)} already says how it is built and run — read that, and put the one command it comes down to under "http" in the settings, with the port taken from PORT.`
+          : `Nothing here says how to start it, so its routes can be listed from the source but none of them can be asked anything. Put {"start": "..."} under "http" in the settings, listening on the PORT it is given.`,
+      ],
+      suggest: { stateless: true },
+    });
+  }
+  return found;
+}
+
+/**
+ * Is `project.yml` here an XcodeGen spec, rather than some other project's `project.yml`?
+ *
+ * Read rather than assumed, because `project.yml` is a common enough filename that treating
+ * every one of them as an Apple project would report an iPhone app in repositories that have
+ * never seen a Mac. An XcodeGen spec always names the project and always lists either targets
+ * or schemes, and it is a small file, so the certain answer is two lines away.
+ *
+ * @param {string} dir
+ * @param {{files: string[], dirs: string[]}} listing
+ * @returns {boolean}
+ */
+function isXcodeGenSpec(dir, listing) {
+  const name = listing.files.find((f) => f === 'project.yml' || f === 'project.yaml');
+  if (!name) return false;
+  /** @type {string} */
+  let text = '';
+  try {
+    const info = fs.statSync(path.join(dir, name));
+    if (info.size > 400_000) return false;
+    text = fs.readFileSync(path.join(dir, name), 'utf8');
+  } catch {
+    return false;
+  }
+  if (!/^\s*name\s*:/m.test(text)) return false;
+  return /^\s*(targets|schemes|packages|settingGroups)\s*:/m.test(text)
+    || /bundleIdPrefix|deploymentTarget|SDKROOT|xcodegen/i.test(text);
+}
+
+/**
+ * The folder names this repository tells git to leave alone.
+ *
+ * Used for one question only: is this folder something a build wrote, or something somebody
+ * committed? A name is not enough to answer it — `build/` is a bundler's output in one
+ * repository and hand-written artwork scripts in the next — and the repository has already
+ * written the answer down.
+ *
+ * Deliberately shallow: only plain folder names, no globs, no negations, no nested ignore
+ * files. Anything cleverer would be re-implementing git's matching to answer a question where
+ * being unsure costs nothing — a folder that is missed here is simply not read for a second
+ * product, and everything else about the run is unchanged.
+ *
+ * @param {string} root
+ * @returns {Promise<Set<string>>}
+ */
+async function readIgnoreList(root) {
+  /** @type {Set<string>} */
+  const names = new Set();
+  const text = await readTextIfSmall(path.join(root, '.gitignore'), 200_000);
+  if (text === null) return names;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#') || line.startsWith('!')) continue;
+    if (line.includes('?') || line.includes('[')) continue;
+    // `dist/**` and `dist/*` say the same thing about the folder as `dist` does. Anything
+    // else with a star in it is a pattern rather than a folder and is left alone.
+    const withoutGlob = line.replace(/\/\*+$/, '');
+    if (withoutGlob.includes('*')) continue;
+    const name = withoutGlob.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (name === '' || name.includes('/')) continue;
+    names.add(name);
+  }
+  return names;
+}
+
+/**
+ * The application id out of a packaging config, when package.json does not carry one.
+ *
+ * electron-builder reads either, and plenty of projects keep everything about packaging in
+ * its own file. The id is what lets the desktop adapter tell the window it opened from a
+ * window of the same app that was already there, so losing it is not cosmetic.
+ *
+ * @param {string} dir
+ * @param {string|null} builderFile
+ * @returns {string|null}
+ */
+function appIdInConfig(dir, builderFile) {
+  if (!builderFile) return null;
+  const text = (() => {
+    try {
+      const info = fs.statSync(path.join(dir, builderFile));
+      if (info.size > 400_000) return '';
+      return fs.readFileSync(path.join(dir, builderFile), 'utf8');
+    } catch {
+      return '';
+    }
+  })();
+  const hit = /^\s*["']?appId["']?\s*[:=]\s*["']?([A-Za-z0-9_.-]+)["']?/m.exec(text);
+  return hit ? hit[1] : null;
+}
+
+/**
+ * Does this thing keep anything between runs?
+ *
+ * Read off what it installs and what it is deployed beside, because that is where a database
+ * announces itself. Wrong in the cautious direction: something that stores data in a way
+ * nothing here recognises is treated as if it does keep data, which costs one question rather
+ * than one silently unfair comparison.
+ *
+ * @param {Record<string, any>} deps
+ * @param {{dockerfile: string|null, compose: string|null}} containers
+ * @returns {boolean}
+ */
+function keepsData(deps, containers) {
+  const stores = [
+    'pg', 'postgres', 'mysql', 'mysql2', 'mariadb', 'sqlite3', 'better-sqlite3', 'mongodb',
+    'mongoose', 'redis', 'ioredis', 'prisma', '@prisma/client', 'drizzle-orm', 'typeorm',
+    'sequelize', 'knex', 'kysely', '@supabase/supabase-js', 'firebase-admin', 'level',
+    'lowdb', 'nedb', '@libsql/client',
+  ];
+  if (stores.some((name) => name in deps)) return true;
+  return Boolean(containers.compose);
+}
+
+/**
+ * "a, b and c" — a list joined with "and" three times reads like a machine wrote it.
+ *
+ * @param {string[]} items
+ * @returns {string}
+ */
+function plainly(items) {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/**
+ * The source read a second time, once it is known where the products actually are.
+ *
+ * A chicken and an egg, resolved by reading twice. The first read has to happen before
+ * anything is known about this repository, so it reads the usual folders — src, lib, app and
+ * the rest — which is exactly right for a repository that makes one thing. On a repository
+ * that makes five, it reads the desktop app and nothing else, and then reports "0 routes"
+ * about a tree that contains a relay with routes in it. Every door behind the folders it did
+ * not open is counted as absent rather than as unread, and that is the shape of silence this
+ * whole tool exists to remove.
+ *
+ * So once the products are known, the folders they live in are known too, and if those are
+ * not the ones already read, it is read again. Only then — a second full read of a large
+ * repository is a second or two, and paying it when the first answer was already right would
+ * be paying it for nothing.
+ *
+ * @param {object} input
+ * @param {string} input.root
+ * @param {boolean} input.readCode
+ * @param {Product[]} input.merged
+ * @param {{files: string[], dirs: string[]}} input.listing
+ * @param {{doors: ProjectShape['doors'], routes: ProjectShape['routes'], channels: ProjectShape['channels'], envNames: ProjectShape['envNames']}} input.first
+ * @returns {Promise<{doors: ProjectShape['doors'], routes: ProjectShape['routes'], channels: ProjectShape['channels'], envNames: ProjectShape['envNames'], sourceFolders: string[]}>}
+ */
+async function theSourceAgain(input) {
+  const { root, readCode, merged, listing, first } = input;
+  const sourceFolders = await proposeSourceFolders(root, merged, listing);
+  const usual = ['src', 'lib', 'app', 'bin', 'server', 'pages', 'api', 'electron', 'main', 'packages'];
+  const alreadyRead = new Set(usual.filter((name) => listing.dirs.includes(name)));
+  const missed = sourceFolders.filter((folder) => !alreadyRead.has(folder));
+  if (!readCode || missed.length === 0) return { ...first, sourceFolders };
+
+  const second = await readTheSource(root, sourceFolders);
+  // A second read that went worse than the first is not an improvement. This cannot normally
+  // happen, and if it ever does the honest answer is the one that saw more, not the newer one.
+  if (!second.doors.read || second.doors.filesRead < first.doors.filesRead) return { ...first, sourceFolders };
+  return { ...second, sourceFolders };
+}
+
+/**
+ * The scheme `xcodebuild` would be given, read out of the project rather than left blank.
+ *
+ * @param {string} dir
+ * @param {{files: string[], dirs: string[]}} listing
+ * @param {string|null} xcode
+ * @returns {string|null}
+ */
+function schemeName(dir, listing, xcode) {
+  if (xcode) return xcode.replace(/\.(xcodeproj|xcworkspace)$/, '');
+  const spec = listing.files.find((f) => f === 'project.yml' || f === 'project.yaml');
+  if (!spec) return null;
+  try {
+    const info = fs.statSync(path.join(dir, spec));
+    if (info.size > 400_000) return null;
+    const hit = /^\s*name\s*:\s*['"]?([A-Za-z0-9_.-]+)['"]?\s*$/m.exec(fs.readFileSync(path.join(dir, spec), 'utf8'));
+    return hit ? hit[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A screen reading whose file names are written the way somebody would type them from the
+ * project root.
+ *
+ * The reader works inside one product's folder and names files relative to it, which is
+ * right for the reader and wrong for the report: `src/main.ts` is the phone client's router
+ * AND the desktop app's entry point, and in a repository that holds both, an unqualified one
+ * sends whoever reads it to the wrong file.
+ *
+ * @template {{router: Router}} T
+ * @param {T} reading
+ * @param {string} where
+ * @returns {T}
+ */
+function fromHere(reading, where) {
+  if (where === '.' || !reading.router.where) return reading;
+  const full = path.posix.join(where, reading.router.where);
+  return {
+    ...reading,
+    router: {
+      ...reading.router,
+      where: full,
+      why: reading.router.why.split(reading.router.where).join(full),
+    },
+  };
 }

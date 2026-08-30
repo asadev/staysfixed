@@ -59,6 +59,23 @@ const run = promisify(execFile);
  * @property {'a finding'|'nothing'|'no answer'} expect
  * @property {RegExp[]} [mustSay]
  * @property {boolean} [mustBeUnstable]  It has to land in `newlyUnstable`, not in the findings.
+ * @property {'guard'|'crash'|'data-loss'|'money'|'sign-in'} [mustBeSealed]
+ *   The finding has to land in a class no agent may wave through. A break that IS one of
+ *   those and is filed `ordinary` is not caught, however loudly it is reported: `ordinary`
+ *   is precisely the class an agent is allowed to close on its own, so a mislabelled
+ *   crash or charge is a silence with a paragraph attached to it.
+ * @property {RegExp[]} [summaryMustSay]
+ *   Things the closing paragraph has to say. Some of what this tool owes a reader is not a
+ *   finding at all — how much of the run was really compared, whether what it saw was
+ *   saved — and the only place those appear is the sentence a person actually reads.
+ * @property {Record<string, unknown>[]} [journeys]
+ *   A journeys file of its own, for a case about what happens when a journey cannot be
+ *   walked. Left out, every case gets the one-step "run it" journey.
+ * @property {(dir: string, working: string) => Promise<{ready: boolean, why: string}>} [prepare]
+ *   Bend the machine around the product before the engine runs — take away permission to
+ *   write, for instance. Answering `ready: false` means this machine cannot be made to do
+ *   it (running as root, or a filesystem that ignores permissions), and the case reports
+ *   itself as untested rather than as a pass.
  * @property {(broken: boolean) => Record<string, string>} build
  */
 
@@ -288,7 +305,193 @@ export const CASES = [
       ].join('\n'),
     }),
   },
+
+  {
+    name: 'a crash that only shows in what the program said',
+    breaks:
+      'The program starts complaining about something fatal, and nothing about WHERE it complained says so. The address is just "stderr"; the finding\'s own sentence carries the first seventy characters of the value and the word is past them. Until 2026-08-30 the words that seal a finding were matched against the addresses and the sentences written about a finding, never against the values themselves — so a crash appearing in the output was filed `ordinary`, which is exactly the class an agent may close on its own without telling anybody.',
+    expect: 'a finding',
+    mustBeSealed: 'crash',
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': [
+        "console.log('report written');",
+        broken
+          ? "console.error('index: 3 of 4 shards answered within the usual time, and one did not, so the run took longer than normal; fatal: the order index is corrupt');"
+          : "console.error('index: 4 of 4 shards answered within the usual time, so the run took about as long as it normally does; all good, the order index is fine');",
+        '',
+      ].join('\n'),
+    }),
+  },
+
+  {
+    name: 'a charge that moved, where nothing in the address mentions money',
+    breaks:
+      'What goes out to the payment company changed. The address is a plain stdout line and the word that makes this a money question sits deep inside the value, past everything any sentence about the finding quotes. Same blindness as the crash above, and this is the class the design says goes to a person whatever caused it.',
+    expect: 'a finding',
+    mustBeSealed: 'money',
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': [
+        'const order = { id: 7, lines: 3, note: "the customer asked for it to be sent to the office address instead" };',
+        `console.log('sending order ' + JSON.stringify(order) + ' to the till with {"currency":"aed","amount":${broken ? '1200' : '1000'}}');`,
+        '',
+      ].join('\n'),
+    }),
+  },
+
+  {
+    name: 'a journey nothing could walk is named, not counted as clean',
+    breaks:
+      'Nothing is wrong with the product, and the only journey anybody wrote cannot be walked at all — its step says to run something and never says what. So the closing sentence is about a fraction of what was asked for, and it used to read exactly like a sentence about all of it: "Nothing that worked has changed", followed by a count of every address the new build produced. A clean answer covering less than it appears to is how a check gets trusted for work it never did.',
+    expect: 'nothing',
+    summaryMustSay: [/not compared at all/],
+    journeys: [
+      {
+        name: 'run-it',
+        describe: 'A journey somebody wrote wrong: it says to run something and never says what.',
+        source: 'code',
+        surface: 'cli',
+        steps: [{ act: 'run', note: 'and nothing to run' }],
+      },
+    ],
+    build: () => ({
+      'package.json': PKG,
+      'cli.js': "console.log('two orders');\n",
+    }),
+  },
+
+  {
+    name: 'a run that could only compare half of itself says which half',
+    breaks:
+      'Two journeys, and only one of them can be walked. The break in the walkable one is found — and the closing sentence used to quote every address the new build produced, as though the whole product had been put beside the old one. Half a run reported as a whole one is how a clean-looking answer gets trusted for more than it covers.',
+    expect: 'a finding',
+    mustSay: [/email/i],
+    summaryMustSay: [/not compared at all/],
+    journeys: [
+      {
+        name: 'run-it',
+        describe: 'Run the product once and watch everything it does.',
+        source: 'code',
+        surface: 'cli',
+        steps: [{ act: 'run', run: 'node cli.js', note: 'the whole product, start to finish' }],
+      },
+      {
+        name: 'the-other-half',
+        describe: 'A second journey nobody finished writing.',
+        source: 'code',
+        surface: 'cli',
+        steps: [{ act: 'run', note: 'and nothing to run' }],
+      },
+    ],
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': [
+        'const person = {',
+        '  id: 7,',
+        "  name: 'Ada',",
+        broken ? null : "  email: 'ada@example.com',",
+        "  city: 'London',",
+        '};',
+        'console.log(JSON.stringify(person));',
+        '',
+      ]
+        .filter((line) => line !== null)
+        .join('\n'),
+    }),
+  },
+
+  {
+    name: 'a run whose record could not be saved says so',
+    breaks:
+      'The disk will not take the captures. The comparison still happens and the break is still found — and until 2026-08-30 the failure to save was swallowed whole, so the run looked identical to one that had saved everything, and the NEXT run found no record and reported the entire product as never having been walked. His disk hit zero bytes on the night this was written.',
+    expect: 'a finding',
+    mustSay: [/email/i],
+    summaryMustSay: [/was NOT saved/i],
+    prepare: makeStoreUnwritable,
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': [
+        'const person = {',
+        '  id: 7,',
+        "  name: 'Ada',",
+        broken ? null : "  email: 'ada@example.com',",
+        "  city: 'London',",
+        '};',
+        'console.log(JSON.stringify(person));',
+        '',
+      ]
+        .filter((line) => line !== null)
+        .join('\n'),
+    }),
+  },
 ];
+
+/**
+ * Take away the store's permission to be written to, and say honestly when this machine
+ * will not let that happen.
+ *
+ * Running as root ignores the mode, and so do some filesystems, and on Windows it means
+ * nothing at all. Any of those and the case is not testable HERE — which is a different
+ * answer from passing, and gets its own word in the report.
+ *
+ * @param {string} dir
+ * @param {string} working   The commit the warm-up run compares against - the build this
+ *                           corpus case has already recorded as working.
+ * @returns {Promise<{ready: boolean, why: string}>}
+ */
+async function makeStoreUnwritable(dir, working) {
+  const builds = path.join(dir, '.staysfixed', 'v2', 'builds');
+  await fsp.mkdir(builds, { recursive: true });
+
+  // Proved, not assumed. A chmod that returns without doing anything is exactly the shape
+  // that would turn this case into a green light that tests nothing.
+  const probe = path.join(builds, 'probe');
+  await fsp.mkdir(probe, { recursive: true });
+  try {
+    await fsp.chmod(probe, 0o555);
+    await fsp.writeFile(path.join(probe, 'x.txt'), 'x');
+    await fsp.chmod(probe, 0o755);
+    await fsp.rm(probe, { recursive: true, force: true });
+    return {
+      ready: false,
+      why: 'this account can write into a folder it has no permission to write into — running as root, or a filesystem that ignores permissions',
+    };
+  } catch {
+    await fsp.chmod(probe, 0o755).catch(() => {});
+    await fsp.rm(probe, { recursive: true, force: true }).catch(() => {});
+  }
+
+  // One warm-up run, so every folder the real run will write into already exists.
+  //
+  // The store is not made unwritable wholesale, deliberately. Doing that stops the check
+  // before it starts — which is honest behaviour and says so in those words — and this case
+  // is about the OTHER failure: the disk giving out part-way, after the product has been
+  // walked and compared and there is a real answer to hand back. So the folders where the
+  // captures land are made read-only and everything else is left alone.
+  const engine = await loadEngine();
+  if (!engine.parts.check) return { ready: false, why: 'the difference engine is not in this build' };
+  try {
+    await engine.parts.check({ cwd: dir, configFile: undefined, against: working, paired: true, journeys: path.join(dir, 'journeys.json'), only: [] });
+  } catch (e) {
+    return { ready: false, why: `the warm-up run did not work: ${why(e)}` };
+  }
+
+  /** @type {string[]} */
+  const shut = [];
+  for (const build of await fsp.readdir(builds, { withFileTypes: true })) {
+    if (!build.isDirectory()) continue;
+    const inside = path.join(builds, build.name);
+    for (const journey of await fsp.readdir(inside, { withFileTypes: true })) {
+      if (!journey.isDirectory()) continue;
+      const folder = path.join(inside, journey.name);
+      await fsp.chmod(folder, 0o555);
+      shut.push(folder);
+    }
+  }
+  if (shut.length === 0) return { ready: false, why: 'the warm-up run stored nothing, so there was nothing to make read-only' };
+  return { ready: true, why: '' };
+}
 
 // ---------------------------------------------------------------------------
 // Running it
@@ -299,13 +502,15 @@ export const CASES = [
  * @property {string} name
  * @property {boolean} caught      True when the case behaved: the break was found, or the clean pair stayed silent.
  * @property {string} [why]        Why it did not, in one plain sentence.
- * @property {'caught'|'quiet'|'escaped'|'false alarm'|'could not run'|'could not tell'|'said it could not tell'} verdict
+ * @property {'caught'|'quiet'|'escaped'|'false alarm'|'could not run'|'could not tell'|'said it could not tell'|'not testable here'} verdict
  */
 
 /**
  * @typedef {object} SelfcheckResult
  * @property {boolean} passed
  * @property {CaseResult[]} cases
+ * @property {number} [notTestableHere]  Cases this machine could not be made to perform —
+ *                                       not passes, not failures, and named as neither.
  * @property {boolean} ran         False when the engine could not be driven at all.
  * @property {boolean} [certain]   False when at least one case could not be told either way.
  *                                 A run that is not certain is NOT a pass and NOT a failure.
@@ -388,13 +593,20 @@ export async function selfcheck(opts = {}) {
     });
   }
 
-  if (!opts.keep) await fsp.rm(workDir, { recursive: true, force: true });
+  // Some cases take permissions away to make their point, and a folder nobody may write into
+  // is a folder nobody may delete a file out of either. Handing them back first is what stops
+  // the corpus leaving its own wreckage in the temp folder — or, as it did the first time this
+  // case ran, taking the whole self-check down with an unlink it was not allowed to perform.
+  await relax(workDir);
+  if (!opts.keep) await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
 
   const untellable = cases.some((r) => r.verdict === 'could not tell');
+  const notTestableHere = cases.filter((r) => r.verdict === 'not testable here').length;
   return {
     passed: cases.length > 0 && cases.every((r) => r.caught),
     ran: true,
     certain: !untellable,
+    ...(notTestableHere > 0 ? { notTestableHere } : {}),
     cases,
     ...(opts.keep ? { workDir } : {}),
   };
@@ -423,6 +635,21 @@ async function runOne(check, workDir, c, attempt) {
     return { name: c.name, caught: false, verdict: 'could not run', why: `the product could not be built: ${why(e)}` };
   }
 
+  if (c.prepare) {
+    /** @type {{ready: boolean, why: string}} */
+    let ready;
+    try {
+      ready = await c.prepare(dir, working);
+    } catch (e) {
+      return { name: c.name, caught: false, verdict: 'could not run', why: `the machine could not be set up for this one: ${why(e)}` };
+    }
+    if (!ready.ready) {
+      // Not a pass. `caught` is true only so one machine's limits cannot be read as the
+      // engine having broken — the count is reported separately and out loud.
+      return { name: c.name, caught: true, verdict: 'not testable here', why: ready.why };
+    }
+  }
+
   /** @type {any} */
   let result;
   try {
@@ -442,6 +669,26 @@ async function runOne(check, workDir, c, attempt) {
   }
 
   return judge(c, result);
+}
+
+/**
+ * Give every folder under here its write permission back.
+ *
+ * @param {string} dir
+ * @returns {Promise<void>}
+ */
+async function relax(dir) {
+  /** @type {import('node:fs').Dirent[]} */
+  let inside = [];
+  try {
+    await fsp.chmod(dir, 0o755);
+    inside = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of inside) {
+    if (entry.isDirectory()) await relax(path.join(dir, entry.name));
+  }
 }
 
 /** How busy this machine is, in words, so an untellable result can name the likely reason. */
@@ -480,6 +727,15 @@ function judge(c, result) {
   if (c.expect === 'no answer') {
     const said = String(result?.summary ?? '');
     if (result?.ok === false && /no answer|not a pass/i.test(said)) {
+      for (const pattern of c.summaryMustSay ?? []) {
+        if (pattern.test(said)) continue;
+        return {
+          name: c.name,
+          caught: false,
+          verdict: 'escaped',
+          why: `it refused to call the run clean, and never said what it owed the reader (${pattern}): ${said.slice(0, 300)}`,
+        };
+      }
       return { name: c.name, caught: true, verdict: 'said it could not tell' };
     }
     return {
@@ -494,7 +750,19 @@ function judge(c, result) {
   }
 
   if (c.expect === 'nothing') {
-    if (findings.length === 0 && unstable.length === 0) return { name: c.name, caught: true, verdict: 'quiet' };
+    if (findings.length === 0 && unstable.length === 0) {
+      const said = String(result?.summary ?? '');
+      for (const pattern of c.summaryMustSay ?? []) {
+        if (pattern.test(said)) continue;
+        return {
+          name: c.name,
+          caught: false,
+          verdict: 'escaped',
+          why: `it was rightly silent about the product and never said what it owed the reader (${pattern}). It said: ${said.slice(0, 300)}`,
+        };
+      }
+      return { name: c.name, caught: true, verdict: 'quiet' };
+    }
     // `unstable` holds WobbleEntry objects, not strings. Interpolating one printed
     // "[object Object]" and turned the most important line in a failure report — the one
     // saying WHAT went wrong — into nothing at all.
@@ -534,6 +802,33 @@ function judge(c, result) {
       caught: false,
       verdict: 'escaped',
       why: `it reported ${findings.length} thing${findings.length === 1 ? '' : 's'}, none of them this one. The first was: ${describe(findings[0])}`,
+    };
+  }
+
+  // Reported is not the same as reported to the right person. A crash or a charge filed
+  // `ordinary` is a finding an agent may close on its own, so the break reaches nobody —
+  // loudly written down and quietly waived is still quiet.
+  if (c.mustBeSealed) {
+    const sealed = matching.filter((/** @type {any} */ f) => f.class === c.mustBeSealed);
+    if (sealed.length === 0) {
+      const classes = [...new Set(matching.map((/** @type {any} */ f) => String(f.class ?? 'unlabelled')))];
+      return {
+        name: c.name,
+        caught: false,
+        verdict: 'escaped',
+        why: `it found this and filed it as ${classes.join(' and ')} rather than "${c.mustBeSealed}", so an agent is allowed to close it without anybody being told. ${describe(matching[0])}`,
+      };
+    }
+  }
+
+  const said = String(result?.summary ?? '');
+  for (const pattern of c.summaryMustSay ?? []) {
+    if (pattern.test(said)) continue;
+    return {
+      name: c.name,
+      caught: false,
+      verdict: 'escaped',
+      why: `it found the break, and the paragraph a person actually reads never said what it owed them (${pattern}). It said: ${said.slice(0, 300)}`,
     };
   }
 
@@ -583,7 +878,7 @@ async function plant(dir, c) {
   await git(dir, ['config', 'user.name', 'Stays Fixed self-check']);
 
   await writeAll(dir, c.build(false));
-  await fsp.writeFile(path.join(dir, 'journeys.json'), JSON.stringify(journeysFor(c), null, 2) + '\n');
+  await fsp.writeFile(path.join(dir, 'journeys.json'), JSON.stringify(c.journeys ?? journeysFor(c), null, 2) + '\n');
   await fsp.writeFile(path.join(dir, '.gitignore'), 'out/\n');
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-q', '-m', 'the build that works']);
@@ -696,12 +991,22 @@ export async function main(argv = process.argv.slice(2)) {
   /** @type {string[]} */
   const out = ['Stays Fixed - checking that it can still catch things', ''];
   for (const r of result.cases) {
-    out.push(`${(r.caught ? 'ok' : 'FAILED').padEnd(8)} ${r.name}`);
-    if (!r.caught) out.push(`         ${r.why ?? 'it did not behave, and said nothing useful about why'}`);
+    const word = r.verdict === 'not testable here' ? 'n/a' : r.caught ? 'ok' : 'FAILED';
+    out.push(`${word.padEnd(8)} ${r.name}`);
+    if (r.verdict === 'not testable here') out.push(`         not tested on this machine: ${r.why ?? 'no reason recorded'}`);
+    else if (!r.caught) out.push(`         ${r.why ?? 'it did not behave, and said nothing useful about why'}`);
   }
   out.push('');
+  const na = result.notTestableHere ?? 0;
+  const tested = result.cases.length - na;
   if (result.passed) {
-    out.push(`All ${result.cases.length} behaved: every break was caught, and every pair that should have been silent was silent.`);
+    // The count that is claimed is the count that was actually run. Folding a case this
+    // machine could not perform into "all of them behaved" would be the corpus telling the
+    // same kind of lie it exists to catch.
+    out.push(`All ${tested} behaved: every break was caught, and every pair that should have been silent was silent.`);
+    if (na > 0) {
+      out.push(`${na} more could not be set up on this machine and ${na === 1 ? 'was' : 'were'} not tested at all — see the n/a ${na === 1 ? 'line' : 'lines'} above. That is neither a pass nor a failure.`);
+    }
   } else if (untellable.length > 0 && untellable.length === result.cases.filter((r) => !r.caught).length) {
     // Nothing failed twice. Saying "wrong" here would be an accusation the evidence does not
     // support, and saying "fine" would be worse.

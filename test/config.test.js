@@ -125,8 +125,23 @@ describe('what a config is refused for', () => {
   });
 
   test('no app', () => {
-    refuses(() => resolveConfig({}), /does not know what to open/);
-    refuses(() => resolveConfig({ app: 'chrome' }), /does not know what to open/);
+    refuses(() => resolveConfig({}), /do not name anything to open/);
+    refuses(() => resolveConfig({ app: 'chrome' }), /do not name anything to open/);
+  });
+
+  test('and settings for a product with no screen are told which half of the tool covers them', () => {
+    // A command-line tool, a library or a server has nothing to open, and that is the
+    // correct shape for its settings. The picture commands still cannot run — but sending
+    // somebody off to invent a web address they do not have is worse than refusing.
+    assert.throws(
+      () => resolveConfig({ product: 'tiny', process: { commands: [{ name: 'x', run: 'node x.js' }] } }),
+      (error) => {
+        assert.ok(error instanceof StaysFixedError);
+        assert.match(String(error.hint), /staysfixed check/, 'it has to name the half of the tool that does cover this project');
+        assert.match(String(error.hint), /process/, 'and say which of these settings it recognised, so the refusal is about THIS project');
+        return true;
+      },
+    );
   });
 
   test('an app kind nobody has heard of', () => {

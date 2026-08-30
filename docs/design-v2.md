@@ -2,6 +2,33 @@
 
 *Written 2026-08-29, from Asad's own statement of what the tool is for.*
 
+> **What this page is, and what it is not.** This is the design and the reasoning behind it,
+> kept as it was written so the arguments stay readable — including the ones that turned out
+> to be wrong. **It is not a description of the current state.** For that, read
+> [the README](../README.md), which says what works, what does not, and what never will; or
+> run `staysfixed doctor`, which answers the same question about your actual machine.
+>
+> **Where it stands, as of 2026-08-30.** Phases 1 to 6 are built and in use: the seven
+> observation channels flattened to one address space, the run-twice wobble floor with no
+> tolerance setting anywhere, normalisation rules that each declare what they hide,
+> clustering, distance-from-the-edit ranking, revert-and-re-run causal proof, the store, the
+> reference cut by shipping, sealed classes, sealed intents, the waiver budget, the coverage
+> ledger, the self-check corpus, and adapters for command-line tools, libraries, HTTP
+> servers, source reading, the web, Electron, Android, iOS and native Windows over ssh. The
+> MCP surface is seven tools and it is what `staysfixed mcp` serves.
+>
+> **What is written and not wired:** harvesting a project's own test suite as journeys, and
+> replaying a recorded session. The code is in `src/v2/journeys/` with tests around it and
+> nothing on the check path calls it. Asking for either is refused by name. Journeys today
+> come from what each adapter reads out of your source, plus a journeys file you point it at.
+>
+> **What is permanent and will not change:** nothing irreversible is ever run — it is watched
+> at the call and refused at the effect, and the refusal is reported as missing coverage;
+> real phones cannot be paired; a race that already existed will not show; native Windows
+> shows one desktop, so two builds cannot run there at once; pictures are tied to the machine
+> that took them; and how long something took is recorded and never compared. The README
+> carries the full list in plain words.
+
 ## What it is
 
 Stays Fixed stops being a photo album and becomes a difference machine. You point it at your product, it runs the last build you were happy with and the build you just changed through exactly the same steps on the same machine within the same minute, and it reports only the things that behave differently — what the screen says a control now does, what calls go out, what files get written, what errors appear, what the program prints, and only last of all what it looks like. Nobody approves pictures any more: the build you said "ship" to IS the definition of working, so the only thing you ever have to do is what you already do. The agent runs it through MCP, gets a short ranked list of real differences, proves which ones its own edit caused by undoing that edit and re-running, and fixes them. You hear about it only when a difference lands in a class no agent is allowed to wave through — money, sign-in, lost data, a crash, or a bug you already reported once.
@@ -212,3 +239,37 @@ irreducible steps — the ones that need a licence, a device, a password or a pa
 And it must degrade honestly. A project with only the web adapter available is still useful; it must
 say plainly "this covers your website; your iPhone app is not being checked and here is why", rather
 than reporting a green run that quietly means less than it appears to.
+
+---
+
+## What the plan got wrong (2026-08-30)
+
+Written down because a design document that only records the parts that came true is a
+sales page.
+
+**The fortnight estimates for Android and iOS.** They priced the paired machinery — two
+emulators, cloned devices, byte-identical snapshot restore — and not the act of driving the
+app. Driving one and reading its screen took days. Both shipped against the stored record,
+which each run says out loud.
+
+**"Windows only if he ever ships one."** It was built, because a runner already existed: an
+ssh host with a WSL shell on a real Windows desktop, nothing installed on it, the probe sent
+down the connection each run. The lesson generalised into a rule — the tool reaches every
+platform through access the agent already has, and must never ask a person to wire up
+something a credential or an ssh host already covers.
+
+**"`doctor` matters more, not less."** True, and understated. It was wrong about this
+machine twice on the last night of the build: it asked `command -v powershell.exe` over ssh,
+which answers "no" on a machine with Windows sitting right behind it, and it read a git
+host's *refusal* as a reply and listed github.com as a machine to run checks on. Both are in
+the README's list of silences. The rule that came out of it is worth more than the fix:
+**a probe must ask the filesystem, not the path; read standard output, not whatever spoke;
+and match the whole line, because a host that quotes your command back can otherwise answer
+for itself.**
+
+**The self-check corpus was the best decision in the whole design,** and the reason is not
+the one given here. It was justified as proving the engine catches things. What it actually
+did was catch the engine being *perturbable*: it came back "1 of 9 wrong" with the test suite
+running alongside it, then passed five times on a quiet machine. That is how the load case
+became part of the gate — the corpus and the suite are run at the same time, on purpose,
+because that is how it will really be used.

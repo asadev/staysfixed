@@ -319,46 +319,63 @@ describe('the front door an agent actually wires up', () => {
     await cleanUp();
   });
 
-  test('`staysfixed mcp` serves a working tool set, and version 2 is one line away from being it', async () => {
-    // WHAT THIS ASSERTED BEFORE, AND WHY IT WAS WRONG.
+  test('`staysfixed mcp` serves the difference engine, which is what every document says it does', async () => {
+    // THIS IS THE MOST IMPORTANT ASSERTION IN THE FILE, and for a day it was the one the
+    // repository did not make. `staysfixed mcp` served version 1's picture tools while the
+    // README, docs/mcp.md, docs/getting-started.md and `staysfixed_capabilities` all
+    // described the difference engine — so an agent that followed the project's own wiring
+    // block got a tool set none of the documentation mentions, and never reached the engine
+    // at all. Nothing was broken; nothing was reachable either. That is worse, because it
+    // looks like it works.
     //
-    // It demanded that `staysfixed mcp` already serve the version 2 tools. That is one
-    // line in src/cli/index.js — import serveMcp from src/v2/mcp/server.js instead of
-    // src/mcp/server.js — and it is a BREAKING change, because the version 2 server does
-    // not serve staysfixed_check, staysfixed_capture, staysfixed_screens, staysfixed_status
-    // or staysfixed_trace. Somebody installed this yesterday and has those wired into an
-    // agent. Version 1 keeps working until the version 2 command line ships, which is the
-    // rule the whole of src/v2/cli.js is written around.
-    //
-    // So this asserts the two things that are actually true and actually matter: the front
-    // door serves a real tool set today, and the switch is blocked on nothing but that one
-    // line — the version 2 server is here, it starts, and it serves the call an agent makes
-    // first. When the switch is made, the first branch below takes over and this test goes
-    // on passing without being touched.
+    // The earlier version of this test knew and accepted it, on the grounds that switching
+    // is a breaking change for anybody who wired version 1 up. That was true and it is
+    // answered properly now: version 1 is behind `--v1`, and the test below holds it there.
     const names = (await server.request('tools/list')).result.tools.map((/** @type {{name: string}} */ t) => t.name);
     assert.ok(names.length > 0, '`staysfixed mcp` served no tools at all');
     for (const name of names) {
       assert.match(name, /^staysfixed_/, `every tool this serves has to be one of ours, and "${name}" is not`);
     }
+    for (const wanted of ['staysfixed_capabilities', 'staysfixed_intent', 'staysfixed_check', 'staysfixed_explain', 'staysfixed_prove', 'staysfixed_waive', 'staysfixed_coverage']) {
+      assert.ok(names.includes(wanted), `the front door does not serve ${wanted}. It served: ${names.join(', ')}`);
+    }
+    assert.ok(!names.includes('staysfixed_approve'), 'and it still has no door marked approve');
+  });
 
-    if (names.includes('staysfixed_capabilities')) return;
+  test('every tool says what it is for and what it does to the machine', async () => {
+    /** @type {{name: string, title?: string, description?: string, annotations?: Record<string, unknown>}[]} */
+    const tools = (await server.request('tools/list')).result.tools;
+    for (const tool of tools) {
+      assert.ok(typeof tool.title === 'string' && tool.title.length > 3, `${tool.name} has no short title, so a permission prompt has only its raw name to show`);
+      assert.ok(typeof tool.description === 'string' && tool.description.length > 60, `${tool.name} barely describes itself`);
+      const notes = tool.annotations ?? {};
+      for (const flag of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
+        assert.equal(typeof notes[flag], 'boolean', `${tool.name} does not say whether it is ${flag}, so a client has to guess`);
+      }
+      assert.equal(notes.openWorldHint, false, `${tool.name} claims to reach the outside world. Nothing here does: there is no server, no account and nowhere to sign up.`);
+    }
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t.annotations ?? {}]));
+    // The two that only ever answer a question, and the two that open your product. Getting
+    // these the wrong way round costs either an unasked-for run or a prompt nobody needed.
+    for (const quiet of ['staysfixed_capabilities', 'staysfixed_explain', 'staysfixed_coverage']) {
+      assert.equal(byName[quiet].readOnlyHint, true, `${quiet} answers a question and changes nothing, and has to say so`);
+    }
+    for (const loud of ['staysfixed_check', 'staysfixed_prove']) {
+      assert.equal(byName[loud].readOnlyHint, false, `${loud} opens your product, so it is not read-only whatever else is true of it`);
+    }
+  });
 
-    // Not switched over yet. Then the thing that would be served has to be ready.
-    const v2 = startServer(
-      ['--input-type=module', '-e', `const { serveMcp } = await import(${JSON.stringify(V2_SERVER)}); await serveMcp({ cwd: process.cwd(), version: '2.0.0-test' });`],
-      empty,
-      bareMachine(empty)
-    );
+  test('and version 1 is still there behind --v1, so nobody who wired it up is stranded', async () => {
+    const old = startServer([cliPath, 'mcp', '--v1'], empty, bareMachine(empty));
     try {
-      await v2.request('initialize', { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: 'a test', version: '1.0.0' } });
-      const v2Names = (await v2.request('tools/list')).result.tools.map((/** @type {{name: string}} */ t) => t.name);
-      assert.ok(
-        v2Names.includes('staysfixed_capabilities'),
-        `The front door still serves version 1 (${names.join(', ')}), and src/v2/mcp/server.js does not serve staysfixed_capabilities either, ` +
-          'so there is nothing ready to switch to. That call is the first one an agent makes and it must never be the missing one.'
-      );
+      await old.request('initialize', { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: 'a test', version: '1.0.0' } });
+      const names = (await old.request('tools/list')).result.tools.map((/** @type {{name: string}} */ t) => t.name);
+      for (const wanted of ['staysfixed_screens', 'staysfixed_capture', 'staysfixed_status']) {
+        assert.ok(names.includes(wanted), `--v1 has to serve the version 1 tools, and ${wanted} was missing. It served: ${names.join(', ')}`);
+      }
+      assert.ok(!names.includes('staysfixed_approve'), 'even there, approving is not a door an agent gets unless the project opts in');
     } finally {
-      await v2.stop();
+      await old.stop();
     }
   });
 

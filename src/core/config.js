@@ -127,8 +127,18 @@ export function resolveConfig(raw, file = '(inline)') {
   const c = /** @type {import('../types.js').StaysFixedConfig} */ (raw);
 
   if (!c.app || typeof c.app !== 'object') {
-    throw new StaysFixedError('The config has no `app` — Stays Fixed does not know what to open.', {
-      hint: "Add `app: { kind: 'web', url: 'http://localhost:3000' }` or `app: { kind: 'electron', binary: '...' }`.",
+    // Every command that lands here — status, walk, approve, mark, trace, flake, and
+    // `check --pictures` — works by OPENING something and photographing it. A settings
+    // file with no `app` in it is the normal, correct shape for a command-line tool, a
+    // library or a server: there is nothing to open, and telling somebody to go and add a
+    // web address they do not have sends them off inventing one. So the message says which
+    // half of the tool needs it, and names the half that does not.
+    const anything = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (c));
+    const notVisual = ['process', 'http', 'source', 'android', 'ios', 'windows'].filter((k) => anything[k] && typeof anything[k] === 'object');
+    throw new StaysFixedError('These settings do not name anything to open, and this command works by opening your product and photographing it.', {
+      hint: notVisual.length
+        ? `That is the right shape for what this project is — ${notVisual.join(', ')} settings need nothing to open. Run \`staysfixed check\`, which covers it without a picture. If there IS a screen here too, add \`app: { kind: 'web', url: 'http://localhost:3000' }\` or \`app: { kind: 'electron', binary: '...' }\`.`
+        : "Add `app: { kind: 'web', url: 'http://localhost:3000' }` or `app: { kind: 'electron', binary: '...' }`. If your product has no screen at all, `staysfixed check` covers it without one.",
     });
   }
   const kind = c.app.kind;

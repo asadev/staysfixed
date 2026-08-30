@@ -44,6 +44,7 @@ import { attachPanel, panelPlan } from './events.js';
 /** @typedef {import('./window.js').Panel} Panel */
 /** @typedef {import('./window.js').BesideThis} BesideThis */
 /** @typedef {import('./window.js').PanelHealth} PanelHealth */
+/** @typedef {import('./window.js').PanelBrowser} PanelBrowser */
 
 /** Panel width when nobody says otherwise. */
 const DEFAULT_WIDTH = 480;
@@ -52,15 +53,32 @@ const DEFAULT_WIDTH = 480;
 const SNAP_WAIT_MS = 6000;
 
 /**
- * How long stopping will wait for a window that is STILL opening.
+ * How long stopping will wait for a window that is STILL opening, when the window is going
+ * to be closed anyway.
  *
  * Short, and it has to be. A check that finishes in two seconds on a machine where a browser
  * takes twenty to start would otherwise sit there at the end, done, with nothing to say,
  * waiting on a window nobody is going to read. So stopping calls the opening off and gives it
  * a moment to tidy up; a window that arrives after that closes itself, because the opening
- * sequence already knows it was stopped.
+ * sequence already knows it was abandoned.
  */
 const STOP_WAIT_MS = 1500;
+
+/**
+ * How long stopping will wait for a window that is still opening and is going to be LEFT UP.
+ *
+ * A different situation with the opposite answer, and getting the two confused is what made
+ * `--watch` show nothing at all on anything that finishes quickly. A browser takes two or
+ * three seconds to start; a check on a command-line product takes one. Under the short wait
+ * the run reached the end first, called the window off, and a person who explicitly asked to
+ * watch got no window and no result — every time, for the fastest and most common case.
+ *
+ * So when the window is going to stay up, the end of the check waits for it. The check itself
+ * is long over by then: nothing is being held up except the moment the terminal comes back,
+ * and the person asked for a window, so a window is what they get — with the whole run
+ * already drawn on it, because a late listener is handed everything it missed.
+ */
+const LATE_WINDOW_MS = 25_000;
 
 /**
  * Anything with the two halves of an event stream on it.
@@ -76,10 +94,12 @@ const STOP_WAIT_MS = 1500;
 /**
  * What the panel is told to do.
  *
- * `snap` lives here rather than in the shared options so that whether the two windows are
- * pushed together stays a decision of the watch code.
+ * The shared `WatchOptions` shape already carries every one of these, `snap` included, so
+ * this is a name for it rather than an extension of it. It used to add `snap` back on top;
+ * that stopped being true when the shared shape learned about it, and an intersection that
+ * adds nothing is a thing to read twice and understand once.
  *
- * @typedef {import('../../types.js').WatchOptions & {snap?: boolean}} PanelOptions
+ * @typedef {import('../../types.js').WatchOptions} PanelOptions
  */
 
 /**
@@ -92,6 +112,14 @@ const STOP_WAIT_MS = 1500;
  * @property {PanelOptions} [watch]
  * @property {string} [dir]           Where to remember the window position. The project's own folder.
  * @property {{width: number, height: number}} [appViewport]
+ * @property {(browser: PanelBrowser) => void} [onOpen]
+ *                                    Told once, when the window really is up, which browser
+ *                                    it opened in and whether that browser belongs to the
+ *                                    person. Nothing can know this in advance: the window is
+ *                                    opened in the background and the browser is chosen while
+ *                                    it opens. Anything that has to treat the panel's window
+ *                                    as the tool's own — the screen guard does — has to be
+ *                                    told rather than ask.
  */
 
 /**
@@ -105,11 +133,16 @@ const STOP_WAIT_MS = 1500;
  * `health` is there so the claim this whole file makes — that the window never held the check
  * up — has a number behind it rather than being taken on trust.
  *
+ * `browser` names what the window actually opened in, and whether that browser belongs to
+ * the person rather than to the tool. Anything that decides what "ours" means on this screen
+ * has to read it: a window in the person's own browser is not ours to push around.
+ *
  * @typedef {object} Watcher
  * @property {() => Promise<void>} stop
  * @property {(beside: BesideThis) => Promise<void>} snapTo
  * @property {() => PanelHealth|null} health
  * @property {() => boolean} open   Is there a window right now.
+ * @property {() => PanelBrowser|null} browser
  */
 
 /**
@@ -143,7 +176,13 @@ function soon(work, ms) {
  * @returns {Watcher}
  */
 function noWatcher() {
-  return { stop: async () => {}, snapTo: async () => {}, health: () => null, open: () => false };
+  return {
+    stop: async () => {},
+    snapTo: async () => {},
+    health: () => null,
+    open: () => false,
+    browser: () => null,
+  };
 }
 
 /**
@@ -187,10 +226,19 @@ export async function attachWatcher(events, opts = {}) {
   let panel = null;
   /** @type {(() => void)|null} */
   let unsubscribe = null;
+  // The check is over. Nothing new will be said.
   let stopped = false;
+  // ...and the window is not wanted at all, so one that arrives late puts itself away.
+  // Kept apart from `stopped` on purpose: a window that is going to be left up is still
+  // wanted after the check has finished, because the finished result is what it is for.
+  let abandoned = false;
   // How stopping reaches a window that has not finished opening. Every wait inside `openPanel`
   // watches this, so calling it off ends them all at once instead of one timeout at a time.
   const givingUp = new AbortController();
+
+  // A window that will be closed at the end is not worth waiting for; a window that will be
+  // left standing with the result on it is the whole reason somebody typed --watch.
+  const leaveItUp = watch.keepOpen !== false;
 
   /**
    * Start the window and, when it is up, start feeding it.
@@ -209,13 +257,21 @@ export async function attachWatcher(events, opts = {}) {
   })
     .then((open) => {
       if (!open) return null;
-      if (stopped) {
-        // Stopped while it was still opening. Close it rather than leave a window nobody asked
-        // for standing on somebody's screen.
+      if (abandoned) {
+        // Given up on while it was still opening. Close it rather than leave a window nobody
+        // asked for standing on somebody's screen.
         void open.close().catch(() => {});
         return null;
       }
       panel = open;
+      if (opts.onOpen) {
+        try {
+          opts.onOpen(open.browser);
+        } catch (e) {
+          // Somebody wanting to know is never allowed to be the reason a window fails.
+          detail(`The watch window opened, and telling the check about it went wrong. ${messageOf(e)}`);
+        }
+      }
       // Everything that already happened arrives here first, in order, before the first live
       // event does — which is the whole reason opening the window in the background is safe.
       //
@@ -258,23 +314,45 @@ export async function attachWatcher(events, opts = {}) {
     stop: () => {
       stopping ??= (async () => {
         stopped = true;
-        // Stop listening first, so nothing new is queued while we are putting it away.
+
+        if (!panel && !leaveItUp) {
+          // It is still opening and it would only be closed again. Call it off, and give it a
+          // moment to tidy up rather than waiting it out. A window that arrives after this
+          // finds itself abandoned and closes itself.
+          abandoned = true;
+          givingUp.abort();
+        } else if (!panel) {
+          detail('The check finished before the watch window had opened. Waiting for it, because the result is what it is for.');
+        }
+
+        // Deliberately BEFORE anything stops listening. A window that opens now subscribes as
+        // it lands and is handed everything that already happened, in order, including the
+        // verdict — which is how a window that missed the whole run still shows all of it.
+        const open = panel ?? (await soon(opening, leaveItUp ? LATE_WINDOW_MS : STOP_WAIT_MS));
+
         try {
           if (unsubscribe) unsubscribe();
         } catch {
           // Already gone. Nothing left to stop listening to.
         }
-        // Call off a window that is still opening, and do not wait it out. A window that
-        // arrives late finds `stopped` already true and closes itself.
-        givingUp.abort();
-        const open = panel ?? (await soon(opening, STOP_WAIT_MS));
-        if (open) await open.close().catch(() => {});
+
+        if (open) {
+          await open.close().catch(() => {});
+        } else {
+          // It never came. Nothing should be left starting up behind a finished check.
+          abandoned = true;
+          givingUp.abort();
+        }
       })();
       return stopping;
     },
 
     snapTo: async (beside) => {
       if (!maySnap) return;
+      // The check is over. Something that only just announced itself is something on its
+      // way out, and dragging windows around at the end of a run is worse than not
+      // arranging them at all.
+      if (stopped) return;
       try {
         const open = await panelSoon();
         if (open) await open.snapTo(beside);
@@ -287,6 +365,7 @@ export async function attachWatcher(events, opts = {}) {
 
     health: () => (panel ? panel.health() : null),
     open: () => panel !== null,
+    browser: () => (panel ? panel.browser : null),
   };
 }
 
@@ -322,8 +401,8 @@ export async function attachWatcher(events, opts = {}) {
  */
 export function watchOptionsFrom(config, cli) {
   const raw = config?.watch;
-  // Read as PanelOptions on the way in: a settings file is free to carry a `snap` that the
-  // shared shape does not yet describe.
+  // `watch: true` in a settings file is the short way of saying `watch: {enabled: true}`,
+  // and anything that is not an object at all says nothing.
   const settings = /** @type {PanelOptions} */ (
     raw === true ? { enabled: true } : raw && typeof raw === 'object' ? raw : {}
   );
