@@ -1,6 +1,6 @@
 {
   "name": "staysfixed",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Prove that what already worked still works after an agent changed the code. Picture checks, guards for fixed bugs, a pre-release walkthrough, and known-good markers — as a CLI and as an MCP server.",
   "type": "module",
   "license": "MIT",

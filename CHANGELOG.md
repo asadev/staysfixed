@@ -8,6 +8,50 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.9.1] — 2026-08-30
+
+Eleven more, from the same hunt that produced 0.9.0 — the findings it had already paid for.
+Every one of these was decided by reading the code rather than by building another product to
+reproduce it; the ones that genuinely need a Next.js app or a monorepo are written down and
+left, because guessing at them would be worse.
+
+### Fixed
+
+- **Every API shape change on every project was sealed as LOSING DATA**, permanently, and no
+  agent could wave any of it through. The classifier reads the words in a finding — and it
+  was reading the difference's *description*, which is the TOOL's sentence, identical on every
+  finding that channel makes: "a renamed or dropped field shows up on its own". `dropped` is
+  a data-loss word. A seal is decided by what the PRODUCT said now — its addresses, its
+  values, its journey names — never by vocabulary no user wrote and nobody can change. A real
+  deletion still seals.
+- **`ship` printed no coverage caveat at all**, in text or `--json`. It is the command that
+  decides what "working" MEANS from that moment on, which makes it the last place that should
+  stay quiet about what the check never walked. It says it now, in the same breath as the
+  good news, exactly as every other surface does.
+- **`init` said "Nothing is being left out."** from a survey of which SURFACES this machine
+  can drive — on a project the same run reported as five of six doors never opened. And
+  `getting-started` tells the agent to repeat that sentence to the person.
+- **The MCP server echoed an agent's own strings back unbounded and kept them for ever.** A
+  megabyte of summary came back as a megabyte of tool result. Capped, and the cut says so
+  rather than quietly keeping the first part.
+- **`check --journeys recorded` reported a missing FILE called "recorded".** `--help` offers
+  the word and the MCP surface answers it honestly — written, not wired into a run yet. The
+  same question gets the same answer on both surfaces now.
+- **Guard names that said nothing were accepted**: `a b c`, `1 2 3`, `TODO fix later` and
+  `AC-101 regression check` all passed every rule. That name is the sentence somebody reads
+  when the guard fails, six months from now. Refused now — and every name that actually says
+  something still passes.
+- **Every command-line check wrote two rows** to the log `ship` reads, so any count of how
+  many checks had run was doubled.
+- **`--only` printed "everything that worked still works"** about a slice, with five of six
+  guards filtered away and one of the five failing.
+- **`ship` blessed a build nothing had ever looked at** — it matched by git commit, so an
+  uncommitted edit resolved to an earlier build that had been checked and was clean.
+- `docs/running-it-in-ci.md` told you to copy `.github/workflows/staysfixed.yml` "as it is".
+  That file is not in the npm package. It is printed in full in the page now.
+- `docs/mcp.md` still told you to fill the project path in by hand; `doctor --json` has
+  filled it in since 0.8.0, and a path filled in wrongly fails silently.
+
 ## [0.9.0] — 2026-08-30
 
 Found the same way as 0.8.0 and one better: the published build was installed as a stranger
