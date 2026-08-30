@@ -52,13 +52,21 @@ npx staysfixed check
 No account, no sign-up, no server anywhere, nothing uploaded. It works in any
 project in any language — it only needs to be able to run your product.
 
-Requirements: **Node 22 or newer**. Everything else depends on what you are
-watching, and the tool works out what it has:
+Requirements: **Node 22 or newer**, and **git** — your project has to be a git
+repository. Not for history's sake: git is how an old build is put back on the
+machine to be walked live, and how a difference is measured against the code you
+just changed. A folder with no git in it is refused outright rather than checked
+against a guess. Everything else depends on what you are watching, and the tool
+works out what it has:
 
 ```
 npx staysfixed doctor
 npx staysfixed doctor --json      # the same answer, for an agent
 ```
+
+Everything each kind of product needs — the exact programs, the exact install
+commands, the settings keys and the licences only a person can accept — is in
+[docs/settings.md](docs/settings.md).
 
 `doctor` is the first thing you should run and the first thing an agent should
 call. It says what it can check on this machine, what it cannot, what is missing,
@@ -94,23 +102,27 @@ phone app here to check.
 
 ### What a fresh install downloads, and what it does not
 
-`npm install staysfixed` pulls **two small packages and nothing else** —
-`pixelmatch` and `pngjs`, under a megabyte together. No browser, no runtime,
-nothing that takes minutes.
+`npm install staysfixed` pulls **three packages and no browser** — `pixelmatch`,
+`pngjs` and `playwright-core`, about 13MB together on a Mac. `playwright-core` is
+the part that drives a browser; it is deliberately the version that **downloads
+none**, so nothing here takes minutes and nothing lands in a shared cache behind
+your back.
 
-Checking a **website** needs a browser. Rather than make everybody who only
-wanted to check a command-line tool wait for one, that is a separate step you
-take when you need it:
+Checking a **website** needs an actual browser, and the tool looks for one you
+already have before asking for anything: Chrome for Testing, Chromium, Edge or
+Chrome. If there is none on the machine at all, that is one command:
 
 ```
-npm install --save-dev playwright && npx playwright install chromium
+npx playwright install chromium
 ```
 
-Measured on a Mac in August 2026, that is about **18MB of packages** in your
-project and about **570MB of browser** in a shared cache outside it — 371MB for
-Chrome for Testing and 196MB for its headless shell — downloaded once per
-machine, not once per project. `doctor` tells you when you need it, and it is one
-of the things an agent can simply do without asking you.
+Measured on a Mac in August 2026 that is about **570MB** in a shared cache
+outside your project — 371MB for Chrome for Testing and 196MB for its headless
+shell — downloaded once per machine, not once per project. `doctor` tells you if
+you need it, and it is one of the things an agent can simply do without asking
+you. A project that already drives its own tests with the full `playwright`
+package is used as it is and never asked to install a second copy of the same
+driver.
 
 Checking a **desktop app** needs no browser at all and no download: the app is
 its own Chromium, and the tool drives it over its own debugging port.
@@ -150,21 +162,33 @@ pretend otherwise.
 | The reference cut when you ship, sealed intents, the waiver budget, and escalations in your closing summary | **Works.** This page describes what it actually does. |
 | The coverage ledger — every door counted, the unopened ones named, and the sentence saying so on every reply | **Works.** See [what it did not check](#what-it-did-not-check). |
 | Aiming a check at one kind of product, and refusing by name rather than checking something else | **Works.** |
-| Steps taken from your own test suite, from a recorded session, or rejected at birth for not repeating twice | **Written, not wired.** The code is in `src/v2/journeys/` with tests around it, and nothing on the check path calls it yet. Journeys today come from what each adapter reads out of your source, plus any `--journeys` file you name. |
+| Steps taken from your own test suite | **Works.** `--journeys suite` runs each test file twice inside the scratch copy, reports every check by name and why each failure failed, and stops after 90 seconds naming every file it did not reach. It is opt-in: running a stranger's whole suite twice on every check is not a thing to do by default. It catches what nothing else can — remove the penny-rounding from a `total()` and the product's own output does not move by one character, the discovered journeys say "nothing has changed", and the harvest names the check that turned red. |
+| Steps taken from a recorded session, or rejected at birth for not repeating twice | **Written, not wired.** The code is in `src/v2/journeys/` with tests around it, and nothing on the check path calls it yet. Ask for `--journeys recorded` and you are told so by name. |
 | Android APKs on an emulator | **The adapter is here.** It reads everything the APK declares with nothing installed and no Java, and where there is an emulator it installs one build at a time and walks it. Whether *this* machine can run one is a separate question, and `doctor` asks the adapter itself rather than keeping a second opinion — most of what it wants installs with a command; accepting Google's licence, once, needs a person. Two emulator snapshots restoring byte-identically is unproven, so Android compares against the stored record and says which mode it used. |
 | The iOS simulator | **The adapter is here.** It reads what the app bundle declares with nothing running, and where Xcode and a simulator runtime are present it installs one build at a time, boots it and reads what is on the screen. It is new. Paired running costs two `xcodebuild` passes, so it is for before a release rather than for every edit, and like Android it compares against the stored record and says which mode it used. Ask `doctor` what it is actually covering on your machine before trusting a clean run. |
 | Native Windows GUI (a real Win32 app, not an Electron one) | **The probe is here**, driven over ssh to any machine that reaches a Windows desktop — a WSL shell on one counts, and nothing is installed on it. Windows shows one desktop, so two builds can never run at once: the comparison is genuinely weaker here than anywhere else. |
 
 `staysfixed check` is the front door for both. Version 1's flags still mean
-exactly what they meant yesterday — `--pictures`, `--guards`, `--watch` and
-`--only` reach the same code they always did, on the settings you already have,
-and `staysfixed mcp --v1` still serves the picture tools. Nobody who installed
-this last week has to change anything.
+exactly what they meant yesterday — `--pictures`, `--guards` and `--only` reach
+the same code they always did, on the settings you already have, and `staysfixed
+mcp --v1` still serves the picture tools. Nobody who installed this last week has
+to change anything.
 
-The one thing that did change: `staysfixed init` now writes settings for the
-difference engine. On a product with no screen those settings have no `app` block
-in them, and the picture commands say so plainly rather than telling you to invent
-a web address. Add an `app` block yourself if you want picture checks too.
+**Two things did change, and they are worth reading if you installed this before
+today.**
+
+`--watch` moved. `staysfixed check --watch` opens **version 2's** panel — the one
+built for a difference engine, which draws journeys, wobble, findings and a
+verdict. Version 1's panel drew approved pictures side by side, which this tool no
+longer has. `--pictures --watch` and `--guards --watch` still open version 1's
+panel over version 1's run, so the only person whose command changed meaning is
+the one who typed `--watch` on its own and got a picture check they did not ask
+for. Everything about the panel is in [docs/watching.md](docs/watching.md).
+
+`staysfixed init` now writes settings for the difference engine. On a product with
+no screen those settings have no `app` block in them, and the picture commands say
+so plainly rather than telling you to invent a web address. Add an `app` block
+yourself if you want picture checks too.
 
 ## How it proves nothing changed
 
@@ -241,13 +265,15 @@ under instrumentation → recorded real sessions → the agent exploring one nam
 gap and freezing it into a replayable file → never a person clicking through an
 app.
 
-What is actually wired into `staysfixed check` today is the first of those and a
-journeys file you point it at: each adapter reads your source and offers the
-journeys it can walk — routes, commands, screens, message channels — and
-`--journeys <file>` names steps by hand. The suite harvest, recorded sessions and
-the flake register are written and tested in `src/v2/journeys/`, and **nothing on
-the check path calls them yet**. Saying so is the point: a feature that exists in
-the repository and not in the run is not a feature you have.
+What is wired into `staysfixed check` today is the first of those, a journeys file
+you point it at, and — when you ask for it — the project's own test suite. Each
+adapter reads your source and offers the journeys it can walk: routes, commands,
+screens, message channels. `--journeys <file>` names steps by hand. `--journeys
+suite` runs each test file twice inside the scratch copy, reports every check by
+name, and stops after 90 seconds naming every file it did not reach. Recorded
+sessions and the flake register are written and tested in `src/v2/journeys/`, and
+**nothing on the check path calls them yet**. Saying so is the point: a feature
+that exists in the repository and not in the run is not a feature you have.
 
 ## Keeping it quiet
 
@@ -338,6 +364,17 @@ verdict reading *nothing that worked has changed*. It is arithmetically true and
 it would let a real regression through. That run comes back as **`NOTHING WAS
 ACTUALLY COMPARED`**, it is not a pass, and it exits non-zero.
 
+**The cold start is the same thing and is not yet marked the same way.** The very
+first run on a project — before anybody has shipped once with the hook in place —
+has no reference at all, rather than a reference with nothing in it. On the
+command line that is caught: the run says *"Nothing to compare against yet… this
+run proves nothing about what still works"* and **exits 2**. But the machine-readable
+answer still carries `ok: true`, no `blocked`, and none of the words above, on
+both `staysfixed check --json` and `staysfixed_check` over MCP. **An agent must
+read `reference.id`: an empty string means nothing was compared, whatever `ok`
+says.** It is in the open silences below, and it is the one on that list that
+matters most to an agent.
+
 ### The silences that were found and closed
 
 Every one of these left something invisible while the answer looked complete —
@@ -366,6 +403,30 @@ to ask the question a different way.
 | Report Docker as present because the command is on the path, on a Mac where Docker Desktop is shut and nothing it promises would work | Asks the engine for its version, and says "installed but not answering" when that is the truth |
 | Read the **commented-out examples** in a settings file as settings. `staysfixed init` comments out every option that does not apply to your project, so nothing is hidden from you — and doctor searched the raw text. On a folder holding one script it announced "Electron desktop apps: **Covered.** It opens release/mac-arm64/Your App.app", and an Android app beside it. A surface called covered when nothing will ever be walked on it is the worst answer this tool can give | Comments are taken away before anything is read out of the file, with strings respected so an address keeps its two slashes. The file is still never loaded — doctor must not run your code to answer a question about your machine |
 | Ask for a build step on a plain command-line tool. A script that runs from source is recorded as "not built", because there is nothing to build, and that was read as "it has not been built yet" — so a fresh install told its owner to name the command that builds a file sitting right there, in the same breath as offering to run it | Nothing is asked for when there is nothing to build, or when a command to run it has already been worked out |
+
+### The silences that are still open
+
+The table above is the honest half of a habit, and it would be a dishonest half
+on its own: it lists what was found and closed, which reads as though nothing is
+left. These are the ones that are **still open today**, found the same way, by
+reading the code rather than the documentation. Every one of them can end in a
+clean-looking answer, and the file that would close each one is named so nobody
+has to take this on trust.
+
+| What is invisible | Where |
+| --- | --- |
+| **Half a journey's addresses can be thrown away and the run still says "clean".** A build that disagrees with itself about *most* of its addresses gets no verdict — but "most" means more than half, and below **twelve** addresses the rule is switched off altogether unless nothing at all held still. Ten wobbling out of eleven is not a storm: all ten differences are subtracted and the run passes. | `src/v2/observation.js` — `STORM_SHARE`, `STORM_FLOOR` |
+| **A desktop control's text is compared to its first 200 characters only,** with no length kept beside it. Two builds whose text differs only past character 200 record identically and compare equal. The same problem in printed output was fixed by keeping the exact byte count; that fix was never applied here. | `src/v2/adapters/electron.js` — `readMeaning` |
+| **A file a command writes that is over 8MB is recorded as a rough size, not a fingerprint.** Its whole contents can change inside the same size bracket and both builds record the same thing. | `src/v2/adapters/process.js` — `snapshotTree` |
+| **Files a command writes inside `node_modules`, `.git` or `.staysfixed` are not watched at all** — a postinstall step, a patch, a generated file. | `src/v2/adapters/process.js` — `SNAPSHOT_SKIP` |
+| **A folder that cannot be opened while looking for written files drops that whole subtree with no note** — "it wrote a file there" becomes "it wrote nothing". This is the same shape as two rows in the table above, in a third place. | `src/v2/adapters/process.js` — `snapshotTree` |
+| **A folder that cannot be read while looking for a website's pages drops every page behind it, silently** — the same shape again, in a fourth place. | `src/v2/adapters/web.js` — `readPageRoutes` |
+| **Two screens with the same name collapse into one.** The second is never walked, and it is not counted as an unopened door either, so it is missing from the coverage that exists to catch exactly this. | `src/v2/adapters/web.js` |
+| **The very first run on a project reads as `ok: true` to a machine.** With no reference at all there is nothing to compare against, and the words that say so are in the summary and not in a field. The command line exits 2; `--json` and the MCP reply do not say it. Read `reference.id` — empty means nothing was compared. | `src/v2/check.js` — `comparedNothing`, and `nothingToCompare` in `src/v2/cli.js` |
+| **A waiver is pinned to the first 40 differences of a finding and at most 20 of its addresses,** not to all of them. A waiver written about a three-hundred-address finding goes on matching when a difference past the fortieth turns into something else. The four gates all still hold; the pin is looser than this page said. | `src/v2/waiver.js`, `src/v2/cluster.js` |
+| **What the scratch copy leaves out is left out of *both* builds.** A product that actually needs one of those folders fails the same way twice, so there is no difference to report and the run reads clean. That is why the bar for `process.skip` is "regenerated on demand and read by nothing". | `src/v2/adapters/process.js` — `SKIP_BY_DEFAULT` |
+| **Working out what a repository makes reads at most 300 files, four folders deep, and skips any file over 2MB** — and says nothing when it hits those limits. A product it never sees is never set up and never walked, so the run is clean about something that was not in it. The 24MB ceiling in the table above is the *source reader*; this is a different, lower one. | `src/v2/detect.js` — `readSome` |
+| **On iOS, doors stop being counted at 4,000 or twelve folders deep, the search for the built app gives up at eight folders or forty candidates, and a control more than sixty levels deep cannot be seen or reached.** Each of those ends quietly. | `src/v2/adapters/ios.js`, `src/v2/adapters/ios-driver.js` |
 
 ---
 
@@ -424,9 +485,12 @@ An agent's only door is a waiver, and it passes four machine-checked gates:
 3. **Five waivers between one ship and the next.** Past five it is not a change
    with side effects, it is a rewrite, and a person looks at a rewrite. Sealing
    another intent does not buy five more.
-4. **Every waiver is fingerprinted to one exact difference** and dies the moment
-   the reference moves. Change the value it was written about and it stops
-   covering anything.
+4. **Every waiver is fingerprinted to the difference it was written about** and
+   dies the moment the reference moves. Change that value and it stops covering
+   anything. The pin is the finding's title, up to twenty of its addresses and up
+   to forty of its differences — see [the silences that are still
+   open](#the-silences-that-are-still-open) for what that means on a very large
+   finding.
 
 Every waiver is counted out loud in the reply. "Nothing changed", "nothing ran"
 and "everything was waived" read identically otherwise, and two of those three
@@ -656,9 +720,52 @@ that is correct**: the picture commands (`status`, `walk`, `approve`, `mark`,
 they need an `app` and say so plainly if there is not one. `staysfixed check`
 needs no `app` at all.
 
+### `process.skip` — what to leave out of the scratch copy
+
+Every run works in a **throwaway copy of your project**, so a build can write
+wherever it likes without touching the folder you are working in. That copy is
+cloned rather than copied: on a Mac and on most Linux filesystems it is one call
+per file that moves no bytes at all and shares the blocks until something writes
+to them. Measured on a twelve-gigabyte project, most of it an iOS build folder:
+**41.5 seconds and no disk used.** Where the filesystem cannot clone, it falls
+back to a real copy — slower, never wrong.
+
+If that copy still takes over twenty seconds the run says so and points you here.
+You can name folders to leave behind:
+
+```js
+export default {
+  product: 'your-app',
+  process: {
+    // Folders not worth copying into the scratch build.
+    skip: ['DerivedData', '.gradle'],
+  },
+};
+```
+
+**The bar for putting something on that list is deliberately high: only things
+that are regenerated on demand and read by nothing.** Caches, coverage reports,
+scratch output. Anything you skip that turns out to matter makes a run pass for
+the wrong reason — and a run that passes for the wrong reason is the single
+failure this whole tool exists to prevent. Build output, `node_modules`,
+lockfiles, fixtures and configuration are all copied, every time, because a check
+that runs against a different set of files than the real product is not checking
+the real product. If you are not sure, leave it in and let the run be slower.
+
+`skip` can only ever **add** to what is already left behind — `.git`,
+`.staysfixed`, `.turbo`, `.nyc_output`, `coverage`, `.pytest_cache`,
+`__pycache__` and `.DS_Store`. There is no way to switch one of those back on,
+because doing so would only ever make runs slower.
+
 A `staysfixed.config.json` works too, with a declarative `steps` form and no
 functions — so a Rust, Python or Go project can use the tool without anybody
-writing JavaScript.
+writing JavaScript. It may also live at `.staysfixed/config.js` (or `.mjs`, or
+`.json`) if you would rather not have another file in the root.
+
+**Every option, and what each kind of product needs on the machine**, is in
+[docs/settings.md](docs/settings.md) — every settings key per block, and for each
+surface the exact programs, environment variables, install commands and
+permissions, rather than "you may need Xcode".
 
 Three fully commented examples are in [`examples/`](examples/):
 [a web app](examples/staysfixed.config.web.js),
@@ -666,8 +773,7 @@ Three fully commented examples are in [`examples/`](examples/):
 [a guard](examples/guards/the-sidebar-still-collapses.js). All three are written
 for the picture check, which is the half that needs an `app`.
 
-The full reference lives with the code it configures, and the design behind all
-of it is in [docs/how-v2-works.md](docs/how-v2-works.md).
+The design behind all of it is in [docs/how-v2-works.md](docs/how-v2-works.md).
 
 ---
 
@@ -766,10 +872,11 @@ Honestly, so you know before you invest an afternoon.
   normalisation rule for whatever is moving, not by trusting the clean-looking run
   underneath it.
 - **What normalisation rubbed out is not itemised on every run.** The rules are in
-  your repository, they are listed by `staysfixed rules`, and the capture is
-  stamped with which set was used — a run comparing against a record tidied by a
-  different set says so. What it does not yet do is print, per run, every value a
-  rule rewrote. Anything a rule covers is not being watched, and that is the point
+  your repository — one file, `.staysfixed/rules.json`, which you read like any
+  other file in a pull request — and the capture is stamped with which set was
+  used, so a run comparing against a record tidied by a different set says so.
+  There is no command that lists them and no per-run report of what each one
+  rewrote. Anything a rule covers is not being watched, and that is the point
   of the rule; just know that adding a broad one is how you go blind on purpose.
 - **Ranking reads your source, and it gives up on very large trees.** Distance
   from the code you just changed is what sorts the list, and it reads up to 4,000
@@ -800,13 +907,17 @@ Honestly, so you know before you invest an afternoon.
   every journey it was given. Nothing can enumerate every state, and any tool
   claiming otherwise is lying. The coverage ledger names the doors it has never
   opened, so the hole is visible instead of pretended away.
-- **Your own test suite is not walked for you yet.** The code that harvests a
-  project's existing tests as journeys is written and tested in
-  `src/v2/journeys/`, and nothing on the check path calls it. Ask for it —
-  `--journeys suite`, or `journeys: "suite"` over MCP — and you are told that, by
-  name, rather than being given a clean result about steps it silently chose
-  instead. Today the steps come from what each adapter reads out of your source
-  and from a journeys file you point it at.
+- **Your own test suite is walked only when you ask.** `--journeys suite`, or
+  `journeys: "suite"` over MCP, runs each test file twice inside the scratch copy
+  and reports every check by name, why each failure failed, and a fingerprint of
+  the test file itself — so an edited test says plainly that the change is yours.
+  It is off by default because running a stranger's whole suite twice on every
+  check would make this too slow to leave switched on, and a check nobody can
+  afford to run is a check nobody runs. It is held to 90 seconds and **every
+  file it did not reach is named**, one by one, never "some tests were skipped".
+  It earns the ask: take the penny-rounding out of a `total()` and the product's
+  own output does not move by one character — the discovered journeys say nothing
+  has changed, and the harvest names the check that turned red.
 - **No hosted service, no dashboard, no accounts, no teams, nothing paid.** It is
   a command and a folder of files in your repository.
 - **Pictures still do not travel between operating systems.** Text is drawn

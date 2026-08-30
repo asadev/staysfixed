@@ -17,10 +17,12 @@
 > servers, source reading, the web, Electron, Android, iOS and native Windows over ssh. The
 > MCP surface is seven tools and it is what `staysfixed mcp` serves.
 >
-> **What is written and not wired:** harvesting a project's own test suite as journeys, and
-> replaying a recorded session. The code is in `src/v2/journeys/` with tests around it and
-> nothing on the check path calls it. Asking for either is refused by name. Journeys today
-> come from what each adapter reads out of your source, plus a journeys file you point it at.
+> **What is written and not wired:** replaying a recorded session. The code is in
+> `src/v2/journeys/` with tests around it and nothing on the check path calls it; asking for
+> it is refused by name. Harvesting a project's own test suite was in this list and is now
+> wired — `--journeys suite`, opt-in, held to a 90-second budget, every file it did not reach
+> named. Journeys otherwise come from what each adapter reads out of your source, plus a
+> journeys file you point it at.
 >
 > **What is permanent and will not change:** nothing irreversible is ever run — it is watched
 > at the call and refused at the effect, and the refusal is reported as missing coverage;
@@ -90,6 +92,13 @@ The anti-rubber-stamp mechanism, taken from the triage design because it is the 
 Where I rejected the alternative: the differential design would let the agent declare a difference intended with a written reason and an expiry. That is unbounded — an agent under pressure to finish will declare the real regression intended, and the reason it writes will read perfectly plausible. Sealing the intent before the run, and sealing five classes off entirely, is what makes the same freedom safe.
 
 ## Platforms, in build order
+
+> **Do not install anything off this section.** These were the *plans* for driving each
+> platform, and four of them were replaced during the build — Appium, UiAutomator2,
+> WebDriverAgent, FlaUI and a Java runtime are named below and **none of them is used**. What
+> each surface actually needs, with the exact command, is in
+> [settings.md](settings.md); what this machine actually has is
+> `staysfixed doctor`. See [what the plan got wrong](#what-the-plan-got-wrong-2026-08-30).
 
 ### 1. CLI tools and libraries
 
@@ -266,6 +275,17 @@ the README's list of silences. The rule that came out of it is worth more than t
 **a probe must ask the filesystem, not the path; read standard output, not whatever spoke;
 and match the whole line, because a host that quotes your command back can otherwise answer
 for itself.**
+
+**Four of the tools named for driving the phones and Windows were never used.** The plan
+said Appium 3 with UiAutomator2 for Android, WebDriverAgent for the iOS meaning tree, a Java
+runtime for both, and a .NET probe built on FlaUI for Windows. What shipped needs none of
+them. Android reads the APK directly — **no Java at all** — and drives the emulator through
+`adb`. iOS uses `xcrun simctl` and a small reader compiled at run time with `clang` from the
+Xcode command line tools. Windows sends a PowerShell script down an ssh connection each run
+and installs nothing on the far machine. Every one of those replacements removed a
+dependency rather than adding one, which is why they happened; the cost is that this page,
+left alone, would have an agent installing four things nobody needs. The list that is kept
+current is [settings.md](settings.md).
 
 **The self-check corpus was the best decision in the whole design,** and the reason is not
 the one given here. It was justified as proving the engine catches things. What it actually

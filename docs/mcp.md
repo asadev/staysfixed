@@ -91,9 +91,14 @@ Every client that speaks MCP over stdio wants the same three things — a comman
 its arguments, and somewhere to run it. The JSON block above is the shape almost
 all of them use; translate it into whatever your client's config file looks like.
 
-`staysfixed doctor --json` returns that block already filled in, under
-`wiring.mcp`, and so does `staysfixed_capabilities` with `detail: "full"` — so an
-agent setting this up for somebody never has to copy it out of this page.
+`staysfixed init --json` returns that block **with the project path already filled
+in**, under `plan.wiring.mcp` — so an agent setting this up for somebody can paste
+it straight into the client's config without copying anything out of this page.
+
+`staysfixed doctor --json` carries the same block under `wiring.mcp`, but its
+`cwd` is still the placeholder `"/absolute/path/to/your/project"`: `doctor`
+describes the machine rather than the project, so put the project's real path in
+yourself, or take the block from `init --json` instead.
 
 ### If you have it installed locally
 
@@ -168,11 +173,15 @@ stronger, and the right thing before a release), `against` (compare with a named
 marker or commit), `only` (a list of journey names), `limit` and `offset` (paging
 through the *last* run without running anything again), and `format: "json"`.
 
-`journeys` names where the steps come from. Today that is the default — what each
-adapter reads out of your source — or a path to a journeys file. `"suite"` and
-`"recorded"` are written in `src/v2/journeys/` and not yet wired into a run: ask
-for either and you are told so by name, rather than given a clean result about
-steps something quietly chose instead.
+`journeys` names where the steps come from. The default is what each adapter reads
+out of your source. `"suite"` walks the project's own test suite as well — each
+test file run twice inside the scratch copy, every check reported by name and why
+each failure failed, stopping after 90 seconds with every file it did not reach
+named. It is worth asking for when a change could break behaviour the product's own
+output would never show. You can also pass a path to a journeys file. `"recorded"`
+is written in `src/v2/journeys/` and not yet wired into a run: ask for it and you
+are told so by name, rather than given a clean result about steps something quietly
+chose instead.
 
 ---
 

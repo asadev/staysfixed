@@ -388,7 +388,7 @@ export function toolDefinitions() {
           journeys: {
             type: 'string',
             description:
-              "Where the steps come from. 'code' is the default and needs nothing: each adapter reads your source and offers what it finds - routes, commands, screens, message channels. The other value is a path to a journeys file naming steps by hand. 'suite' (harvest your own test suite) and 'recorded' (replay a recorded session) are written and not yet wired into a run: ask for either and it says so rather than checking something else.",
+              "Where the steps come from. 'code' is the default and needs nothing: each adapter reads your source and offers what it finds - routes, commands, screens, message channels. 'suite' walks the project's own test suite as well: each test file runs twice inside the scratch copy, every check is reported by name, and it stops after 90 seconds naming each file it did not reach. It catches breaks nothing else can - a rounding change the product's own output never shows. It is opt-in because running a stranger's whole suite twice on every check is not something to do by default. You can also pass a path to a journeys file naming steps by hand. 'recorded' (replay a recorded session) is written and not yet wired into a run: ask for it and it says so rather than checking something else.",
           },
           surface: {
             type: 'string',
@@ -756,18 +756,17 @@ async function toolCheck(ctx, input) {
   const limit = positive(input.limit) ?? DEFAULT_LIMIT;
   const offset = positive(input.offset) ?? 0;
 
-  // A value the engine does not understand must be refused BY NAME. `suite` and
-  // `recorded` are real ideas with real code behind them in src/v2/journeys/, and
-  // nothing on the check path calls that code yet - so passing either one down reaches
-  // the engine as the name of a file, and comes back as "there is no journeys file at
-  // .../suite". That error sends an agent looking for a file it never asked for. The
-  // day the harvest is wired, this refusal is what has to be deleted.
+  // A value the engine does not understand must be refused BY NAME, never passed down.
+  //
+  // `suite` is now wired and reaches the harvest. `recorded` is still written and called by
+  // nothing, so passing it down would reach the engine as the name of a FILE and come back as
+  // "there is no journeys file at .../recorded" — an error that sends an agent looking for a
+  // file it never asked for. Refusing it by name and saying why is the honest answer, and a
+  // clean result about the wrong steps would be worse than no result.
   const wantedJourneys = text(input.journeys);
-  if (wantedJourneys === 'suite' || wantedJourneys === 'recorded') {
+  if (wantedJourneys === 'recorded') {
     return problem(
-      wantedJourneys === 'suite'
-        ? 'Harvesting your own test suite as journeys is written and not wired into a run yet, so nothing was checked. Leave journeys out to use the steps each adapter reads from your source, or pass the path to a journeys file. Saying this rather than quietly checking something else is deliberate: a clean result about the wrong steps is worse than no result.'
-        : 'Replaying a recorded session is written and not wired into a run yet, so nothing was checked. Leave journeys out to use the steps each adapter reads from your source, or pass the path to a journeys file.'
+      'Replaying a recorded session is written and not wired into a run yet, so nothing was checked. Leave journeys out to use the steps each adapter reads from your source, pass "suite" to walk your own test suite, or pass the path to a journeys file.'
     );
   }
 

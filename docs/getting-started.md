@@ -86,10 +86,11 @@ What comes back:
 
 **Where the steps come from, today.** Each adapter reads their source and offers what it
 finds there — routes, commands, screens, message channels — and `--journeys <file>` names
-steps by hand. Harvesting their own test suite and replaying a recorded session are written
-in `src/v2/journeys/` and are **not wired into a run**: ask for `--journeys suite` or
-`--journeys recorded` and you are told so by name. Nothing quietly substitutes different
-steps and hands you a clean answer about them.
+steps by hand. `--journeys suite` adds their own test suite: each test file runs twice inside
+the scratch copy, every check is reported by name, and it stops after 90 seconds naming every
+file it did not reach. Replaying a recorded session is written in `src/v2/journeys/` and is
+**not wired into a run**: ask for `--journeys recorded` and you are told so by name. Nothing
+quietly substitutes different steps and hands you a clean answer about them.
 
 ### 3. Take the first reading
 
@@ -135,6 +136,11 @@ Every check answers with one object. The fields that decide what you do:
   something that used to give the same answer every time stopped doing so.
 - **`blocked`** — the run could not happen. This is neither a pass nor a failure. Never
   report a blocked run as "nothing changed".
+- **`reference.id`** — check this before you believe `ok`. An **empty string** means there was
+  nothing on record to compare this build against, so the run proved nothing at all. It comes
+  back with `ok: true`, because arithmetically nothing came back different — and it is not a
+  pass. It happens on every project until somebody has run `staysfixed ship` once. The command
+  line exits 2 on it; the JSON does not say so in a field yet, so read this one.
 - **`mode`** — `paired` means the old build was booted and walked here, in this minute.
   `stored-record` means it was compared against what the old build wrote down last time,
   which is genuinely weaker. When it is `stored-record`, `modeWarning` holds the sentence to
@@ -209,7 +215,9 @@ Four checks, in order, and they take about a minute:
 2. `staysfixed init --json` returns `ok: true`, and `plan.readiness` has at least one product
    whose state is `ready`.
 3. `staysfixed check --paired` finishes with `blocked` absent and `coverage.paths` above zero.
-   Zero addresses observed means it walked nothing, whatever else it says.
+   Zero addresses observed means it walked nothing, whatever else it says. On a project that
+   has never shipped, `reference.id` will be empty and that run proves nothing — expected, and
+   over as soon as they ship once.
 4. Break something on purpose — change a line of printed text, delete a route — run
    `staysfixed check`, and confirm it names it. Then put it back.
 
@@ -289,6 +297,11 @@ Say these once, when someone asks how much it covers. They are permanent, they a
 | `staysfixed check --against <ref>` | Compare against a tag, commit or marker. |
 | `staysfixed check --selfcheck` | Prove the engine still catches deliberate breakage. |
 | `staysfixed ship` | The build that went out is now what "working" means. |
+
+If you have to write a settings block by hand — something `init` could not know, a second
+product, a journey through a screen — every option is in
+[settings.md](settings.md), together with what each kind of product needs installed on the
+machine and the exact command that installs it.
 
 And the three files, if you ever need to look: `src/v2/detect.js` works out what the project
 is, `src/v2/doctor.js` works out what the machine can do, `src/v2/init.js` turns both into

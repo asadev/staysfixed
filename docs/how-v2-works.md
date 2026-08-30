@@ -126,15 +126,16 @@ Ranked, because this is the real workload question:
 4. **The agent exploring one named gap** and freezing it into a replayable file.
 5. Never a person clicking through an app.
 
-`--journeys <source>` picks between them — and **two of those five are written and
-not wired.** What a run actually walks today is (1), plus a journeys file you name:
-each adapter reads your source and offers what it finds there, and `--journeys
-<file>` names steps by hand. The suite harvest and session replay live in
-`src/v2/journeys/` with tests around them, and nothing on the check path calls
-them; ask for `--journeys suite` or `--journeys recorded` and you are told that by
-name rather than handed a clean result about steps something else chose. Saying so
-is the point: a feature that exists in the repository and not in the run is not a
-feature you have.
+`--journeys <source>` picks between them — and **one of those five is written and
+not wired.** A run walks (1) by default: each adapter reads your source and offers
+what it finds there. `--journeys <file>` names steps by hand, and `--journeys
+suite` adds (2), the project's own test suite — each file run twice inside the
+scratch copy, every check reported by name, held to a 90-second budget with every
+file it did not reach named. Session replay lives in `src/v2/journeys/` with tests
+around it and nothing on the check path calls it; ask for `--journeys recorded` and
+you are told that by name rather than handed a clean result about steps something
+else chose. Saying so is the point: a feature that exists in the repository and not
+in the run is not a feature you have.
 
 ---
 
@@ -343,12 +344,12 @@ release through on the strength of it.
 | `src/v2/observation.js` | The address space, the channels, `diffCaptures`, `measureWobble`, `subtractWobble`. |
 | `src/v2/normalise.js` | The rules, as data, each carrying `wouldHide` in plain English, and `explain()` so a normalisation can be answered for. |
 | `src/v2/cluster.js` | Many differences, one cause, one finding. |
-| `src/v2/rank.js` | `rankFindings` — furthest from the edit first, sealed classes above everything — plus `sealOf`, `whatChanged`, `importGraph`. |
+| `src/v2/rank.js` | `rankFindings` — furthest from the edit first, sealed classes above everything — plus `classOf`, `whatChanged`, `importGraph`. Which classes are sealed, and the words used to refuse one, live in `src/v2/sealed.js`. |
 | `src/v2/cause.js` | `proveCause` — revert the suspect hunk, run again, and find out. |
 | `src/v2/store.js` | The append-only capture files, build records, references, and reading a torn file without losing the rest. |
 | `src/v2/run.js` | `runCheck` — the loop, over any `CheckEngine`. |
 | `src/v2/check.js` | `check` — the assembled front door. The command line, the MCP server and the self-check corpus all look for it here, on purpose: if they found the engine in different places they would be checking different things and reporting it as one. |
-| `src/v2/selfcheck.js` | The corpus of deliberately broken builds, and `runSelfcheck`. |
+| `src/v2/selfcheck.js` | The corpus of deliberately broken builds — `CASES` — and `selfcheck`. |
 | `src/v2/adapters/` | One per surface. The only place that knows what a browser or a child process is. |
 | `src/v2/mcp/` | The tools an agent calls. |
 | `src/v2/cli.js` | `V2_COMMANDS`, `run`, `doctorRun`, `checkOptions`, `report`. |
