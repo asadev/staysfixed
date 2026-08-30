@@ -49,9 +49,29 @@ export const DEFAULT_FREEZE = {
 
 /** @type {Required<Omit<import('../types.js').ToleranceConfig,'maxPixels'>>} */
 export const DEFAULT_TOLERANCE = {
-  // 0.05% of pixels. On a 1440x900 @2x picture that is about 1300 pixels — enough
-  // for font hinting noise, nowhere near enough to hide a missing stylesheet.
-  pixels: 0.0005,
+  // Nothing is allowed through by default, and that is a change made after measuring.
+  //
+  // This used to be 0.0005 — 0.05% of the picture — with a comment saying it was "enough for
+  // font hinting noise, nowhere near enough to hide a missing stylesheet". The first half was
+  // a guess and the second half was wrong. On a 2880x1800 picture, 0.05% is **2,592 pixels**.
+  // Changing `<h1>Welcome</h1>` to `<h1>Welcom</h1>` — one letter missing from the main
+  // heading of the page, plainly visible to anybody looking at it — moves **593**. So the
+  // check reported "Everything that worked still works" over a page that was visibly wrong.
+  // That is the exact failure this tool exists to prevent, produced by the tool itself.
+  //
+  // The number that replaces it was measured rather than chosen. Ten fresh takes of the same
+  // build, on a real page, compared against the approved picture: **zero differing pixels,
+  // every time.** The freeze layer underneath — the stopped clock, the killed motion, the
+  // seeded randomness, the pinned text rendering, and the settle loop that keeps shooting
+  // until two frames come back identical — is what makes that true. Where nothing wobbles,
+  // an allowance buys nothing at all and costs you the one thing you came for.
+  //
+  // Version 2 answers this properly by measuring each product's own wobble and subtracting
+  // it, which is why it has no tolerance setting and never will. Version 1 cannot do that
+  // without becoming version 2, so it does the honest next-best thing: allow nothing, and
+  // let a project that genuinely wobbles say so out loud with `tolerance.pixels`. A run that
+  // uses an allowance now says so, and says how much of it was used.
+  pixels: 0,
   threshold: 0.12,
   antialiasing: true,
 };

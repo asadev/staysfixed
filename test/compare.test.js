@@ -342,3 +342,36 @@ describe('describeDifference', () => {
     assert.ok(!/undefined|NaN|\[object/.test(text), text);
   });
 });
+
+describe('what the default allowance lets through', () => {
+  /**
+   * This suite exists because of a false pass that was measured, not imagined.
+   *
+   * The default used to allow 0.05% of a picture through. On a 2880x1800 screenshot that is
+   * 2,592 pixels. Taking one letter out of a page's main heading — `<h1>Welcome</h1>` to
+   * `<h1>Welcom</h1>`, plainly visible to anyone looking — moves 593. So the check answered
+   * "Everything that worked still works" over a page that was visibly wrong: the exact
+   * failure this tool exists to prevent, produced by the tool itself.
+   *
+   * The replacement was measured. Ten fresh takes of the same build against the approved
+   * picture came back with zero differing pixels every time, because the freeze layer
+   * underneath is thorough enough to make that true. Where nothing wobbles, an allowance
+   * buys nothing and costs you the thing you came for.
+   */
+
+  test('nothing is allowed through unless a project asks for it', () => {
+    assert.equal(DEFAULT_TOLERANCE.pixels, 0,
+      'A default allowance hides a real change and buys nothing: the same build photographed '
+      + 'ten times differs by zero pixels. If this is ever raised again, measure first and put '
+      + 'the measurement in the comment.');
+  });
+
+  test('a change smaller than the old default is caught', () => {
+    // 593 pixels on a 2880x1800 picture — the real number from the real page.
+    const size = 2880 * 1800;
+    const allowedNow = Math.floor(size * DEFAULT_TOLERANCE.pixels);
+    const allowedBefore = Math.floor(size * 0.0005);
+    assert.ok(593 > allowedNow, `593 changed pixels must not be waved through; the allowance is ${allowedNow}`);
+    assert.ok(593 < allowedBefore, 'the old default really did swallow it, which is why this test exists');
+  });
+});

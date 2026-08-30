@@ -210,9 +210,22 @@ export function printPictureResult(r) {
   const time = paint.grey(duration(r.durationMs ?? 0));
   const line = `${r.name.padEnd(NAME_WIDTH)} ${pictureOutcome(r)}`;
   switch (r.status) {
-    case 'passed':
-      say(`${paint.green(sym(mark.pass))} ${r.name.padEnd(NAME_WIDTH)} ${paint.grey('still the same')} ${time}`);
+    case 'passed': {
+      // "Still the same" has to mean the same, or it is the most expensive sentence here.
+      //
+      // A picture that differs and is waved through by an allowance was reported as
+      // identical, in the same words as one that matched byte for byte. That is how a
+      // missing letter in a heading — 593 pixels, plainly visible — came back as "still the
+      // same" while an allowance of 2,592 quietly absorbed it. Nothing is allowed through by
+      // default any more, so this is rare; when a project sets `tolerance.pixels` because its
+      // product genuinely wobbles, the line says what its setting just swallowed.
+      const swallowed = r.diffPixels ?? 0;
+      const note = swallowed > 0
+        ? paint.grey(`the same, apart from ${swallowed} ${swallowed === 1 ? 'pixel your tolerance allowed' : 'pixels your tolerance allowed'}`)
+        : paint.grey('still the same');
+      say(`${paint.green(sym(mark.pass))} ${r.name.padEnd(NAME_WIDTH)} ${note} ${time}`);
       break;
+    }
     case 'changed':
       say(`${paint.red(sym(mark.fail))} ${paint.red(line)} ${time}`);
       if (r.approvedSize && r.size && (r.approvedSize.width !== r.size.width || r.approvedSize.height !== r.size.height)) {

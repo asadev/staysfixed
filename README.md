@@ -205,6 +205,18 @@ There is no tolerance setting in version 2 and there is not going to be one.
 Tolerance knobs are how tools like this die — too loose to catch the real thing,
 too tight to leave switched on.
 
+Version 1's picture check is the proof, and it was caught doing exactly that.
+Its default allowed 0.05% of a picture through, with a comment saying that was
+"enough for font hinting noise, nowhere near enough to hide a missing
+stylesheet". On a 2880×1800 screenshot, 0.05% is **2,592 pixels**. Taking one
+letter out of a page's main heading moves **593** — so the check reported
+"Everything that worked still works" over a page anybody could see was wrong.
+Ten fresh takes of that same build differ by **zero** pixels, because the freeze
+layer underneath is thorough enough to make that true. So version 1's default is
+now zero as well: a project whose product genuinely wobbles can set
+`tolerance.pixels`, and every run then says in words how many pixels that
+setting just swallowed.
+
 It also catches a bug class no screenshot tool has ever caught. A path that was
 **steady** in the old build and **wobbles** in the new one means the change made
 something unpredictable. That is a finding, even though no single value can be
