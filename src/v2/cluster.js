@@ -27,14 +27,6 @@ import { splitPath, sameValue } from './observation.js';
 /** @typedef {import('./types.js').Channel} Channel */
 /** @typedef {import('./types.js').ObservedValue} ObservedValue */
 
-/** How much of a cluster a finding carries with it. Enough to orient, not enough to bury. */
-const KEEP_NEAR_FILES = 5;
-
-/**
- * How many of a cluster's addresses travel with the finding. `count` always says how
- * many there really are, so a long cluster cannot hide its size behind a short list.
- */
-const KEEP_PATHS = 20;
 
 /**
  * How each channel introduces itself. This is the first half of every sentence
@@ -55,8 +47,25 @@ const CHANNEL_WORDS = {
 /**
  * Last segments too vague to identify anything alone. When an address ends in
  * one of these, the segment before it comes along for the ride.
+ *
+ * WHAT PUTS A WORD IN HERE. Every address ends either in something the PRODUCT
+ * named — an exported function, a route, a control, a field — or in a word this
+ * tool wrote to say what was being asked about it. The first kind identifies
+ * something on its own. The second kind is the same word on every journey, every
+ * door and every screen in the product, so a sentence built out of it names
+ * nothing: `"declared" is gone` was a real title, about a route that had been
+ * renamed, and the route was sitting one segment to the left the whole time.
+ * That sentence is not only read by an agent — it goes verbatim into the block a
+ * person reads in the closing summary, and the owner of this tool is not a coder.
+ *
+ * So this holds the words the tool writes, checked against the addresses the
+ * adapters actually produce rather than guessed at. `smartLeaf names the half a
+ * reader can act on` in the tests sweeps one real address of every shape through
+ * here; a new adapter that ends an address in a shared word belongs in that list
+ * and in this set on the same day.
  */
 const VAGUE = new Set([
+  // What was asked about a thing: the thing itself is one segment to the left.
   'value',
   'text',
   'name',
@@ -64,14 +73,45 @@ const VAGUE = new Set([
   'label',
   'title',
   'count',
+  'size',
+  'reason',
   'enabled',
   'visible',
   'status',
   'type',
   'id',
   'body',
+  'shape',
   'result',
   'exit',
+  // Doors, which all end the same way whatever the door is: a route, a command,
+  // an IPC channel, a named control on a phone.
+  'declared',
+  'registered',
+  'reached',
+  // What happened when we asked, on every surface there is.
+  'asked',
+  'answered',
+  'answered at all',
+  'ran at all',
+  'opened at all',
+  'walked',
+  'read',
+  'typed',
+  'pressed',
+  'done',
+  'started',
+  'finished',
+  'refused',
+  'settled',
+  'held still',
+  'looks like',
+  'written',
+  'still running',
+  'stdout',
+  'stderr',
+  'controls',
+  'picture',
 ]);
 
 /**
@@ -194,7 +234,15 @@ export function journeysOf(finding) {
  */
 function buildFinding(signature, members, rename, sources) {
   const head = members[0];
-  const nearFiles = unique(members.map((m) => sources[m.path])).slice(0, KEEP_NEAR_FILES);
+  // EVERY source file this finding touches, not the first five. The short list was written
+  // as "enough to orient, not enough to bury", and the things reading it are not orienting.
+  // `sealed.js` searches these names for the words nobody may wave through, so a finding
+  // whose sixth file was src/billing/refund.js was classified ordinary and became waivable;
+  // `intent.js` matches them against what the agent declared it was changing, and `cause.js`
+  // uses them to work out which edit caused what. A cap on the input to the one gate that
+  // cannot have a ceiling is the same bug that was closed for differences. Everything that
+  // DISPLAYS this list already cuts it itself and says "and N more" when it does.
+  const nearFiles = unique(members.map((m) => sources[m.path]));
   const evidence = members.find((m) => typeof m.evidence === 'string' && m.evidence.length > 0)?.evidence;
   // Half the differences in a rename are the "vanished" side, so the count of
   // places is the count of pairs, not of rows.
@@ -225,7 +273,16 @@ function buildFinding(signature, members, rename, sources) {
     // everything downstream — the MCP reply lists them, and the self-check corpus
     // matches its patterns against them — so they are filled in here rather than
     // left for each reader to dig out of `differences` in its own way.
-    paths: members.map((m) => m.path).slice(0, KEEP_PATHS),
+    // EVERY address, not the first twenty. The short list was there to keep a finding small,
+    // and it was buying nothing: the finding already carries `differences`, which holds the
+    // same addresses AND both values at each of them, so cutting this list saved a fraction
+    // of what was being stored anyway. What it cost was real. A waiver is pinned partly to
+    // this list, so two three-hundred-address findings that agreed about their first twenty
+    // pinned to the same thing; and the reply an agent reads prints the length of this list
+    // under the heading "every address that moved", which was a count of twenty about a
+    // finding with three hundred. Readers that want a short list still cut it themselves,
+    // and every one of them says "and N more" when it does.
+    paths: members.map((m) => m.path),
     sample: head,
   };
   if (nearFiles.length > 0) finding.nearFiles = nearFiles;
@@ -259,8 +316,23 @@ export function describe(d, count, rename, identical = true) {
   if (rename) return `${where}, "${rename.from}" is now called "${rename.to}".${spread}`;
 
   switch (d.kind) {
-    case 'changed':
-      return `${where}, "${name}" is now ${describeValue(d.candidate)} where it was ${describeValue(d.reference)}.${spread}`;
+    case 'changed': {
+      const now = describeValue(d.candidate);
+      const was = describeValue(d.reference);
+      if (now !== was) return `${where}, "${name}" is now ${now} where it was ${was}.${spread}`;
+      // BOTH SIDES CAME OUT IN THE SAME WORDS, so this sentence would say nothing changed
+      // while sitting on top of a difference. It is what happens whenever the two values
+      // are summarised by their SHAPE and the shape held still: an invoice line that went
+      // from "£49.99" to "49.99 GBP" read "is now a set of details (one field: line) where
+      // it was a set of details (one field: line)" — twice the same words, on the tool's own
+      // flagship example, in the paragraph a person reads rather than an agent. So the
+      // summary is put down and the thing that actually moved is named instead.
+      const moved = whatMoved(d.reference, d.candidate);
+      if (!moved) return `${where}, "${name}" changed, and both versions of it read the same at this length.${spread}`;
+      return moved.what === ''
+        ? `${where}, "${name}" now reads ${moved.now} where it read ${moved.was}.${spread}`
+        : `${where}, "${name}" now has "${moved.what}" reading ${moved.now} where it read ${moved.was}.${spread}`;
+    }
     case 'appeared':
       return `${where}, "${name}" is there now and was not before. It says ${describeValue(d.candidate)}.${spread}`;
     case 'vanished':
@@ -354,7 +426,86 @@ export function describeValue(value) {
   if (Array.isArray(value)) return `a list of ${value.length}`;
   const keys = Object.keys(/** @type {object} */ (value));
   if (keys.length === 0) return 'an empty set of details';
-  return `a set of details (${keys.slice(0, 4).join(', ')}${keys.length > 4 ? ', and more' : ''})`;
+  // The field names are quoted and counted. Bare, they run into the sentence around them and
+  // stop looking like names at all: a shape whose fields are the words "a list of" and "each
+  // one" came out as "a set of details (a list of, each one)", which is not a thing anybody
+  // can picture. Quoted, it reads as what it is.
+  const shown = keys.slice(0, 4).map((k) => JSON.stringify(k)).join(', ');
+  return `a set of details (${keys.length === 1 ? 'one field' : `${keys.length} fields`}: ${shown}${keys.length > 4 ? ', and more' : ''})`;
+}
+
+/**
+ * The smallest thing that actually moved between two values.
+ *
+ * Only reached when a summary of the two whole values comes out identical, which is exactly
+ * when a summary is the wrong thing to print. It walks in until it finds the one field, or
+ * the one stretch of text, that is not the same, and hands back that piece with a name for
+ * it. `sameValue` is the tool's one comparison, so what counts as "not the same" here is
+ * what counts as a difference everywhere else.
+ *
+ * @param {ObservedValue|undefined} reference
+ * @param {ObservedValue|undefined} candidate
+ * @param {string[]} [trail]
+ * @returns {{what: string, was: string, now: string}|null}
+ */
+function whatMoved(reference, candidate, trail = []) {
+  if (isSetOfDetails(reference) && isSetOfDetails(candidate)) {
+    for (const key of [...new Set([...Object.keys(reference), ...Object.keys(candidate)])].sort()) {
+      const a = /** @type {Record<string, any>} */ (reference)[key];
+      const b = /** @type {Record<string, any>} */ (candidate)[key];
+      if (sameValue(a, b)) continue;
+      return whatMoved(a, b, [...trail, key]);
+    }
+    return null;
+  }
+  if (Array.isArray(reference) && Array.isArray(candidate)) {
+    for (let i = 0; i < Math.max(reference.length, candidate.length); i += 1) {
+      if (sameValue(reference[i], candidate[i])) continue;
+      return whatMoved(reference[i], candidate[i], [...trail, `number ${i + 1}`]);
+    }
+    return null;
+  }
+  const what = trail.join(' / ');
+  if (typeof reference === 'string' && typeof candidate === 'string') {
+    // Two long strings summarise to their first sixty-odd characters, so if they agree that
+    // far they read the same however differently they end. A window round the first place
+    // they part company says what neither summary can.
+    const spot = firstDifference(reference, candidate);
+    return { what, was: JSON.stringify(spot.was), now: JSON.stringify(spot.now) };
+  }
+  const was = describeValue(reference);
+  const now = describeValue(candidate);
+  return was === now ? null : { what, was, now };
+}
+
+/**
+ * A window round the first character two pieces of text stop agreeing at, with enough either
+ * side to recognise the place.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {{was: string, now: string}}
+ */
+function firstDifference(a, b) {
+  // Short enough to read whole, so read it whole. A window round the difference is only
+  // worth its ellipses when there is genuinely too much text to print.
+  if (a.length <= 70 && b.length <= 70) return { was: a, now: b };
+  let at = 0;
+  while (at < a.length && at < b.length && a[at] === b[at]) at += 1;
+  const from = Math.max(0, at - 20);
+  /** @param {string} text */
+  const window = (text) => `${from > 0 ? '…' : ''}${text.slice(from, at + 40)}${at + 40 < text.length ? '…' : ''}`;
+  return { was: window(a), now: window(b) };
+}
+
+/**
+ * A value made of named fields, as opposed to a list, a number, or a piece of text.
+ *
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
+function isSetOfDetails(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

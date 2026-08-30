@@ -426,19 +426,23 @@ reading the code rather than the documentation. Every one of them can end in a
 clean-looking answer, and the file that would close each one is named so nobody
 has to take this on trust.
 
+Seven rows left this table in one night. They are in the closed table above now:
+a wobble storm that needed twelve addresses before it counted, so ten of eleven
+wobbling passed; a desktop control compared to its first 200 characters; an
+unreadable folder losing every page of a website behind it; two screens with one
+name collapsing into one walk; a waiver pinned to the first 40 differences of a
+finding rather than all of them; and three iOS ceilings that stopped counting
+without saying so. What is below is what is genuinely left.
+
 | What is invisible | Where |
 | --- | --- |
-| **Half a journey's addresses can be thrown away and the run still says "clean".** A build that disagrees with itself about *most* of its addresses gets no verdict — but "most" means more than half, and below **twelve** addresses the rule is switched off altogether unless nothing at all held still. Ten wobbling out of eleven is not a storm: all ten differences are subtracted and the run passes. | `src/v2/observation.js` — `STORM_SHARE`, `STORM_FLOOR` |
-| **A desktop control's text is compared to its first 200 characters only,** with no length kept beside it. Two builds whose text differs only past character 200 record identically and compare equal. The same problem in printed output was fixed by keeping the exact byte count; that fix was never applied here. | `src/v2/adapters/electron.js` — `readMeaning` |
-| **A file a command writes that is over 8MB is recorded as a rough size, not a fingerprint.** Its whole contents can change inside the same size bracket and both builds record the same thing. | `src/v2/adapters/process.js` — `snapshotTree` |
-| **Files a command writes inside `node_modules`, `.git` or `.staysfixed` are not watched at all** — a postinstall step, a patch, a generated file. | `src/v2/adapters/process.js` — `SNAPSHOT_SKIP` |
-| **A folder that cannot be opened while looking for written files drops that whole subtree with no note** — "it wrote a file there" becomes "it wrote nothing". This is the same shape as two rows in the table above, in a third place. | `src/v2/adapters/process.js` — `snapshotTree` |
-| **A folder that cannot be read while looking for a website's pages drops every page behind it, silently** — the same shape again, in a fourth place. | `src/v2/adapters/web.js` — `readPageRoutes` |
-| **Two screens with the same name collapse into one.** The second is never walked, and it is not counted as an unopened door either, so it is missing from the coverage that exists to catch exactly this. | `src/v2/adapters/web.js` |
-| **A waiver is pinned to the first 40 differences of a finding and at most 20 of its addresses,** not to all of them. A waiver written about a three-hundred-address finding goes on matching when a difference past the fortieth turns into something else. The four gates all still hold; the pin is looser than this page said. | `src/v2/waiver.js`, `src/v2/cluster.js` |
-| **What the scratch copy leaves out is left out of *both* builds.** A product that actually needs one of those folders fails the same way twice, so there is no difference to report and the run reads clean. That is why the bar for `process.skip` is "regenerated on demand and read by nothing". | `src/v2/adapters/process.js` — `SKIP_BY_DEFAULT` |
-| **Working out what a repository makes reads at most 300 files, four folders deep, and skips any file over 2MB** — and says nothing when it hits those limits. A product it never sees is never set up and never walked, so the run is clean about something that was not in it. The 24MB ceiling in the table above is the *source reader*; this is a different, lower one. | `src/v2/detect.js` — `readSome` |
-| **On iOS, doors stop being counted at 4,000 or twelve folders deep, the search for the built app gives up at eight folders or forty candidates, and a control more than sixty levels deep cannot be seen or reached.** Each of those ends quietly. | `src/v2/adapters/ios.js`, `src/v2/adapters/ios-driver.js` |
+| **What the scratch copy leaves out is left out of *both* builds.** A product that actually needs one of the folders named under `process.skip` fails the same way twice, so the difference engine sees no difference and the run reads clean. The defaults are only caches and reports, and the bar is written down — but a project that adds to that list can hide a real break from itself. | `src/v2/adapters/process.js` — `SKIP_BY_DEFAULT` |
+| **Working out what a repository makes reads at most 300 files, four folders deep, and skips any file over 2MB.** A product it never notices is never configured and never walked, so it is missing from the coverage ledger rather than named in it — the one kind of gap the ledger cannot show you. | `src/v2/detect.js` |
+| **Values nested more than 64 levels deep are compared as "too deep" rather than by their contents.** It will never go quiet about one, but it cannot say what inside it moved. This only ever applies to a value read back off the disk; observations made in this run refuse that depth at the door. | `src/v2/observation.js` |
+| **A change buried in the middle of an output larger than 64KB can be missed.** Both ends are kept and compared along with the exact number of bytes dropped, so a middle that grew or shrank shows up. One that changed without changing length does not. | `src/v2/adapters/contract.js` — `trimForStorage` |
+| **How long anything took is recorded and never compared.** A build that got twice as slow is not a finding. This one is deliberate and permanent — a stopwatch on a shared machine measures the machine at least as much as the product — and a build that *hangs* is still caught, because it is stopped for taking too long and how it finished is compared exactly. | by design |
+| **On Windows and as root, one self-check case cannot run.** It takes away the permission to write, to prove the tool still answers when the disk gives out; neither honours that. The case reports itself as untested rather than as a pass, and the closing line counts it separately. | `src/v2/selfcheck.js` |
+| **The distance from a finding to your edit has three ceilings: 4,000 source files, 8 imports out, and 400KB per file.** Past any of them the ranking for that finding is a guess. It is not silent — a run that hit a ceiling says so and names the files it could not read — but the order is worth less than the rest of the list. | `src/v2/rank.js` |
 
 ---
 

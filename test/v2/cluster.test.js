@@ -11,7 +11,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { clusterDifferences, findRenames, signatureOf, describe as describeDifference } from '../../src/v2/cluster.js';
+import {
+  clusterDifferences, findRenames, signatureOf, smartLeaf, describeValue,
+  describe as describeDifference,
+} from '../../src/v2/cluster.js';
 
 /**
  * @param {string} path
@@ -157,6 +160,113 @@ describe('a rename is one change, not two', () => {
       difference('screen.home.actions.Store', 'meaning', 'appeared', undefined, 'off'),
     ]);
     assert.equal(renames.size, 0, 'they landed side by side; that is not the same as one becoming the other');
+  });
+});
+
+describe('the sentence has to name something', () => {
+  /**
+   * One real address of every shape the adapters produce, and the half of it a reader can
+   * act on. Written out rather than derived, because the point is to notice when a new
+   * adapter ends an address in a word that is the same on every journey in the product.
+   *
+   * @type {[string, string][]}
+   */
+  const shapes = [
+    // Doors, from the source reader. Every one of them used to come back as the word the
+    // tool wrote — "declared" — with the route, the command or the channel one segment to
+    // the left, unread. A renamed route reported as "declared is gone".
+    ['route.ANY./notes.declared', '/notes'],
+    ['ipc.session:create.registered', 'session:create'],
+    ['cli.build.declared', 'build'],
+    ['export.src/help%2Ejs.renderHelp', 'renderHelp'],
+    ['proc.env.PORT', 'PORT'],
+    ['door.saveButton.declared', 'saveButton'],
+    ['door.saveButton.reached', 'saveButton'],
+    // What was asked of something, and what it answered.
+    ['api.the shop opens.status', 'the shop opens'],
+    ['api.the shop opens.body', 'the shop opens'],
+    ['api.the shop opens.shape', 'the shop opens'],
+    ['api.the shop opens.answered', 'the shop opens'],
+    ['net.GET.api%2Eexample%2Ecom/orders.asked', 'api.example.com/orders'],
+    ['cli.build.exit', 'build'],
+    ['cli.build.stdout', 'build'],
+    ['cli.build.ran at all', 'build'],
+    ['screen.home.opened at all', 'home'],
+    ['screen.home.picture', 'home'],
+    ['screen.checkout.end.held still', 'end'],
+    ['file.report%2Etxt.written', 'report.txt'],
+    ['permission.NSCameraUsageDescription.reason', 'NSCameraUsageDescription'],
+    // And the ones that already named something: a leaf the PRODUCT chose is left alone.
+    ['screen.home.checkpoint 1.button:Save.enabled', 'button:Save'],
+    ['screen.home.end.tree.under:Main.link:Docs', 'link:Docs'],
+    ['api.the shop opens.header.content-type', 'content-type'],
+    ['store.settings.theme.value', 'theme'],
+  ];
+
+  test('smartLeaf names the half a reader can act on', () => {
+    for (const [address, names] of shapes) {
+      assert.ok(
+        smartLeaf(address).includes(names),
+        `"${address}" reads as "${smartLeaf(address)}", which never mentions ${names}. A word this tool wrote is the same word on every journey in the product, so a sentence built out of it names nothing — and that sentence goes to a person, not only to an agent.`
+      );
+    }
+  });
+
+  test('a value made of fields reads as fields, not as prose', () => {
+    // "a set of details (a list of, each one)" was a real sentence about the shape of a
+    // reply. Nobody can picture it; the field names had run into the words around them.
+    assert.equal(describeValue({ 'a list of': 3, 'each one': {} }), 'a set of details (2 fields: "a list of", "each one")');
+    assert.equal(describeValue({ error: 'gone' }), 'a set of details (one field: "error")');
+  });
+});
+
+describe('a sentence that says nothing changed, about a change', () => {
+  test('when both sides summarise to the same words, it names the field that moved', () => {
+    // The tool's own flagship example: a shared formatter is "improved" from £49.99 to
+    // 49.99 GBP and the invoice printer three hops away still uses it. The ranking put the
+    // forgotten corner first and sealed it as money — and the sentence it came with said
+    // "is now a set of details (one field: line) where it was a set of details (one field:
+    // line)". The same words on both sides of "where it was", in the paragraph a person
+    // reads rather than an agent.
+    const sentence = describeDifference(
+      difference('api.GET /invoice.body', 'results', 'changed', { line: 'A desk lamp ......... £49.99' }, { line: 'A desk lamp ......... 49.99 GBP' }),
+      1,
+    );
+    assert.match(sentence, /49\.99 GBP/, 'the sentence never said what the new value was');
+    assert.match(sentence, /£49\.99/, 'the sentence never said what the old value was');
+    assert.match(sentence, /"line"/, 'and it never named the field that moved');
+  });
+
+  test('two long pieces of text that agree at the start point at where they part', () => {
+    const same = 'row '.repeat(30);
+    const sentence = describeDifference(
+      difference('cli.report.stdout', 'results', 'changed', `${same}total 10.00`, `${same}total  0.00`),
+      1,
+    );
+    assert.match(sentence, /total {2}0\.00/);
+    assert.match(sentence, /total 10\.00/);
+  });
+
+  test('when the two sides really do read differently, nothing changes', () => {
+    const sentence = describeDifference(difference('screen.checkout.total', 'meaning', 'changed', 10, 9.99), 1);
+    assert.equal(sentence, 'On screen, "total" is now 9.99 where it was 10.');
+  });
+});
+
+describe('what a finding carries with it', () => {
+  test('every address is on the finding, not the first twenty', () => {
+    /** @type {any[]} */
+    const differences = [];
+    for (let i = 0; i < 300; i++) {
+      differences.push(difference(`screen.page-${i}.button:Save.name`, 'meaning', 'changed', 'Save', 'Store'));
+    }
+    const [finding] = clusterDifferences(differences);
+    assert.equal(finding.count, 300);
+    assert.equal(
+      (finding.paths ?? []).length,
+      300,
+      'the reply an agent reads prints the length of this list under "every address that moved", and a waiver is pinned partly to it'
+    );
   });
 });
 

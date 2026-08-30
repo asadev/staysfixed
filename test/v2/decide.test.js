@@ -34,7 +34,8 @@ import {
   rememberCheck,
   writeEscalations,
 } from '../../src/v2/escalate.js';
-import { fingerprintFinding, waiversFile } from '../../src/v2/waiver.js';
+import { fingerprintFinding, waiverFor, waiversFile } from '../../src/v2/waiver.js';
+import { clusterDifferences } from '../../src/v2/cluster.js';
 import { sealIntent } from '../../src/v2/intent.js';
 import { cutReference } from '../../src/v2/reference.js';
 import { callTool } from '../../src/v2/mcp/tools.js';
@@ -304,6 +305,68 @@ describe('the four gates on a waiver', () => {
     assert.equal(after.reported.length, 1, 'a sealed finding must survive a waiver that should never have existed');
     assert.equal(after.waived.length, 0);
     assert.equal(after.reported[0].unwaivable, true);
+  });
+});
+
+describe('what a waiver is pinned to', () => {
+  /**
+   * Three hundred rows of one screen, each holding its own long line of text. They arrive as
+   * ONE finding because the grouping key is coarse on long values on purpose — two long
+   * strings of about the same length are the same kind of change, not two hundred findings.
+   *
+   * @param {number} breakAt  Which row says something else. -1 for the run where none does.
+   * @returns {any}
+   */
+  const threeHundredRows = (breakAt) => {
+    const padding = '.'.repeat(80);
+    /** @type {any[]} */
+    const differences = [];
+    for (let i = 0; i < 300; i += 1) {
+      differences.push({
+        path: `screen.orders.row-${i}.summary`,
+        channel: 'meaning',
+        kind: 'changed',
+        reference: `row ${i}: was ${padding}`,
+        candidate: `row ${i}: ${breakAt === i ? 'nil' : 'now'} ${padding}`,
+        distance: 0.2,
+      });
+    }
+    const findings = clusterDifferences(differences);
+    assert.equal(findings.length, 1, 'the fixture is only worth anything while all three hundred stay one finding');
+    return findings[0];
+  };
+
+  test('a value that changes past the fortieth address kills the waiver, wherever it sits', () => {
+    const waivers = [{ fingerprint: fingerprintFinding(threeHundredRows(-1)), reference: 'ref-1' }];
+    for (const row of [5, 41, 150, 299]) {
+      assert.equal(
+        waiverFor(/** @type {any} */ (waivers), threeHundredRows(row)),
+        null,
+        `row ${row} of 300 now says something else, and the old waiver went on covering it. Until 2026-08-30 only the first forty differences were pinned, so a break past the fortieth was filed as intended and nobody was ever shown it.`
+      );
+    }
+  });
+
+  test('the same three hundred values twice pin to the same thing, or no waiver would ever hold', () => {
+    assert.equal(fingerprintFinding(threeHundredRows(-1)), fingerprintFinding(threeHundredRows(-1)));
+  });
+
+  test('a cluster that merely grew is a different pin', () => {
+    /** @param {number} howMany @returns {any[]} */
+    const rows = (/** @type {number} */ howMany) =>
+      Array.from({ length: howMany }, (_, i) => ({
+        path: `screen.orders.row-${i}.summary`,
+        channel: 'meaning',
+        kind: 'changed',
+        reference: 'was',
+        candidate: 'now',
+        distance: 1,
+      }));
+    const small = clusterDifferences(rows(2));
+    const grown = clusterDifferences(rows(3));
+    assert.equal(small.length, 1);
+    assert.equal(grown.length, 1);
+    assert.notEqual(fingerprintFinding(small[0]), fingerprintFinding(grown[0]));
   });
 });
 

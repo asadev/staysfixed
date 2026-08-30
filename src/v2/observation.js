@@ -46,21 +46,6 @@ export const CHANNELS = [
 ];
 
 /**
- * What each channel is, in the words we would use to a person. Printed by `doctor` and handed
- * to any agent that asks the tool to describe itself.
- * @type {Record<Channel, string>}
- */
-export const CHANNEL_NOTES = {
-  meaning: 'What the interface says a control is and does — its role, its name, whether it is on, off or disabled. Not the underlying markup.',
-  effects: 'What the product sent out into the world: calls made, files written, processes started, things saved.',
-  complaints: 'What the product complained about: console messages, errors, crashes, the code it exited with.',
-  results: 'What the product gave back: what it printed, what it answered, what it offers other code.',
-  contract: 'The doors the source code says exist: routes, exported functions, message channels. Read without running anything.',
-  counters: 'Rough counts and rough timings. Deliberately rough — precise timing is noise, not information.',
-  pixels: 'What it looked like. Used to show a person a problem another channel already found.',
-};
-
-/**
  * @param {unknown} value
  * @returns {value is Channel}
  */
@@ -77,17 +62,6 @@ const MAX_PATH_LENGTH = 512;
 
 /** Deepest value we will store. Past this something is recursing, not observing. */
 const MAX_VALUE_DEPTH = 64;
-
-/**
- * The share of its own addresses a build may disagree with itself about before the run stops
- * counting as a measurement at all. Half is not a tuned number and nothing depends on its
- * exact value: it is the point past which more of the comparison has been thrown away than
- * kept, and no answer computed from what is left deserves to be called clean.
- */
-const STORM_SHARE = 0.5;
-
-/** Below this many addresses the share means nothing — three out of four is not a storm. */
-const STORM_FLOOR = 12;
 
 /** Control characters and newlines, which would break the store and every log line. */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
@@ -863,13 +837,25 @@ export function wobbleStorm(wobble) {
   const looked = unstable + wobble.steady;
   const vanished = wobble.entries.filter((e) => e.kind === 'vanished').length;
   const share = looked === 0 ? 0 : unstable / looked;
-  // Nothing held still at all. This is the one case the share and the floor between them let
-  // through: a journey with eight addresses where all eight wobble is 100% of the comparison
-  // thrown away, and the floor exists to stop three-out-of-four being called a storm, not to
-  // excuse a comparison that ended up empty. Zero steady addresses is not a tuned number; it
-  // is the arithmetic saying there was nothing left to compare.
-  const nothingHeldStill = wobble.measured && wobble.steady === 0 && unstable > 0;
-  if (!wobble.measured || (!nothingHeldStill && (looked < STORM_FLOOR || share <= STORM_SHARE))) {
+  // MORE OF IT WOBBLED THAN HELD STILL, and that one comparison is the whole rule. There is
+  // no threshold here to tune and no number to defend: half is the point past which more of
+  // the comparison has been thrown away than kept, and no answer computed from what is left
+  // deserves to be called clean.
+  //
+  // There used to be a floor under it: below twelve addresses the share was ignored
+  // altogether, with one exception carved out for the case where nothing at all held still.
+  // The floor was put there so that three-out-of-four would not be called a storm — and
+  // three of four IS one. It leaves a single address standing, and a run that compared one
+  // address is not entitled to the word clean. What the floor actually let through was worse
+  // than the thing it was guarding against: ten of eleven addresses wobbling was read as too
+  // small a sample to judge, so all ten differences were subtracted and the run came back
+  // saying nothing that already worked had changed. Confident, clean, and about one address.
+  //
+  // Counting rather than thresholding also swallows the zero-steady case whole. Nothing held
+  // still means everything wobbled, which is already more than half, so the exception that
+  // used to be written out separately is now just the arithmetic. One rule, no floor, no
+  // exception, and no number anybody has to defend.
+  if (!wobble.measured || unstable <= wobble.steady) {
     return { stormy: false, share, looked, vanished, why: '' };
   }
   const percent = Math.round(share * 100);

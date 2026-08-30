@@ -540,6 +540,16 @@ static NSString *gDir = nil;
 static NSMutableArray *gCalls = nil;
 static NSMutableArray *gRefused = nil;
 
+// How far down a screen is read. A view hierarchy this deep is already extraordinary, and
+// the limit is here because the walk is recursive and a malformed tree that points at
+// itself would otherwise never come back. What it protects against is a hang; what it
+// costs, when it is ever reached, is a control nobody can see or tap. So the number of
+// places it turned round is counted and sent back with every answer, and the adapter turns
+// that into a hole. Until 2026-08-30 it returned nil and said nothing.
+static const int kDeepest = 60;
+static NSInteger gDeeper = 0;
+static NSInteger gFindDeeper = 0;
+
 static NSString *roleOf(UIAccessibilityTraits t) {
   if (t & UIAccessibilityTraitButton) return @"button";
   if (t & UIAccessibilityTraitLink) return @"link";
@@ -586,7 +596,8 @@ static NSArray *childrenOf(id node, int depth) {
 }
 
 static NSDictionary *describe(id node, int depth) {
-  if (!node || depth > 60) return nil;
+  if (!node) return nil;
+  if (depth > kDeepest) { gDeeper += 1; return nil; }
   if ([node respondsToSelector:@selector(accessibilityElementsHidden)] && [node accessibilityElementsHidden]) return nil;
   NSString *label = [node respondsToSelector:@selector(accessibilityLabel)] ? [node accessibilityLabel] : nil;
   NSString *ident = [node respondsToSelector:@selector(accessibilityIdentifier)] ? [node accessibilityIdentifier] : nil;
@@ -622,6 +633,7 @@ static void turnAccessibilityOn(void) {
 
 static NSArray *snapshotTree(void) {
   turnAccessibilityOn();
+  gDeeper = 0;
   NSMutableArray *out = [NSMutableArray array];
   for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
     if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -636,9 +648,11 @@ static NSArray *snapshotTree(void) {
 
 static id findElement(NSString *wanted) {
   __block id found = nil;
+  gFindDeeper = 0;
   __block void (^scan)(id, int);
   scan = ^(id node, int depth) {
-    if (found || !node || depth > 60) return;
+    if (found || !node) return;
+    if (depth > kDeepest) { gFindDeeper += 1; return; }
     NSString *ident = [node respondsToSelector:@selector(accessibilityIdentifier)] ? [node accessibilityIdentifier] : nil;
     NSString *label = [node respondsToSelector:@selector(accessibilityLabel)] ? [node accessibilityLabel] : nil;
     if ([ident isEqualToString:wanted] || [label isEqualToString:wanted]) { found = node; return; }
@@ -704,11 +718,16 @@ static void runCommand(NSDictionary *cmd, NSString *seq) {
   res[@"act"] = act;
   if ([act isEqualToString:@"tree"]) {
     res[@"tree"] = snapshotTree();
+    res[@"deeper"] = @(gDeeper);
   } else if ([act isEqualToString:@"tap"] || [act isEqualToString:@"type"]) {
     id el = findElement(cmd[@"target"]);
+    res[@"deeper"] = @(gFindDeeper);
     if (!el) {
       res[@"ok"] = @NO;
-      res[@"why"] = [NSString stringWithFormat:@"nothing on this screen is called '%@'", cmd[@"target"] ?: @""];
+      NSString *stopped = gFindDeeper > 0
+        ? [NSString stringWithFormat:@", and the search turned round at %d levels deep in %ld place(s), so it may be further in than that", kDeepest, (long)gFindDeeper]
+        : @"";
+      res[@"why"] = [NSString stringWithFormat:@"nothing on this screen is called '%@'%@", cmd[@"target"] ?: @"", stopped];
     } else if ([act isEqualToString:@"type"]) {
       BOOL ok = NO;
       if ([el isKindOfClass:[UITextField class]]) { [(UITextField *)el setText:cmd[@"text"]]; ok = YES; }
@@ -869,12 +888,17 @@ export async function buildProbe(opts) {
  * @property {boolean} probeAnswered   False means the screen cannot be read, only pictured.
  * @property {string} why
  * @property {(act: string, args?: Record<string, unknown>, timeoutMs?: number) => Promise<any>} ask
- * @property {() => Promise<MeaningNode[]>} tree
+ * @property {() => Promise<{nodes: MeaningNode[], deeper: number}>} tree
+ *   The screen, and how many places the read turned round at the depth limit without being
+ *   able to see what was below. `deeper` is almost always zero; when it is not, something on
+ *   screen was not read at all and the walk has to say so.
  * @property {(target: string) => Promise<{ok: boolean, why: string}>} tap
  * @property {(target: string, text: string) => Promise<{ok: boolean, why: string}>} type
  * @property {() => Promise<{calls: Call[], refused: Call[]}>} calls
  * @property {(file: string) => Promise<{ok: boolean, path: string, why: string}>} screenshot
- * @property {() => Promise<string[]>} filesWritten
+ * @property {(collect?: {unreadable?: string[]}) => Promise<string[]>} filesWritten
+ *   Pass an object with an `unreadable` array to be told which folders inside the app's own
+ *   container would not open. Without it those folders are still skipped and nothing says so.
  * @property {() => Promise<void>} close
  */
 
@@ -1030,7 +1054,10 @@ export async function openApp(opts) {
     ask,
     tree: async () => {
       const reply = await ask('tree', {}, 30_000);
-      return Array.isArray(reply?.tree) ? reply.tree : [];
+      return {
+        nodes: Array.isArray(reply?.tree) ? reply.tree : [],
+        deeper: Number(reply?.deeper ?? 0) || 0,
+      };
     },
     tap: async (target) => {
       const reply = await ask('tap', { target });
@@ -1045,7 +1072,7 @@ export async function openApp(opts) {
       return { calls: Array.isArray(reply?.calls) ? reply.calls : [], refused: Array.isArray(reply?.refused) ? reply.refused : [] };
     },
     screenshot: async (file) => takeScreenshot(opts.udid, file, { signal: opts.signal }),
-    filesWritten: async () => listContainerFiles(container),
+    filesWritten: async (collect = {}) => listContainerFiles(container, collect),
     close: async () => {
       await simctl(['terminate', opts.udid, facts.bundleId], { timeoutMs: 60_000 });
     },
@@ -1259,9 +1286,9 @@ function describeRole(role) {
  * mid-animation gives a tree with half a screen in it — which then reports as a difference
  * caused by nothing.
  *
- * @param {() => Promise<MeaningNode[]>} read
+ * @param {() => Promise<{nodes: MeaningNode[], deeper: number}>} read
  * @param {{tries?: number, gapMs?: number, signal?: AbortSignal}} [opts]
- * @returns {Promise<{tree: MeaningNode[], settled: boolean, tries: number, why: string}>}
+ * @returns {Promise<{tree: MeaningNode[], deeper: number, settled: boolean, tries: number, why: string}>}
  */
 export async function settleTree(read, opts = {}) {
   const tries = opts.tries ?? 6;
@@ -1269,18 +1296,25 @@ export async function settleTree(read, opts = {}) {
   let previous = '';
   /** @type {MeaningNode[]} */
   let tree = [];
+  // How many places the last read could not see past. It travels out with the tree because
+  // the caller has to report it: a control the reader turned round above is not on the screen
+  // as far as everything downstream is concerned, and nothing else would ever mention it.
+  let deeper = 0;
   for (let i = 1; i <= tries; i += 1) {
     if (opts.signal?.aborted) break;
-    tree = await read();
+    const read1 = await read();
+    tree = read1.nodes;
+    deeper = read1.deeper;
     const now = JSON.stringify(tree);
     if (now === previous && now !== '[]') {
-      return { tree, settled: true, tries: i, why: `The screen was the same twice in a row after ${i} looks.` };
+      return { tree, deeper, settled: true, tries: i, why: `The screen was the same twice in a row after ${i} looks.` };
     }
     previous = now;
     if (i < tries) await wait(gap);
   }
   return {
     tree,
+    deeper,
     settled: false,
     tries,
     why: `The screen was still changing after ${tries} looks, so what was read may have caught it mid-move. Anything that differs here should be treated as the app's own wobble until a second run says otherwise.`,
@@ -1340,6 +1374,9 @@ export async function readAppLog(opts) {
   return { lines, ok: true, why: `${lines.length} line${lines.length === 1 ? '' : 's'} the app itself wrote.` };
 }
 
+/** How much of one crash report is searched for the reason. @see readCrashes */
+const CRASH_REPORT_HEAD = 20_000;
+
 /**
  * Crashes, from the folder the operating system puts them in.
  *
@@ -1378,7 +1415,11 @@ export async function readCrashes(opts) {
     if (stat.mtimeMs < opts.since) continue;
     let reason = 'it stopped without saying why';
     try {
-      const text = (await fsp.readFile(full, 'utf8')).slice(0, 20_000);
+      // Only the head of the report is searched, because the rest of it is a megabyte of
+      // stack and the reason is written near the top. Getting this number wrong cannot hide
+      // a crash — the crash is recorded either way, with "it stopped without saying why" —
+      // it can only make the reason vaguer than it needed to be.
+      const text = (await fsp.readFile(full, 'utf8')).slice(0, CRASH_REPORT_HEAD);
       const term = /"termination"\s*:\s*\{[^}]*"indicator"\s*:\s*"([^"]+)"/.exec(text);
       const exception = /"exception"\s*:\s*\{[^}]*"type"\s*:\s*"([^"]+)"/.exec(text);
       const legacy = /Exception Type:\s*(.+)/.exec(text);
@@ -1415,10 +1456,16 @@ export async function readCrashes(opts) {
  * What is NOT rubbed out is any random id in a name the app chose itself. A database file
  * that used to have a stable name and now has a random one is a real finding.
  *
+ * A FOLDER IT CANNOT OPEN IS NAMED. It used to `return` on the read that failed, which threw
+ * away that folder and every file underneath it in silence — so "the app wrote nothing there"
+ * and "nobody could look" came back as the same answer, and the second one is not a pass.
+ *
  * @param {string} container
+ * @param {{unreadable?: string[]}} [collect]
+ *   Hand in an object and any folder that would not open is pushed onto `collect.unreadable`.
  * @returns {Promise<string[]>}
  */
-export async function listContainerFiles(container) {
+export async function listContainerFiles(container, collect = {}) {
   /** @type {string[]} */
   const out = [];
   /** @param {string} dir */
@@ -1427,7 +1474,10 @@ export async function listContainerFiles(container) {
     let entries = [];
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      const where = path.relative(container, dir) || '.';
+      const said = String(/** @type {any} */ (error)?.code ?? /** @type {any} */ (error)?.message ?? 'no reason given');
+      if (collect.unreadable) collect.unreadable.push(`${where} (${said})`);
       return;
     }
     for (const entry of entries) {

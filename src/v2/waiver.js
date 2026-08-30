@@ -36,7 +36,6 @@
  * different difference and is reported.
  */
 
-import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
@@ -48,9 +47,10 @@ import {
   readIntent,
   readIntentById,
   referenceStamp,
+  fingerprintTree,
+  treeMovedSince,
   readJsonFile,
   writeJsonAtomic,
-  shortDigest,
 } from './intent.js';
 
 /**
@@ -71,10 +71,15 @@ import {
  */
 export const WAIVER_BUDGET = 5;
 
-/** How many differences of one finding go into its fingerprint. Clusters can hold hundreds. */
-const FINGERPRINT_DIFFERENCES = 40;
-
-/** How many dead waivers are kept per product, so a summary can still say what expired. */
+/**
+ * How many dead waivers are kept per product, so a summary can still say what expired.
+ *
+ * LIVE ONES ARE NEVER PRUNED, which is what matters: the budget, the gates and whether a
+ * difference is covered are all worked out from those alone and none of them can be affected
+ * by this number. What it can affect is the sentence "three waivers expired when you
+ * shipped", which counts the dead ones still on disk — so after fifty of them, spread over
+ * ten ships or more, that number is the recent history rather than the whole of it.
+ */
 const KEEP_EXPIRED = 50;
 
 // ---------------------------------------------------------------------------
@@ -94,12 +99,22 @@ const KEEP_EXPIRED = 50;
  * @property {string} fingerprint      Pins the exact difference, values included.
  * @property {string} finding          The finding's own id, when it had one.
  * @property {string} summary          The finding's title, kept so this reads without a check.
- * @property {string[]} paths          The addresses involved, trimmed.
+ * @property {string[]} paths          The first few addresses involved, for somebody reading
+ *                                    this back later. Nothing is decided from them: what the
+ *                                    waiver actually covers is `fingerprint`, which takes in
+ *                                    every difference with no ceiling at all.
  * @property {FindingClass} class      What the engine called it. Always ordinary — see gate 1.
  * @property {string} why              The agent's reason, in its own words.
  * @property {string} intentId
  * @property {string} intentSummary    Copied, so a pruned intent does not orphan the waiver.
  * @property {string} ordering         What was known about when the intent was sealed.
+ * @property {{moved: boolean, knowable: boolean, say: string}} codeSince
+ *                                    Whether the code moved between sealing that intent and
+ *                                    writing this. Not a gate — a moved tree is what an
+ *                                    intent sealed BEFORE the work is supposed to look like.
+ *                                    It is recorded because the alternative is that nobody
+ *                                    reading this waiver a month later can tell whether the
+ *                                    intent describes the build that was actually checked.
  * @property {IntentCoverage} coverage How well it matched what was declared, and how sure.
  * @property {string} at               ISO. Written here, never supplied.
  * @property {string} [by]
@@ -284,6 +299,12 @@ export async function waive(store, what) {
     };
   }
 
+  // The last of the three things intent.js says its tree fingerprint makes checkable. The
+  // other two are gates above; this one cannot be, because both answers are legitimate — an
+  // intent sealed before the work SHOULD see a moved tree, and one sealed after it should
+  // not. So it is written down rather than judged, and a person reading the waiver decides.
+  const codeSince = treeMovedSince(intent, await fingerprintTree(store.root));
+
   /** @type {Waiver} */
   const waiver = {
     id: `waiver-${crypto.randomBytes(5).toString('hex')}`,
@@ -297,6 +318,7 @@ export async function waive(store, what) {
     intentId: intent.id,
     intentSummary: intent.summary,
     ordering: intent.ordering,
+    codeSince,
     coverage,
     at: new Date().toISOString(),
     reference: stamp,
@@ -318,6 +340,7 @@ export async function waive(store, what) {
       `Recorded as intended: ${waiver.summary}`,
       `Your reason, kept: ${why}`,
       `Matched against what you sealed: ${coverage.why} (${coverage.confidence} match)`,
+      codeSince.say,
       '',
       `${left} of your ${WAIVER_BUDGET} waivers left before the next ship. This one is pinned to the exact values that differ and to the reference in force now: if either moves, it stops covering anything.`,
       'This is not approval. Nothing becomes the new normal until a build ships. Say in what you report back that you waived this, and why.',
@@ -372,45 +395,6 @@ export function waiverFor(waivers, finding) {
 }
 
 /**
- * What the closing summary needs: how many were waived, how many are left, what expired, and one
- * sentence saying so.
- *
- * Waivers must be visible, not quiet. This is the function that makes them so, and a summary
- * that does not use it is hiding something an agent decided on its own.
- *
- * @param {Store} store
- * @param {string} product
- * @returns {Promise<{budget: number, spent: number, left: number, active: Waiver[], expired: number, reference: string, line: string}>}
- */
-export async function countWaivers(store, product) {
-  const stamp = await referenceStamp(store, product);
-  const all = await allWaivers(store, product);
-  const active = all.filter((w) => isLive(w, stamp));
-  const expired = all.length - active.length;
-  const left = Math.max(0, WAIVER_BUDGET - active.length);
-
-  const line =
-    active.length === 0
-      ? `Nothing was waived${expired > 0 ? `, and ${expired} older waiver${expired === 1 ? '' : 's'} died when the reference last moved` : ''}.`
-      : `${active.length} difference${active.length === 1 ? ' was' : 's were'} recorded as intended, not approved: ${active
-          .map((w) => trim(w.summary, 90))
-          .join('; ')}. ${left} of the ${WAIVER_BUDGET} allowed before a person has to look ${left === 1 ? 'is' : 'are'} left.`;
-
-  return { budget: WAIVER_BUDGET, spent: active.length, left, active, expired, reference: stamp, line };
-}
-
-/**
- * Forget a product's waivers. Housekeeping, and the way a test starts clean.
- *
- * @param {Store} store
- * @param {string} product
- * @returns {Promise<void>}
- */
-export async function forgetWaivers(store, product) {
-  await fsp.rm(waiversFile(store, product), { force: true });
-}
-
-/**
  * What a waiver is pinned to.
  *
  * Every value that differs goes in, so the waiver covers this break and not the address. A
@@ -418,20 +402,46 @@ export async function forgetWaivers(store, product) {
  * which errs towards a person looking at something they have already seen rather than towards a
  * new break hiding behind an old excuse. That is the right way round.
  *
+ * EVERY difference, and there is deliberately no ceiling on that. Until 2026-08-30 this took
+ * the first forty and stopped, and the sentence above was simply false: a waiver written about
+ * a three-hundred-address finding went on covering it after a value past the fortieth turned
+ * into something else. The addresses were all still there, the title still read the same, the
+ * cluster was still one finding — so the pin matched, the difference was filed as intended, and
+ * nobody was ever shown the one row that had actually broken. That is the whole failure this
+ * file exists to prevent, arriving through the file itself.
+ *
+ * The cost of having no ceiling is a hash over text the caller is already holding in memory,
+ * which is nothing next to being wrong. The tuples are sorted first so that two runs which
+ * found the same differences in a different order still pin to the same thing; the number of
+ * them goes in as well, so a cluster that merely GREW cannot match a waiver written about the
+ * smaller one.
+ *
  * @param {Finding} finding
  * @returns {string}
  */
 export function fingerprintFinding(finding) {
-  const differences = (finding.differences ?? [])
-    .slice(0, FINGERPRINT_DIFFERENCES)
-    .map((d) => [d.path, d.kind, face(d.reference), face(d.candidate)]);
+  const differences = finding.differences ?? [];
+  const hash = crypto.createHash('sha256');
+  /** @param {unknown} part */
+  const eat = (part) => {
+    // JSON escapes every newline inside a value, so a newline is a separator nothing in the
+    // text can forge — two different findings cannot run together into one identical digest.
+    hash.update(`${JSON.stringify(part) ?? 'null'}\n`);
+  };
+
+  eat(finding.title ?? '');
+  eat([...(finding.paths ?? [])].sort());
+  eat(differences.length);
+  const rows = differences.map((d) => JSON.stringify([d.path, d.kind, face(d.reference), face(d.candidate)]));
+  rows.sort();
+  for (const row of rows) hash.update(`${row}\n`);
+
   // A finding with no differences attached, which some callers pass, still has to be pinnable,
   // so the sample and the paths stand in for them.
-  const fallback =
-    differences.length > 0
-      ? []
-      : [finding.sample?.path ?? '', finding.sample?.kind ?? '', face(finding.sample?.reference), face(finding.sample?.candidate)];
-  return shortDigest([finding.title ?? '', [...(finding.paths ?? [])].sort(), differences, fallback]);
+  if (differences.length === 0) {
+    eat([finding.sample?.path ?? '', finding.sample?.kind ?? '', face(finding.sample?.reference), face(finding.sample?.candidate)]);
+  }
+  return hash.digest('hex').slice(0, 16);
 }
 
 // ---------------------------------------------------------------------------

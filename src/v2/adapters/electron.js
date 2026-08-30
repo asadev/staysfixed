@@ -598,6 +598,20 @@ export async function openApp(opts) {
 }
 
 /**
+ * A name a picture can be saved under, cut with a fingerprint of the whole on the end so two
+ * long names can never land on one file.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function pictureName(name) {
+  const clean = String(name).replace(/[^a-zA-Z0-9._-]+/g, '-');
+  if (clean === '') return 'a-walk';
+  if (clean.length <= 60) return clean;
+  return `${clean.slice(0, 51)}-${crypto.createHash('sha256').update(clean).digest('hex').slice(0, 8)}`;
+}
+
+/**
  * Would this request leave the machine?
  *
  * The app's own files, its own data URLs and anything on this computer are its business.
@@ -641,6 +655,17 @@ export function asAddress(text, limit = 110) {
 }
 
 /**
+ * How much of one control's own text is kept at its address.
+ *
+ * It protects the store and the diff: a text area holding a whole document would otherwise put
+ * that document into every capture and into every sentence written about it. Two hundred bytes
+ * is enough to recognise a field by. What breaks if it is wrong is nothing silent — the two
+ * ends and the exact byte count are kept either way, so getting this number wrong makes the
+ * record bigger or smaller, never quieter.
+ */
+const CONTROL_TEXT_BYTES = 200;
+
+/**
  * The states worth writing down.
  *
  * Short, and it is short on purpose. These are the things a person can SEE about a control:
@@ -665,21 +690,37 @@ const ROLES_WORTH_NOTHING = new Set(['generic', 'none', 'presentation', 'InlineT
  * identical, while a button that lost its label, went missing or went grey all show up as
  * exactly one difference each.
  *
+ * NOTHING HERE IS CUT WITHOUT SAYING SO. A control's own text used to be kept as its first
+ * two hundred characters and nothing else — no length, no fingerprint — so two builds whose
+ * text differed only past character two hundred recorded the same string and compared equal.
+ * A total, a message or an error at the end of a long field could change completely and the
+ * run would report that nothing had changed. `trimForStorage` had already solved this exactly
+ * once, for the output of a command: keep both ends and the EXACT number of bytes discarded,
+ * because a length survives normalisation while a digest of the whole text would not. It was
+ * never applied here. It is now, and what is still not covered — a change in the middle that
+ * leaves the length identical — is counted on `trimmed` and reported as a hole by the caller.
+ *
+ * The NAME is no longer cut here at all. It is part of an address, and cutting an address
+ * merges two things into one: two paragraphs sharing their first hundred and twenty
+ * characters became one address, so an edit further along either of them was invisible.
+ * `asAddress` already cuts addresses properly, leaving a fingerprint of the whole behind, and
+ * the caller passes every address through it.
+ *
  * @param {any[]} nodes    Straight from Accessibility.getFullAXTree.
  * @param {(text: string) => string} [tidy]   Rubs our own footprint out of the names.
- * @returns {{address: string, role: string, name: string, state: Record<string, string|number|boolean>}[]}
+ * @returns {{address: string, role: string, name: string, state: Record<string, string|number|boolean>, trimmed: boolean}[]}
  */
 export function readMeaning(nodes, tidy = (t) => t) {
   /** @type {Map<string, number>} */
   const seen = new Map();
-  /** @type {{address: string, role: string, name: string, state: Record<string, string|number|boolean>}[]} */
+  /** @type {{address: string, role: string, name: string, state: Record<string, string|number|boolean>, trimmed: boolean}[]} */
   const rows = [];
 
   for (const node of nodes ?? []) {
     if (!node || node.ignored) continue;
     const role = String(node.role?.value ?? '');
     if (!role || ROLES_WORTH_NOTHING.has(role)) continue;
-    const name = tidy(String(node.name?.value ?? '')).trim().replace(/\s+/g, ' ').slice(0, 120);
+    const name = tidy(String(node.name?.value ?? '')).trim().replace(/\s+/g, ' ');
 
     /** @type {Record<string, string|number|boolean>} */
     const state = {};
@@ -690,9 +731,18 @@ export function readMeaning(nodes, tidy = (t) => t) {
       if (value === undefined || value === false || value === 'false') continue;
       state[key] = typeof value === 'object' ? String(value) : value;
     }
+    let trimmed = false;
     const own = node.value?.value;
-    if (own !== undefined && own !== null && String(own) !== '') state.value = tidy(String(own)).slice(0, 200);
-    if (node.description?.value) state.described = tidy(String(node.description.value)).slice(0, 200);
+    if (own !== undefined && own !== null && String(own) !== '') {
+      const kept = trimForStorage(tidy(String(own)), CONTROL_TEXT_BYTES);
+      state.value = kept.text;
+      trimmed = trimmed || kept.truncated;
+    }
+    if (node.description?.value) {
+      const kept = trimForStorage(tidy(String(node.description.value)), CONTROL_TEXT_BYTES);
+      state.described = kept.text;
+      trimmed = trimmed || kept.truncated;
+    }
 
     // A control with no name is only worth an address when it says something else about
     // itself; an anonymous, stateless box is noise in every reading it appears in.
@@ -706,6 +756,7 @@ export function readMeaning(nodes, tidy = (t) => t) {
       role,
       name,
       state,
+      trimmed,
     });
   }
   return rows;
@@ -929,6 +980,18 @@ export function describeApp(input) {
         Object.keys(row.state).length === 0 ? '.' : `, and it is ${Object.entries(row.state).map(([k, v]) => (v === true ? k : `${k}: ${v}`)).join(', ')}.`}`,
       journey: id,
       surface: 'electron',
+    }));
+  }
+  const tooLong = meaning.filter((row) => row.trimmed).length;
+  if (tooLong > 0) {
+    out.push(notCovered({
+      channel: 'meaning',
+      path: joinPath('count', id, 'controls holding more text than is kept'),
+      reason: 'too big',
+      says:
+        `${tooLong} control${tooLong === 1 ? '' : 's'} on this screen ${tooLong === 1 ? 'holds' : 'hold'} more text than is kept at one address. ` +
+        'Both ends of it are compared and so is the exact number of bytes in between, so a change to either end, or one that makes the text longer or shorter, is still caught. ' +
+        'A change buried in the middle that leaves the length exactly the same is not, and that is a hole rather than a pass.',
     }));
   }
   out.push(observation({
@@ -1572,7 +1635,10 @@ async function takePicture(app, journey, ctx) {
     const shot = await app.browser.send('Page.captureScreenshot', { format: 'png' }, app.sessionId);
     const bytes = Buffer.from(String(shot?.data ?? ''), 'base64');
     if (bytes.length === 0) throw new Error('the app sent back an empty picture');
-    const file = path.join(ctx.evidenceDir, `${journey.name.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 60)}.png`);
+    // Fingerprinted rather than simply cut. Two journeys whose names agreed for sixty
+    // characters saved their pictures over each other, and the evidence offered for one
+    // finding was then a photograph of a different window, with nothing about it looking wrong.
+    const file = path.join(ctx.evidenceDir, `${pictureName(journey.name)}.png`);
     await fsp.mkdir(ctx.evidenceDir, { recursive: true });
     await fsp.writeFile(file, bytes);
     return observation({

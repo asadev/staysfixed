@@ -43,6 +43,7 @@
  *   it rather than quietly walking a thinner path.
  */
 
+import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
@@ -104,6 +105,44 @@ const ready = new Map();
 // ---------------------------------------------------------------------------
 
 /**
+ * How many named controls are collected before the search gives up.
+ *
+ * It protects memory and the size of a capture: every one of these becomes an address that is
+ * stored twice per run. Four thousand is far more than any app this has been pointed at
+ * declares. If it is ever wrong the run does not go quiet — hitting it is reported as a hole
+ * and the count is described as a floor rather than a total.
+ */
+const MOST_DOORS = 4000;
+
+/**
+ * How deep into the project's folders the search for named controls goes.
+ *
+ * Symbolic links are not followed — `entry.isDirectory()` is false for one — so this is not
+ * protecting against a loop; it is protecting against spending a long time in a tree where
+ * the interesting code is nowhere near the bottom. Twenty-four is deeper than any iPhone
+ * project seen so far, and it used to be twelve, which a monorepo passes on its way to the
+ * app. Whatever is left out at this depth is named.
+ */
+const DEEPEST_SOURCE_FOLDER = 24;
+
+/**
+ * Why something would not open, in words somebody can act on. A bare `EACCES` sends people
+ * looking for a bug in this tool.
+ *
+ * @param {unknown} error
+ * @returns {string}
+ */
+function whyNotOpened(error) {
+  const code = String(/** @type {any} */ (error)?.code ?? '');
+  if (code === 'EACCES' || code === 'EPERM') return 'this account does not have permission to open it';
+  if (code === 'ENOENT') return 'it was there when the walk started and is not there now';
+  if (code === 'ENOTDIR') return 'something in the way is a file, not a folder';
+  if (code === 'ELOOP') return 'the links in it point round in a circle';
+  const said = String(/** @type {any} */ (error)?.message ?? error ?? '').trim();
+  return said === '' ? 'the reason was not given' : said;
+}
+
+/**
  * Every control the app declares by name, read straight out of the code.
  *
  * Free, exact, and it sees doors no walkthrough ever opens. `accessibilityIdentifier("x")`
@@ -112,31 +151,56 @@ const ready = new Map();
  * of what the app was built to expose, which is the only honest denominator for "how deep
  * is this check really".
  *
+ * EVERY ONE OF THE LIMITS HERE IS REPORTED. There are three — how deep the folders go, how
+ * many controls are collected, and anything that would not open — and until 2026-08-30 all
+ * three ended with a bare `return` or `continue`. A run that stopped at four thousand
+ * controls, or at a folder it had no permission on, handed back a list that looked exactly
+ * like a complete one, and the ledger counted its coverage against a denominator that was
+ * quietly wrong. Whatever is left out now comes back on `limits`, in sentences, and the
+ * caller turns each one into a hole.
+ *
  * @param {string} root
- * @param {{limit?: number}} [opts]
- * @returns {Promise<{doors: {id: string, file: string, line: number}[], filesRead: number, tests: string[]}>}
+ * @param {{limit?: number, deepest?: number}} [opts]
+ * @returns {Promise<{doors: {id: string, file: string, line: number}[], filesRead: number, tests: string[], limits: string[]}>}
  */
 export async function readDeclaredDoors(root, opts = {}) {
-  const limit = opts.limit ?? 4000;
+  const limit = opts.limit ?? MOST_DOORS;
+  const deepest = opts.deepest ?? DEEPEST_SOURCE_FOLDER;
   /** @type {{id: string, file: string, line: number}[]} */
   const doors = [];
   /** @type {string[]} */
   const tests = [];
+  /** @type {string[]} */
+  const limits = [];
+  /** @type {string[]} */
+  const tooDeep = [];
   let filesRead = 0;
+  let stoppedAtLimit = false;
   const skip = new Set(['node_modules', '.git', 'Pods', 'Carthage', 'DerivedData', 'build', '.build', 'dist', 'vendor']);
 
   /** @param {string} dir @param {number} depth */
   const walk = async (dir, depth) => {
-    if (depth > 12 || doors.length > limit) return;
+    if (doors.length > limit) {
+      stoppedAtLimit = true;
+      return;
+    }
+    if (depth > deepest) {
+      tooDeep.push(path.relative(root, dir) || '.');
+      return;
+    }
     /** @type {import('node:fs').Dirent[]} */
     let entries = [];
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      limits.push(`"${path.relative(root, dir) || '.'}" could not be opened — ${whyNotOpened(error)} — so any control named anywhere inside it is invisible to this run.`);
       return;
     }
     for (const entry of entries) {
-      if (doors.length > limit) return;
+      if (doors.length > limit) {
+        stoppedAtLimit = true;
+        return;
+      }
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (skip.has(entry.name) || entry.name.startsWith('.') || entry.name.endsWith('.app')) continue;
@@ -148,7 +212,8 @@ export async function readDeclaredDoors(root, opts = {}) {
       let text = '';
       try {
         text = await fsp.readFile(full, 'utf8');
-      } catch {
+      } catch (error) {
+        limits.push(`"${path.relative(root, full)}" could not be read — ${whyNotOpened(error)} — so any control it names is invisible to this run.`);
         continue;
       }
       filesRead += 1;
@@ -171,12 +236,36 @@ export async function readDeclaredDoors(root, opts = {}) {
   };
   await walk(root, 0);
 
+  if (stoppedAtLimit) {
+    limits.push(
+      `The search stopped after ${limit} named controls, so any beyond that were not read. ` +
+      'The count of controls this app declares is therefore a floor, not a total, and the share of them a walk reached is measured against the wrong denominator.'
+    );
+  }
+  if (tooDeep.length > 0) {
+    limits.push(
+      `${tooDeep.length} folder${tooDeep.length === 1 ? '' : 's'} sat more than ${deepest} deep and ${tooDeep.length === 1 ? 'was' : 'were'} not looked in: ` +
+      `${tooDeep.slice(0, 3).join(', ')}${tooDeep.length > 3 ? `, and ${tooDeep.length - 3} more` : ''}. Any control named inside is invisible to this run.`
+    );
+  }
+
   /** @type {Map<string, {id: string, file: string, line: number}>} */
   const unique = new Map();
   for (const door of doors) if (!unique.has(door.id)) unique.set(door.id, door);
-  return { doors: [...unique.values()].sort((a, b) => a.id.localeCompare(b.id)), filesRead, tests: tests.sort() };
+  return { doors: [...unique.values()].sort((a, b) => a.id.localeCompare(b.id)), filesRead, tests: tests.sort(), limits };
 }
 
+
+/**
+ * How long one piece of an address may be.
+ *
+ * A path has a length limit of its own and a label read off a screen can be a paragraph, so
+ * something has to give. What this protects against is one runaway label taking a whole run
+ * down; what would break if it were wrong is only how much of a name a reader sees, because
+ * anything cut off leaves a digest of the whole behind and two different things can never
+ * land on one address.
+ */
+const LONGEST_SEGMENT = 160;
 
 /**
  * Make one piece of the app's own words safe to use as an address.
@@ -188,14 +277,39 @@ export async function readDeclaredDoors(root, opts = {}) {
  * down, the words are trimmed, folded onto one line, and replaced with a plain description
  * when there is nothing left of them.
  *
+ * IT IS CUT WITH A FINGERPRINT, NEVER CUT ALONE. This used to end in `.slice(0, 160)`, and
+ * cutting an address merges two things into one: two log lines or two labels that agree for
+ * a hundred and sixty characters became one address, so the second answer written there was
+ * thrown away and whatever it said was never compared with anything. A short digest of the
+ * whole text goes on the end instead, so long-and-different stays different while
+ * long-and-identical stays identical. The desktop lane has done this since it was written;
+ * this is the same idea, and it should have been here from the start.
+ *
  * @param {unknown} text
  * @param {string} [whenEmpty]
  * @returns {string}
  */
 export function tidySegment(text, whenEmpty = 'unnamed') {
   const out = String(text ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return out === '' ? whenEmpty : out.slice(0, 160).trim();
+  if (out === '') return whenEmpty;
+  if (out.length <= LONGEST_SEGMENT) return out;
+  const mark = crypto.createHash('sha256').update(out).digest('hex').slice(0, 8);
+  return `${out.slice(0, LONGEST_SEGMENT - 12).trim()}… (${mark})`;
 }
+
+/**
+ * How many built app bundles are collected before the search gives up, and how deep it goes.
+ *
+ * Neither protects against anything unbounded — symbolic links are not followed — so both are
+ * about time: a project with a large `build` folder can hold a great many bundles, and reading
+ * every one of them to pick the first is wasted work. Twelve deep clears a monorepo whose app
+ * sits under `apps/ios/build/Build/Products/Debug-iphonesimulator`; eight, which it used to
+ * be, does not. Hitting either is said out loud in the sentence this hands back.
+ */
+const MOST_APP_CANDIDATES = 40;
+
+/** @see MOST_APP_CANDIDATES */
+const DEEPEST_APP_FOLDER = 12;
 
 /**
  * Find the built app.
@@ -206,32 +320,51 @@ export function tidySegment(text, whenEmpty = 'unnamed') {
  * `.app` is looked for where builds land, and when there isn't one the answer is a clear
  * sentence saying which command would make one — never a silent skip.
  *
+ * WHERE IT STOPPED LOOKING IS PART OF THE ANSWER. The search gave up at eight folders deep
+ * or forty candidates and said nothing about either, so "no built iPhone app was found under
+ * this project" was said with equal confidence about a project with no app in it and about a
+ * monorepo whose app sits one folder past where the search turned round. Both of those end
+ * the same way — the phone is not checked — and only one of them is the person's fault.
+ *
  * @param {string} root
  * @param {Record<string, any>} [config]
- * @returns {Promise<{ok: boolean, appPath: string, why: string, candidates: string[]}>}
+ * @returns {Promise<{ok: boolean, appPath: string, why: string, candidates: string[], limits: string[]}>}
  */
 export async function findAppBundle(root, config = {}) {
   if (config.app) {
     const full = path.isAbsolute(config.app) ? config.app : path.join(root, config.app);
     try {
       await fsp.access(path.join(full, 'Info.plist'));
-      return { ok: true, appPath: full, why: `Using the app named in the settings: ${full}`, candidates: [full] };
+      return { ok: true, appPath: full, why: `Using the app named in the settings: ${full}`, candidates: [full], limits: [] };
     } catch {
-      return { ok: false, appPath: '', why: `The settings point at "${config.app}" but there is no iPhone app bundle there.`, candidates: [] };
+      return { ok: false, appPath: '', why: `The settings point at "${config.app}" but there is no iPhone app bundle there.`, candidates: [], limits: [] };
     }
   }
 
   /** @type {string[]} */
   const found = [];
+  /** @type {string[]} */
+  const limits = [];
+  /** @type {string[]} */
+  const tooDeep = [];
+  let stoppedAtLimit = false;
   const skip = new Set(['node_modules', '.git', 'Pods', 'Carthage']);
   /** @param {string} dir @param {number} depth */
   const walk = async (dir, depth) => {
-    if (depth > 8 || found.length > 40) return;
+    if (found.length > MOST_APP_CANDIDATES) {
+      stoppedAtLimit = true;
+      return;
+    }
+    if (depth > DEEPEST_APP_FOLDER) {
+      tooDeep.push(path.relative(root, dir) || '.');
+      return;
+    }
     /** @type {import('node:fs').Dirent[]} */
     let entries = [];
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      limits.push(`"${path.relative(root, dir) || '.'}" could not be opened — ${whyNotOpened(error)} — so a built app inside it was not found.`);
       return;
     }
     for (const entry of entries) {
@@ -252,23 +385,39 @@ export async function findAppBundle(root, config = {}) {
   };
   await walk(root, 0);
 
+  if (stoppedAtLimit) {
+    limits.push(`The search stopped after ${MOST_APP_CANDIDATES} app bundles, so anywhere it had not reached by then was not looked at.`);
+  }
+  if (tooDeep.length > 0) {
+    limits.push(
+      `${tooDeep.length} folder${tooDeep.length === 1 ? '' : 's'} sat more than ${DEEPEST_APP_FOLDER} deep and ${tooDeep.length === 1 ? 'was' : 'were'} not looked in: ` +
+      `${tooDeep.slice(0, 3).join(', ')}${tooDeep.length > 3 ? `, and ${tooDeep.length - 3} more` : ''}.`
+    );
+  }
+  // Where the search stopped goes into the sentence, always. "Nothing was found" and "nothing
+  // was found where I looked" are different answers, and only the second one tells somebody
+  // to point at the app by hand.
+  const said = limits.length > 0 ? ` Where this search stopped: ${limits.join(' ')}` : '';
+
   const simulatorBuilds = found.filter((f) => /iphonesimulator|Debug-iphonesimulator|Release-iphonesimulator|Build\/Products/i.test(f));
   const pick = simulatorBuilds[0] ?? found[0];
   if (!pick) {
     return {
       ok: false,
       appPath: '',
-      why: 'No built iPhone app was found under this project. This adapter never builds one itself, because building somebody else\'s Xcode project with the wrong scheme produces a build that is not the one they meant.',
+      why: `No built iPhone app was found under this project. This adapter never builds one itself, because building somebody else's Xcode project with the wrong scheme produces a build that is not the one they meant.${said}`,
       candidates: [],
+      limits,
     };
   }
   return {
     ok: true,
     appPath: pick,
-    why: found.length === 1
+    why: (found.length === 1
       ? `Found one built app: ${path.basename(pick)}.`
-      : `Found ${found.length} built apps and picked the simulator one: ${path.basename(pick)}. Name a different one with {"app": "..."} in the settings.`,
+      : `Found ${found.length} built apps and picked the simulator one: ${path.basename(pick)}. Name a different one with {"app": "..."} in the settings.`) + said,
     candidates: found,
+    limits,
   };
 }
 
@@ -360,7 +509,15 @@ export function journeysFrom(input) {
  * @returns {string}
  */
 function safeName(name) {
-  return String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'a-walk';
+  const clean = String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (clean === '') return 'a-walk';
+  if (clean.length <= 60) return clean;
+  // Two journeys whose names agree for sixty characters used to end up with one name between
+  // them, and a journey's name is the first segment of every address it writes: the second
+  // walk's answers landed on the first walk's addresses, and one of the two was thrown away
+  // at the door. The digest is of the whole name, so this cannot happen however long they are.
+  const mark = crypto.createHash('sha256').update(clean).digest('hex').slice(0, 8);
+  return `${clean.slice(0, 51)}-${mark}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +594,7 @@ export const iosAdapter = defineAdapter({
       });
     }
 
-    const { doors, tests, filesRead } = await readDeclaredDoors(project.root);
+    const { doors, tests, filesRead, limits } = await readDeclaredDoors(project.root);
     /** @type {AppFacts|null} */
     let facts = null;
     if (found.ok) {
@@ -449,8 +606,20 @@ export const iosAdapter = defineAdapter({
       missing.push({
         what: `a way to run the app's own ${tests.length} interface test file${tests.length === 1 ? '' : 's'}`,
         unlocks: 'the best journeys this project has. They are already written, they already know how to sign in and get to the interesting screens, and nothing here is walking them',
-        howToGet: `Run them once yourself with: xcodebuild test-without-building -scheme <YourScheme> -destination "platform=iOS Simulator,name=iPhone 16". Once that works, put {"suite": {"scheme": "<YourScheme>"}} under "ios" in the settings and they become journeys.`,
+        // NO SETTING IS OFFERED HERE, and that is the honest answer rather than a missing
+        // feature. This used to end "put {"suite": {"scheme": "..."}} under "ios" in the
+        // settings and they become journeys" — and nothing anywhere read `ios.suite`. Somebody
+        // following that sentence would have written the setting, seen the same message on the
+        // next run, and had no way at all to tell whether the tool or their spelling was at
+        // fault. A door that is painted on is worse than no door: it costs somebody an
+        // afternoon and it costs this tool the benefit of the doubt everywhere else.
+        howToGet:
+          'There is nothing to switch on yet. Running these needs an Xcode build of the project — a scheme, signing settings, minutes of build time — and this adapter never builds anything, because building somebody else\'s project with a guessed scheme produces a build that is not the one they meant. ' +
+          'What you can do today is run them yourself: xcodebuild test-without-building -scheme <YourScheme> -destination "platform=iOS Simulator,name=iPhone 16". They are found and counted here so the hole is visible in every run, and each one is reported as a journey that was not walked.',
       });
+    }
+    for (const said of limits) {
+      notes.push(`${said} That makes the count of named controls above a floor rather than a total.`);
     }
 
     const applies = Boolean(machine.isMac) && (found.ok || doors.length > 0 || Boolean(config.app));
@@ -530,6 +699,9 @@ export const iosAdapter = defineAdapter({
     const doors = await readDeclaredDoors(build.root);
 
     ready.set(build.id, {
+      // Everything the two searches could not see, carried through to the walk so it lands in
+      // the coverage ledger rather than in a sentence nobody reads twice.
+      limits: [...doors.limits, ...found.limits],
       device: device.device,
       facts,
       appPath: found.appPath,
@@ -591,7 +763,7 @@ export const iosAdapter = defineAdapter({
       })];
     }
     if (journey.name === 'what-the-app-declares') {
-      return declaredObservations(kept.facts, kept.doors, journey.name);
+      return declaredObservations(kept.facts, kept.doors, journey.name, kept.limits ?? []);
     }
 
     return walkObservations(journey, kept, ctx);
@@ -621,9 +793,13 @@ export const iosAdapter = defineAdapter({
  * @param {AppFacts} facts
  * @param {{id: string, file: string, line: number}[]} doors
  * @param {string} journey
+ * @param {string[]} [limits]
+ *   Everything the searches that produced `doors` could not see. Each one becomes a hole,
+ *   because the count below is the denominator the ledger measures a walk's depth against,
+ *   and a denominator that quietly missed a folder flatters every run made against it.
  * @returns {Observation[]}
  */
-export function declaredObservations(facts, doors, journey) {
+export function declaredObservations(facts, doors, journey, limits = []) {
   /** @type {Observation[]} */
   const out = [];
   const say = /** @param {string} text */ (text) => text;
@@ -684,8 +860,23 @@ export function declaredObservations(facts, doors, journey) {
     channel: 'counters', journey, surface: 'ios',
     path: joinPath('count', 'doors', 'declared'),
     value: countBucket(doors.length),
-    says: say(`${doors.length} named control${doors.length === 1 ? '' : 's'} were read straight out of the code, without running anything.`),
+    says: say(
+      `${doors.length} named control${doors.length === 1 ? '' : 's'} were read straight out of the code, without running anything.` +
+      (limits.length > 0 ? ` That is a floor rather than a total: ${limits.length} thing${limits.length === 1 ? '' : 's'} the search could not see ${limits.length === 1 ? 'is' : 'are'} listed beside this.` : '')
+    ),
   }));
+
+  for (let i = 0; i < limits.length; i += 1) {
+    out.push(notCovered({
+      channel: 'contract',
+      // Numbered rather than named after the folder: the folder is inside the sentence, and an
+      // address built out of a path that differs between two machines would report itself as a
+      // difference on every run.
+      path: joinPath('contract', 'not read', String(i + 1)),
+      reason: 'not supported here',
+      says: limits[i],
+    }));
+  }
 
   return out;
 }
@@ -823,6 +1014,20 @@ async function walkObservations(journey, kept, ctx) {
         }));
       }
 
+      // Something on this screen sat deeper than the reader goes. Everything under it is
+      // absent from `things` below, so without this line a control that was never looked at
+      // and a control that is not there read exactly the same.
+      if (settled.deeper > 0) {
+        out.push(notCovered({
+          channel: 'meaning',
+          path: joinPath('screen', name, tidySegment(label, 'a checkpoint'), 'read all the way down'),
+          reason: 'not supported here',
+          says:
+            `${settled.deeper} thing${settled.deeper === 1 ? '' : 's'} on this screen sat deeper than the reader goes, so ${settled.deeper === 1 ? 'it and everything under it' : 'they and everything under them'} were not read. ` +
+            'Nothing down there can be compared, tapped or typed into, and it is a hole rather than an empty part of the screen. A view hierarchy this deep is nearly always something nesting inside itself by mistake.',
+        }));
+      }
+
       for (const thing of things) {
         out.push(observation({
           channel: 'meaning', journey: name, surface: 'ios',
@@ -890,7 +1095,9 @@ async function walkObservations(journey, kept, ctx) {
       says: `${traffic.calls.length} call${traffic.calls.length === 1 ? '' : 's'} went out during this walk, and ${traffic.refused.length} ${traffic.refused.length === 1 ? 'was' : 'were'} stopped.`,
     }));
 
-    const files = await app.filesWritten();
+    /** @type {{unreadable: string[]}} */
+    const insideTheApp = { unreadable: [] };
+    const files = await app.filesWritten(insideTheApp);
     for (const file of files) {
       out.push(observation({
         channel: 'effects', journey: name, surface: 'ios',
@@ -905,6 +1112,17 @@ async function walkObservations(journey, kept, ctx) {
       value: countBucket(files.length),
       says: `${files.length} file${files.length === 1 ? '' : 's'} were left behind in the app's own folder.`,
     }));
+    if (insideTheApp.unreadable.length > 0) {
+      out.push(notCovered({
+        channel: 'effects',
+        path: joinPath('count', name, 'folders in the app that would not open'),
+        reason: 'not supported here',
+        says:
+          `${insideTheApp.unreadable.length} folder${insideTheApp.unreadable.length === 1 ? '' : 's'} inside the app's own space could not be opened, so nothing written in ${insideTheApp.unreadable.length === 1 ? 'it' : 'them'} was seen: ` +
+          `${insideTheApp.unreadable.slice(0, 5).join(', ')}${insideTheApp.unreadable.length > 5 ? ', and more' : ''}. ` +
+          'The count above is therefore a floor. "The app wrote nothing there" and "nobody could look" are different answers.',
+      }));
+    }
 
     const complaints = await readAppLog({
       udid: kept.device.udid,
@@ -924,7 +1142,11 @@ async function walkObservations(journey, kept, ctx) {
       const [level, text] = key.split('|');
       out.push(observation({
         channel: 'complaints', journey: name, surface: 'ios',
-        path: joinPath('log', name, tidySegment(level, 'said'), tidySegment(text.slice(0, 120), 'an empty line')),
+        // The whole line, not its first hundred and twenty characters. `tidySegment` cuts it
+        // to an address and leaves a digest of the rest behind; cutting it here first threw
+        // that away, so two log lines agreeing for a hundred and twenty characters shared
+        // one address and only one of them was ever compared.
+        path: joinPath('log', name, tidySegment(level, 'said'), tidySegment(text, 'an empty line')),
         value: countBucket(count),
         says: `The app itself said "${text}"${count > 1 ? `, ${count} times` : ''}${level === 'error' || level === 'fault' ? ' — and it said it as an error' : ''}.`,
       }));

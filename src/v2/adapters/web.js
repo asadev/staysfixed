@@ -36,6 +36,7 @@
  * Every refusal is reported as a hole in the check. None of them is ever reported as a pass.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -71,6 +72,26 @@ const VIEWPORT = { width: 1280, height: 800, deviceScaleFactor: 1 };
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', 'coverage', '.staysfixed']);
 
 /**
+ * Why a folder would not open, in words somebody can act on.
+ *
+ * The code alone is no use to the person who has to fix it: `EACCES` on its own has sent
+ * more than one person looking for a bug in the tool.
+ *
+ * @param {unknown} error
+ * @returns {string}
+ */
+function whyNotOpened(error) {
+  const code = String(/** @type {any} */ (error)?.code ?? '');
+  if (code === 'EACCES' || code === 'EPERM') return 'this account does not have permission to open it';
+  if (code === 'ENOENT') return 'it was there when the walk started and is not there now';
+  if (code === 'ENOTDIR') return 'something in the way is a file, not a folder';
+  if (code === 'ELOOP') return 'the links in it point round in a circle';
+  if (code === 'EMFILE' || code === 'ENFILE') return 'this machine ran out of open files while reading it';
+  const said = String(/** @type {any} */ (error)?.message ?? error ?? '').trim();
+  return said === '' ? 'the reason was not given' : said;
+}
+
+/**
  * The pages a project has, read out of its folder names.
  *
  * Free, exact, and it finds the four pages nobody links to. A crawl finds only what
@@ -83,12 +104,29 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.nex
  * reported as needing a sample value rather than guessed at, because "we did not check
  * this" and "this is fine" must never be allowed to look alike.
  *
+ * A FOLDER THIS CANNOT OPEN IS NAMED, not skipped. It used to `continue` on the read that
+ * failed, which threw away that folder and every page underneath it without one word — and
+ * a page that was never listed is never walked, never counted, and never missed. The run
+ * then reported that nothing had changed about a section of the site it had not looked at.
+ * This is the same shape of bug as three others that were found and closed elsewhere in the
+ * tool; this was the fourth place it was living.
+ *
  * @param {string} root
+ * @param {{unreadable?: {folder: string, why: string}[]}} [collect]
+ *   Hand in an object and every folder that could not be opened is pushed onto
+ *   `collect.unreadable`, with the reason in plain English. Callers that pass nothing get
+ *   the old shape back and lose the holes, so the two callers inside this file both pass
+ *   one; `detect` turns them into something a person can act on and `journeys` turns them
+ *   into missing coverage, which is what stops a folder nobody could read reading as a
+ *   folder with nothing in it.
  * @returns {Promise<{url: string, file: string, needs: string[]}[]>}
  */
-export async function readPageRoutes(root) {
+export async function readPageRoutes(root, collect = {}) {
   /** @type {Map<string, {url: string, file: string, needs: string[]}>} */
   const found = new Map();
+  const unreadable = collect.unreadable;
+  /** @type {Set<string>} */
+  const alreadySaid = new Set();
 
   /**
    * @param {string} base
@@ -104,7 +142,12 @@ export async function readPageRoutes(root) {
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
+      } catch (error) {
+        const folder = path.relative(root, dir) || '.';
+        if (unreadable && !alreadySaid.has(folder)) {
+          alreadySaid.add(folder);
+          unreadable.push({ folder, why: whyNotOpened(error) });
+        }
         continue;
       }
       for (const entry of entries) {
@@ -163,9 +206,20 @@ export async function readPageRoutes(root) {
  * already has them), a journeys file if one was named, and the pages read out of the folder
  * names for everything neither of those covers. Never invented, never crawled.
  *
+ * TWO SCREENS WITH ONE NAME ARE TWO SCREENS. They used to be one: the list is built in a
+ * Map keyed by name, so the second `set` overwrote the first, and the screen that lost was
+ * never walked, never compared and never counted as a door nobody opened — missing from the
+ * very ledger that exists to catch exactly this. Now the second one is told apart by a
+ * number and both are walked. Two entries that are the same in every respect really are one
+ * screen written down twice, and only those are folded together.
+ *
  * @param {object} input
  * @param {Record<string, any>} input.config
  * @param {{url: string, file: string, needs: string[]}[]} input.pages
+ * @param {{folder: string, why: string}[]} [input.unreadable]
+ *   Folders `readPageRoutes` could not open. Each becomes a journey that says it was not
+ *   walked and why, which the engine records as missing coverage. A page behind one of them
+ *   was never listed, so nothing else in the run would ever mention it.
  * @returns {Journey[]}
  */
 export function journeysFrom(input) {
@@ -173,19 +227,50 @@ export function journeysFrom(input) {
   const samples = config.samples ?? {};
   /** @type {Map<string, Journey>} */
   const journeys = new Map();
+  /** @type {Map<string, string>} name -> what that journey is, so a true duplicate is spotted */
+  const shapes = new Map();
+
+  /**
+   * A name nothing else is using. Numbering rather than overwriting: a screen that is
+   * dropped here is dropped everywhere, silently, for the rest of the run.
+   *
+   * @param {string} wanted
+   * @returns {string}
+   */
+  const freeName = (wanted) => {
+    if (!journeys.has(wanted)) return wanted;
+    for (let n = 2; ; n += 1) {
+      const tried = `${wanted} (${n})`;
+      if (!journeys.has(tried)) return tried;
+    }
+  };
 
   // v1 called these "screens" and this reads them unchanged, on purpose: nobody should have
   // to write their steps twice to get a second kind of check out of them.
   for (const screen of [...(config.screens ?? []), ...(config.journeys ?? [])]) {
     if (!screen || typeof screen !== 'object') continue;
-    const name = String(screen.name ?? screen.url ?? 'a screen');
+    const wanted = String(screen.name ?? screen.url ?? 'a screen');
     /** @type {Record<string, any>[]} */
     const steps = [];
     if (screen.url !== undefined) steps.push({ act: 'open', goto: String(screen.url), note: `open ${screen.url}` });
     for (const step of screen.steps ?? []) steps.push({ act: actOf(step), ...step });
+
+    // The same name AND the same steps is one screen listed twice — the settings and the
+    // journeys file both naming it, most often — and folding those together loses nothing.
+    // A different set of steps under the same name is a different screen.
+    const shape = JSON.stringify(steps);
+    if (shapes.get(wanted) === shape) continue;
+    const name = freeName(wanted);
+    shapes.set(name, shape);
     journeys.set(name, {
       name,
-      describe: String(screen.describe ?? screen.why ?? `walk ${name}`),
+      describe: String(
+        screen.describe ??
+        screen.why ??
+        (name === wanted
+          ? `walk ${name}`
+          : `walk ${name} — the settings name two different screens "${wanted}", so this is the second of them`)
+      ),
       source: 'code',
       surface: 'web',
       from: 'the project settings',
@@ -205,8 +290,7 @@ export function journeysFrom(input) {
       if (sample === undefined) unfilled.push(need);
       else url = url.replace(new RegExp(`\\[\\.{0,3}${need}\\]|:${need}`), encodeURIComponent(String(sample)));
     }
-    const name = `page ${page.url}`;
-    if (journeys.has(name)) continue;
+    const name = freeName(`page ${page.url}`);
     journeys.set(name, {
       name,
       describe: `open ${page.url} and read what the screen says`,
@@ -227,6 +311,28 @@ export function journeysFrom(input) {
       from: 'the address in the project settings',
       channels: ['meaning', 'effects', 'complaints', 'results', 'counters', 'pixels'],
       steps: /** @type {any} */ ([{ act: 'open', goto: '/', note: 'open the front page' }]),
+    });
+  }
+
+  // Last, and after the front-page fallback so a project made entirely of holes still gets
+  // one real journey. A folder nobody could open is a journey that says out loud it was not
+  // walked: the engine turns a journey carrying `skip` into missing coverage, which is the
+  // only route from here to the ledger. Without it, a page behind that folder was never
+  // listed, so nothing anywhere in the run would ever have mentioned it — and a page nobody
+  // listed reads exactly like a page that is fine.
+  for (const hole of input.unreadable ?? []) {
+    const name = freeName(`the pages under ${hole.folder}`);
+    journeys.set(name, {
+      name,
+      describe: `the pages under ${hole.folder}`,
+      source: 'code',
+      surface: 'web',
+      from: hole.folder,
+      channels: [],
+      steps: /** @type {any} */ ([]),
+      skip:
+        `"${hole.folder}" could not be opened while looking for this project's pages — ${hole.why} — so nothing under it was listed. ` +
+        'Any page in there was not walked and is not in the count of pages that were. This is a hole, not a pass.',
     });
   }
 
@@ -290,7 +396,16 @@ export const webAdapter = defineAdapter({
     const framework = ['next', 'react', 'vue', 'svelte', 'astro', '@remix-run/react', 'nuxt', 'solid-js', 'preact', 'vite']
       .find((name) => name in dependencies);
 
-    const pages = await readPageRoutes(project.root);
+    /** @type {{unreadable: {folder: string, why: string}[]}} */
+    const collect = { unreadable: [] };
+    const pages = await readPageRoutes(project.root, collect);
+    if (collect.unreadable.length > 0) {
+      missing.push({
+        what: `permission to read ${collect.unreadable.length === 1 ? 'a folder' : `${collect.unreadable.length} folders`} this project's pages live in: ${collect.unreadable.map((u) => `${u.folder} (${u.why})`).join(', ')}`,
+        unlocks: 'listing the pages under them at all. Nothing under a folder that will not open is walked, counted, or missed, so the run is quiet about that part of the site',
+        howToGet: `Give this account permission to read ${collect.unreadable.length === 1 ? 'it' : 'them'} — on a Mac or Linux that is: chmod +rx ${collect.unreadable[0].folder}`,
+      });
+    }
     const address = config.url ?? config.baseUrl ?? null;
 
     if (!config.start && !address) {
@@ -338,7 +453,10 @@ export const webAdapter = defineAdapter({
 
   /** @param {import('./contract.js').AdapterProject} project */
   async journeys(project) {
-    return journeysFrom({ config: project.config ?? {}, pages: await readPageRoutes(project.root) });
+    /** @type {{unreadable: {folder: string, why: string}[]}} */
+    const collect = { unreadable: [] };
+    const pages = await readPageRoutes(project.root, collect);
+    return journeysFrom({ config: project.config ?? {}, pages, unreadable: collect.unreadable });
   },
 
   /**
@@ -1004,9 +1122,21 @@ export function complaintKey(message) {
 }
 
 /**
+ * A name a picture can be saved under.
+ *
+ * Cut with a fingerprint on the end, never cut alone. This is a FILE name: two checkpoints
+ * whose names agreed for eighty characters were saved over each other, so the picture
+ * offered as evidence for one finding was a photograph of a different screen — and nothing
+ * about it looked wrong. Long file names are the normal case here, because the name is the
+ * build, the journey and the checkpoint run together.
+ *
  * @param {string} name
  * @returns {string}
  */
 function fileSafe(name) {
-  return String(name).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 80) || 'checkpoint';
+  const clean = String(name).replace(/[^A-Za-z0-9._-]+/g, '-');
+  if (clean === '') return 'checkpoint';
+  if (clean.length <= 80) return clean;
+  const mark = crypto.createHash('sha256').update(clean).digest('hex').slice(0, 8);
+  return `${clean.slice(0, 71)}-${mark}`;
 }
