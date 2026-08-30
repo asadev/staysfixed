@@ -326,16 +326,38 @@ export async function check(options = {}) {
     // the word "guard" exactly zero times. A tool built to catch silent breakage must not do
     // nothing silently.
     const named = await guardNames(project.root);
-    if (named.length > 0 && verdict.coverage) {
-      verdict.coverage.gaps = [
-        ...(verdict.coverage.gaps ?? []),
-        {
-          what: `${named.length} guard${named.length === 1 ? '' : 's'} written against bugs that already happened once`,
-          why:
-            `They are sealed by name, so nothing touching one can be waved through quietly — but they were not RUN on this check. ` +
-            `\`staysfixed check --guards\` walks them. ${named.map((n) => `"${n}"`).join(', ')}`,
-        },
-      ];
+    if (named.length > 0) {
+      const walked = await walkTheGuards(project.root, options);
+      if (walked.ran) {
+        // A guard that failed is a bug somebody already had, coming back. It is sealed by
+        // name — one of the five classes no agent may wave through, whatever the reason.
+        for (const bad of walked.failed) {
+          verdict.findings = [
+            ...(verdict.findings ?? []),
+            /** @type {any} */ ({
+              id: `guard-${sha256(bad.name).slice(0, 6)}`,
+              title: `A bug that was already fixed is back: ${bad.name}`,
+              why: bad.message ?? 'The guard written for it does not hold any more.',
+              class: 'named guard',
+              guard: bad.name,
+              differences: [],
+              rank: 0,
+              count: 1,
+            }),
+          ];
+        }
+        verdict.summary = `${walked.said} ${verdict.summary}`;
+        if (walked.failed.length > 0) verdict.ok = false;
+      } else if (verdict.coverage) {
+        verdict.coverage.gaps = [
+          ...(verdict.coverage.gaps ?? []),
+          {
+            what: `${named.length} guard${named.length === 1 ? '' : 's'} written against bugs that already happened once`,
+            why: `They are sealed by name, so nothing touching one can be waved through quietly — but they were not RUN on this check: ${walked.why}`,
+            unlockedBy: 'Give the settings an address to open — `url` beside `start` in the `web` block, or `electron.binary` — and every check walks them from then on.',
+          },
+        ];
+      }
     }
 
     /** @type {CheckOutcome} */
@@ -672,6 +694,45 @@ function comparedNothing(verdict) {
     /never been walked against|no stored record of the old build/i.test(`${gap.what} ${gap.why}`),
   ).length;
   return nothingToCompare >= walked ? 'no stored record' : null;
+}
+
+/**
+ * Walk the guards, if this project can be opened.
+ *
+ * Guards are the headline of this whole product — one plain-English rule per bug somebody
+ * already had — and the default command never ran them. It said so, which was better than
+ * pretending, but saying it is not doing it. Version 1 knows how to drive an app and run
+ * them; what was missing was anybody calling it from here.
+ *
+ * It needs an address it can open. Where the settings only say how to START the product,
+ * that is version 2's job and this path cannot do it — so it says so instead, and names the
+ * one line that would change it.
+ *
+ * @param {string} root
+ * @param {any} options
+ * @returns {Promise<{ran: boolean, why: string, said: string, failed: {name: string, message?: string}[]}>}
+ */
+async function walkTheGuards(root, options) {
+  try {
+    const { loadProject } = await import('../core/config.js');
+    const { runCheck } = await import('../run.js');
+    const project = await loadProject({ cwd: root, configFile: options?.configFile });
+    const run = await runCheck(project, { guardsOnly: true, writeReport: false, quiet: true, signal: options?.signal });
+    const guards = run.guards ?? [];
+    const failed = guards.filter((g) => g.status === 'failed').map((g) => ({ name: g.name, message: g.message }));
+    const held = guards.length - failed.length;
+    return {
+      ran: true,
+      why: '',
+      said:
+        failed.length === 0
+          ? `All ${guards.length} guard${guards.length === 1 ? '' : 's'} still hold.`
+          : `${failed.length} of ${guards.length} guards failed — ${failed.length === 1 ? 'a bug' : 'bugs'} that ${failed.length === 1 ? 'was' : 'were'} already fixed ${failed.length === 1 ? 'is' : 'are'} back, and no agent may wave ${failed.length === 1 ? 'it' : 'them'} through. ${held} still hold.`,
+      failed,
+    };
+  } catch (e) {
+    return { ran: false, why: messageOf(e), said: '', failed: [] };
+  }
 }
 
 /**

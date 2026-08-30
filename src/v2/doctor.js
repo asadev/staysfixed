@@ -901,6 +901,18 @@ async function phoneApps(root, configFile) {
   };
 
   /**
+   * A named key whose value has to look right, so one settings word cannot be mistaken for
+   * another block's.
+   * @param {string} key
+   * @param {(value: string) => boolean} looksRight
+   * @returns {FoundApp|null}
+   */
+  const namedPath = (key, looksRight) => {
+    const found = new RegExp(`["']?${key}["']?\\s*:\\s*["'\`]([^"'\`]+)["'\`]`).exec(settings);
+    return found && looksRight(found[1]) ? { where: found[1], how: `your settings name it under ${key}` } : null;
+  };
+
+  /**
    * @param {string[]} folders
    * @param {(name: string) => boolean} wanted
    * @returns {FoundApp|null}
@@ -933,6 +945,14 @@ async function phoneApps(root, configFile) {
       : null);
 
   const ios =
+    // `ios.app` FIRST, because that is the key the adapter reads and the key this very file
+    // tells people to write: "name the built .app in your settings under ios.app". It then
+    // looked only for `xcworkspace`, so a settings file naming a real built app was invisible
+    // and doctor answered "no iPhone app was found in this project, and the settings do not
+    // name one" about a project whose settings named one. Measured 2026-08-31 against a real
+    // TerminalDeck.app. The value has to end in `.app` so a bare `app:` belonging to some
+    // other block can never be mistaken for this one.
+    namedPath('app', (v) => v.endsWith('.app')) ??
     named('xcworkspace') ??
     built(['dist', 'out', 'build', 'release'], (name) => name.endsWith('.app')) ??
     (there(path.join('ios', 'Podfile')) || readdirSafe(path.join(root, 'ios')).some((n) => n.endsWith('.xcodeproj') || n.endsWith('.xcworkspace'))
@@ -1065,6 +1085,16 @@ async function askTheAdapters(root) {
     // Read as text and parsed only when it is JSON. Doctor never runs a person's code to
     // answer a question about their machine, and a settings file may be JavaScript.
     if (file && file.endsWith('.json')) config = JSON.parse(readFileSync(file, 'utf8'));
+    // But "not JSON" was being treated as "says nothing", and `init` writes JavaScript — so
+    // for almost every project every adapter was asked what it needs while being handed an
+    // EMPTY config. It then asked for the very thing the settings already named: a project
+    // whose settings pointed at a real built TerminalDeck.app was told, in one sentence,
+    // "the app is here. What is missing is a built iPhone app to check". Measured 2026-08-31.
+    //
+    // The few values the adapters need to answer honestly are read out of the TEXT instead,
+    // scoped to their own block so one block's `app` can never be read as another's. Still no
+    // code is run, which was the whole point of the rule.
+    else if (file) config = { ...config, ...settingsFromText(readFileSync(file, 'utf8')) };
   } catch {
     config = {};
   }
@@ -1382,6 +1412,54 @@ export function readHostProbe(name, alive, look) {
   const report = { name, reachable: true, how: 'it answered over ssh with the key you already have', windows: powershell !== undefined };
   if (powershell !== undefined) report.powershell = powershell;
   return report;
+}
+
+/**
+ * The handful of settings an adapter needs to say what it is missing, read out of a
+ * JavaScript settings file WITHOUT running it.
+ *
+ * Scoped per block on purpose: `app` means one thing under `ios` and nothing under `web`, and
+ * a flat search would hand the wrong path to the wrong adapter.
+ *
+ * @param {string} text
+ * @returns {Record<string, any>}
+ */
+function settingsFromText(text) {
+  const clean = withoutComments(text);
+  /** @type {Record<string, any>} */
+  const out = {};
+  /** @type {Record<string, string[]>} */
+  const wanted = {
+    ios: ['app'],
+    android: ['apk', 'package'],
+    electron: ['binary'],
+    web: ['url', 'start'],
+    http: ['start', 'url'],
+  };
+  for (const [block, keys] of Object.entries(wanted)) {
+    const at = new RegExp(`["']?${block}["']?\\s*:\\s*\\{`).exec(clean);
+    if (!at) continue;
+    // The block's own text: from its brace to the matching one, counted rather than guessed,
+    // so a nested object cannot end the block early.
+    let depth = 0;
+    let end = at.index + at[0].length;
+    for (; end < clean.length; end += 1) {
+      if (clean[end] === '{') depth += 1;
+      else if (clean[end] === '}') {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+    }
+    const inside = clean.slice(at.index + at[0].length, end);
+    /** @type {Record<string, string>} */
+    const found = {};
+    for (const key of keys) {
+      const hit = new RegExp(`["']?${key}["']?\\s*:\\s*["'\`]([^"'\`]+)["'\`]`).exec(inside);
+      if (hit) found[key] = hit[1];
+    }
+    if (Object.keys(found).length > 0) out[block] = found;
+  }
+  return out;
 }
 
 /**
@@ -1704,7 +1782,14 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
             ? 'Cannot run here: no usable iOS runtime was found, so there is no simulator to boot the app on.'
             : iosReady
               ? `Covered on the simulator, against the stored record. It boots ${phones.ios.where} on a simulator of its own and reads what each control on the screen is and does. A real iPhone in your hand cannot be compared side by side and never will be — two builds cannot exist on it at once.`
-              : `The simulator is here and the app is here. What is missing is ${plainList(iosWants.map((n) => n.what))}, so a clean result would cover less than it looks like.`,
+              : // "and the app is here" was said because a PATH was found, while the adapter was
+                // still asking for a built app — so one sentence claimed the app was present and
+                // missing at once. Measured 2026-08-31 on a settings file pointing at a
+                // TerminalDeck.app that turned out to be an empty folder left by an old build.
+                // A path is not a bundle, and only the adapter can tell the difference.
+                iosWants.some((n) => /built iPhone app/i.test(String(n.what)))
+                ? `The simulator is here and the settings name an app, but there is no built app bundle at that path — an empty folder from an old build looks exactly like this. What is missing is ${plainList(iosWants.map((n) => n.what))}.`
+                : `The simulator is here and the app is here. What is missing is ${plainList(iosWants.map((n) => n.what))}, so a clean result would cover less than it looks like.`,
     canCheck: iosReady || iosPartly ? [...withoutADriver, 'meaning', 'pixels'] : [],
     cannotCheck: iosReady || iosPartly ? [] : CHANNELS.map((c) => c.id),
     needs:
