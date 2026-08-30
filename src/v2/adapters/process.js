@@ -1128,7 +1128,19 @@ export const processAdapter = defineAdapter({
  */
 export function importProbeCommand(moduleId) {
   const probe = [
-    "const m = await import(process.argv[1].startsWith('.') || process.argv[1].includes('/') ? new URL(process.argv[1], 'file://' + process.cwd() + '/').href : process.argv[1]);",
+    // A FILE unless it is really a package. The old rule was "starts with a dot, or has a
+    // slash in it" — and `index.js` has neither, so Node was asked for a PACKAGE called
+    // "index.js" and answered ERR_MODULE_NOT_FOUND. `staysfixed init` writes exactly
+    // `{ module: "index.js" }` for an ordinary package entry, so on those projects this
+    // journey failed on every run, failed the SAME way on both builds, produced no
+    // difference, and the check said "Nothing that worked has changed" for ever. Measured
+    // 2026-08-30. So: if a file of that name is really there, it is a file.
+    "const id = process.argv[1];",
+    "const { existsSync } = await import('node:fs');",
+    "const { fileURLToPath } = await import('node:url');",
+    "const asFile = new URL(id, 'file://' + process.cwd() + '/').href;",
+    "const onDisk = (() => { try { return existsSync(fileURLToPath(asFile)); } catch { return false; } })();",
+    "const m = await import(id.startsWith('.') || id.startsWith('/') || id.includes('/') || onDisk ? asFile : id);",
     "const out = {};",
     "for (const key of Object.keys(m).sort()) {",
     "  const v = m[key];",

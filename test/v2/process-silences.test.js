@@ -392,3 +392,33 @@ describe('keeping a big piece of text', () => {
     assert.deepEqual(trimForStorage('short'), { text: 'short', truncated: false, bytes: 5 });
   });
 });
+
+describe('importing the package entry a project actually has', () => {
+  test('a bare file name is a file, not a package nobody has', async () => {
+    // The rule was "starts with a dot, or has a slash in it, otherwise it is a package".
+    // `index.js` has neither — so Node was asked for a PACKAGE called "index.js" and answered
+    // ERR_MODULE_NOT_FOUND. `staysfixed init` writes exactly `{ module: "index.js" }` for an
+    // ordinary package entry, so on those projects this journey failed on EVERY run, failed
+    // the same way on both builds, produced no difference at all, and the check said
+    // "Nothing that worked has changed" for ever while checking nothing. Measured 2026-08-30.
+    const dir = await scratchDir('staysfixed-import');
+    await fsp.writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', type: 'module' }));
+    await fsp.writeFile(path.join(dir, 'index.js'), 'export const add = (a, b) => a + b\nexport const title = "x"\n');
+
+    const ran = await runCommand(importProbeCommand('index.js'), { cwd: dir, timeoutMs: 60000 });
+    assert.equal(ran.code, 0, `the entry could not be imported at all: ${ran.stderr}`);
+    assert.doesNotMatch(String(ran.stderr), /ERR_MODULE_NOT_FOUND/);
+    assert.match(ran.stdout, /add/, 'and what it exports has to come back');
+    assert.match(ran.stdout, /title/);
+  });
+
+  test('a real package name is still treated as a package', async () => {
+    // The fix must not turn every bare word into a path: `{ module: "node:path" }` and an
+    // installed dependency both still have to resolve the way they always did.
+    const dir = await scratchDir('staysfixed-import-pkg');
+    await fsp.writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: 'y', type: 'module' }));
+    const ran = await runCommand(importProbeCommand('node:path'), { cwd: dir, timeoutMs: 60000 });
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.match(ran.stdout, /join/, 'node:path exports join, so the package route still works');
+  });
+});
