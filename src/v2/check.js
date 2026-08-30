@@ -471,6 +471,21 @@ async function settle(verdict, store, product, guards) {
           : `NOTHING WAS ACTUALLY COMPARED. Every journey was walked on the build you have, and not one of them had anything on record from the build you were happy with, so there was nothing to hold them against. This is not a pass and not a failure — it is no answer. ${verdict.summary}`;
     }
 
+    // THE CAUSE FIRST, when the cause is that the product never answered.
+    //
+    // A server that will not start produces a difference at every address it used to answer
+    // at — the content type gone, the body gone, "answered at all" arriving. Measured
+    // 2026-08-31 on a product whose start command throws: twelve findings, not one of them
+    // saying the server had not started, and a person reads "12 things behave differently"
+    // and goes looking for a regression in code that is fine. The symptoms are real and they
+    // belong in the list; they are just not the news.
+    const silent = didNotAnswer(verdict);
+    if (silent.length > 0) {
+      verdict.summary =
+        `THE PRODUCT DID NOT ANSWER. ${silent.length} ${silent.length === 1 ? 'way in was' : 'ways in were'} not tried at all — ${silent.slice(0, 3).join('; ')}${silent.length > 3 ? '; and more' : ''}. Most of what follows is that one fact wearing different clothes, not ${silent.length === 1 ? 'a separate change' : 'separate changes'}: fix the start and check again before reading any of it as a regression. ` +
+        verdict.summary;
+    }
+
     // And what was NOT looked at, in the same breath as the good news, on every run
     // including the clean ones. A green verdict on a product with three hundred doors
     // nobody has ever opened is true and it is not what it looks like, and the only place
@@ -679,6 +694,30 @@ export async function guardNames(root) {
     // same about the same folder, and a check that refuses is worse than one without a seal.
     return [];
   }
+}
+
+/**
+ * The ways into the product that were never tried, and why.
+ *
+ * A build that would not start does not produce one finding — it produces one at every
+ * address it used to answer at, and the real news is nowhere in the list.
+ *
+ * @param {CheckOutcome} verdict
+ * @returns {string[]}
+ */
+function didNotAnswer(verdict) {
+  /** @type {Set<string>} */
+  const said = new Set();
+  for (const finding of verdict.findings ?? []) {
+    for (const d of finding.differences ?? []) {
+      const path = String(d.path ?? '');
+      if (!path.endsWith('answered at all')) continue;
+      const name = path.split('.').slice(1, -1).join('.') || path;
+      const why = typeof d.candidate === 'string' ? d.candidate : typeof d.describe === 'string' ? d.describe : '';
+      said.add(why ? `${name} (${String(why).slice(0, 90)})` : name);
+    }
+  }
+  return [...said];
 }
 
 /**
