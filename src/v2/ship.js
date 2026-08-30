@@ -211,10 +211,13 @@ export async function onShip(opts = {}) {
     result.cut = cut.unchanged !== true;
     result.unchanged = cut.unchanged === true;
 
+    const missed = await whatTheCheckMissed(store);
+
     if (cut.unchanged) {
       result.lines = [
         `${product} ${release.describe}`,
         `That build was already what ${product} calls working, so nothing moved and no waivers were retired. Recording a release twice is safe.`,
+        ...(missed ? [missed] : []),
       ];
       result.summary = `${product} ${release.what} was already the reference — nothing changed.`;
       return result;
@@ -228,6 +231,8 @@ export async function onShip(opts = {}) {
       // ran only once, so part of this reference has no steadiness record behind it.
       ...(cut.stability.measuredJourneys < cut.stability.journeys ? [cut.stability.note] : []),
       'Nobody has to approve anything. The next check compares against this.',
+      // Said in the same breath as the good news, exactly as every other surface says it.
+      ...(missed ? [missed] : []),
     ];
     result.summary = cut.summary;
     return result;
@@ -247,6 +252,33 @@ export async function onShip(opts = {}) {
 
 // ---------------------------------------------------------------------------
 // What just shipped?
+/**
+ * What the last check did NOT look at, said here too.
+ *
+ * `ship` is the one command that decides what "working" MEANS from now on, and it printed no
+ * coverage caveat at all — not in the text, not in `--json`. Every other surface says it, in
+ * the same breath as the good news, because a green result on a product with doors nobody has
+ * ever opened is true and is not what it looks like. The command that turns that result into
+ * the standard is the last place that should stay quiet about it.
+ *
+ * @param {Store} store
+ * @returns {Promise<string|null>}
+ */
+async function whatTheCheckMissed(store) {
+  try {
+    const raw = JSON.parse(await fsp.readFile(path.join(store.dir, 'last-check.json'), 'utf8'));
+    const coverage = raw?.result?.coverage ?? null;
+    if (!coverage) return null;
+    const { whatWasNotChecked } = await import('./check.js');
+    const said = whatWasNotChecked(coverage);
+    return typeof said === 'string' && said.trim() ? said.trim() : null;
+  } catch {
+    // No record, or unreadable. Saying nothing is right here — inventing a caveat would be
+    // its own kind of lie.
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 /**

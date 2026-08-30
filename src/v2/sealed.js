@@ -358,7 +358,13 @@ function readFinding(finding) {
   const differences = finding.differences ?? [];
   for (const d of differences) {
     add(d.path, d.path);
-    add(d.describe, d.path);
+    // NOT `d.describe`. That sentence is the TOOL's, not the product's — it explains what a
+    // channel watches and is the same on every finding that channel ever produces. The API
+    // shape channel's says "a renamed or dropped field shows up on its own", and `dropped`
+    // is a data-loss word, so every API shape change on every project was sealed as losing
+    // data, permanently, and no agent could wave any of it through. A seal has to be decided
+    // by what the PRODUCT said — its addresses, its values, its journey names — never by the
+    // tool's own vocabulary, which no user wrote and nobody can change.
     add(faceOf(d.reference), d.path);
     add(faceOf(d.candidate), d.path);
     add(d.journey, `the ${d.journey} journey`);

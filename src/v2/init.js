@@ -1579,7 +1579,14 @@ function whatItCovers(readiness) {
   else parts.push('Right now a check here covers nothing in full.');
   if (waiting.length > 0) parts.push(`${plainList(waiting, true)} ${waiting.length === 1 ? 'is' : 'are'} not covered yet, and the list below says exactly what is in the way and who has to do it.`);
   if (notCovered.length > 0) parts.push(`${plainList(notCovered, true)} ${notCovered.length === 1 ? 'is' : 'are'} not checked at all, so a clean result says nothing whatever about ${notCovered.length === 1 ? 'it' : 'them'}.`);
-  if (partly.length === 0 && notCovered.length === 0 && covered.length > 0) parts.push('Nothing is being left out.');
+  // "on this machine", because that is the only thing this sentence knows. It is built from
+  // SURFACES — which kinds of product can be watched here — and says nothing whatever about
+  // how much of this project a run actually walks. Unqualified, it read as a coverage
+  // promise, and `getting-started` tells the agent to repeat it to the person: measured
+  // 2026-08-30 on a project the same run reported as five of six doors never opened.
+  if (partly.length === 0 && notCovered.length === 0 && covered.length > 0) {
+    parts.push('Nothing is being left out on this machine — though how much of the project a run actually walks is a separate question, and every check answers it.');
+  }
 
   // The hole that never closes, named with the language that causes it. "Not covered yet"
   // reads as a job somebody will get to; this one is nobody's job and saying so is the
