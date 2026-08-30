@@ -2116,7 +2116,7 @@ async function readConfig(configFile) {
  * @param {string} product
  * @returns {Promise<BuildFingerprint>}
  */
-async function fingerprintWorkingTree(root, product) {
+export async function fingerprintWorkingTree(root, product) {
   const sha = await git(root, ['rev-parse', 'HEAD']);
   if (!sha) {
     // REFUSING IS THE ONLY HONEST ANSWER HERE, and the alternative is the worst bug this

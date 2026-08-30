@@ -417,6 +417,32 @@ async function resolveBuild(store, product, release, told, onProblem) {
     return typeof told === 'string' ? { id: told, product } : told;
   }
 
+  // WHAT IS ACTUALLY HERE, before what the commit says is here.
+  //
+  // Matching on the commit alone blesses the wrong thing the moment the tree is dirty:
+  // several builds share one commit, this took the first of them, and that is usually an
+  // EARLIER build — one that was checked and came back clean. So editing a file and running
+  // `staysfixed ship` answered "was already the reference — nothing changed" and exited 0,
+  // about a tree nothing had ever looked at. Measured 2026-08-30 by deleting a button and
+  // shipping without a check.
+  //
+  // A dirty tree therefore has to match EXACTLY, on the fingerprint of what is on disk right
+  // now. If nothing on record is that tree, then this tree has not been checked, and the
+  // honest answer is the one the tool already knows how to give: no record of this build, so
+  // the reference does not move.
+  try {
+    const { fingerprintWorkingTree } = await import('./check.js');
+    const here = await fingerprintWorkingTree(store.root, product);
+    if (here?.id) {
+      const exact = builds.find((b) => b.fingerprint.id === here.id);
+      if (exact) return exact.fingerprint;
+      if (here.dirty) return null;
+    }
+  } catch {
+    // No git, or the tree could not be read. The joins below are all that is left, and they
+    // are better than refusing to record a release at all.
+  }
+
   const sha = release.gitSha;
   if (sha) {
     const sameCommit = builds.filter((b) => b.fingerprint.gitSha === sha);
