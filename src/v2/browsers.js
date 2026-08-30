@@ -439,7 +439,15 @@ async function takeSurvey(opts) {
  * download and a package, nothing else — no licence, no account, no clicking.
  * That is why doctor reports it as something the agent does without asking.
  */
-export const INSTALL_COMMAND = 'npm install --save-dev playwright && npx playwright install chromium';
+// One command, and it installs nothing into anybody's project.
+//
+// It used to be `npm install --save-dev playwright && npx playwright install chromium`, which
+// puts a 150MB package into a stranger's dependencies to solve a problem this tool has already
+// solved: the driver ships with the tool, and the only thing that can be missing is a browser.
+// `npx` fetches the downloader for the length of one command and leaves nothing behind, and the
+// browser it downloads lands in a shared folder outside every project, where `surveyBrowsers`
+// looks and where it survives every reinstall.
+export const INSTALL_COMMAND = 'npx playwright install chromium';
 
 /**
  * @param {BrowserFound|null} chosen

@@ -525,6 +525,9 @@ export const webAdapter = defineAdapter({
     const viewport = viewportFrom(config);
     const window = await openWindow({
       chromium: held.playwright.chromium,
+      // Which browser was chosen for this machine. Without it a driver that downloads no
+      // browser of its own looks for one that is not there.
+      executable: held.playwright.executable,
       scratchDir: ctx.scratchDir,
       viewport,
       colorScheme: config.colorScheme ?? 'light',

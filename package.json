@@ -1,7 +1,7 @@
 {
   "name": "staysfixed",
   "version": "0.7.2",
-  "description": "Prove that what already worked still works after an agent changed the code. Picture checks, guards for fixed bugs, a pre-release walkthrough, and known-good markers — as a CLI and as an MCP server.",
+  "description": "Prove that what already worked still works after an agent changed the code. Picture checks, guards for fixed bugs, a pre-release walkthrough, and known-good markers \u2014 as a CLI and as an MCP server.",
   "type": "module",
   "license": "MIT",
   "author": "Asad Iqbal",
@@ -55,6 +55,7 @@
   },
   "dependencies": {
     "pixelmatch": "^7.2.0",
+    "playwright-core": "^1.56.0",
     "pngjs": "^7.0.0"
   },
   "devDependencies": {

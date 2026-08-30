@@ -103,6 +103,25 @@ const V1_OPTIONS = [
   ['--pictures', 'The version 1 picture check, unchanged.'],
   ['--guards', 'The version 1 guards, unchanged.'],
   ['--only <name>', 'Just this journey, screen or guard. Repeat it for several.'],
+  ['--record', 'The version 1 run that records network fixtures.'],
+  ['--report / --no-report', 'Write the version 1 HTML report. Version 1 checks only.'],
+  ['--profile', 'Print where the time went. Version 1 checks only.'],
+];
+
+/**
+ * Flags only version 1's check reads, by the name the parser knows them under.
+ *
+ * They are accepted on every `check` because the two halves share one spec — which is right,
+ * since `--pictures --profile` has to work. What was wrong is that typing one WITHOUT
+ * `--pictures` or `--guards` did nothing at all and said nothing at all: `staysfixed check
+ * --profile` ran a perfectly ordinary difference-engine check, printed no profile, and gave
+ * no hint that the flag had been ignored. A flag that is accepted and does nothing is the
+ * same lie as a flag that does not exist, and a slower one to find.
+ */
+const V1_ONLY_FLAGS = [
+  ['profile', '--profile'],
+  ['report', '--report'],
+  ['record', '--record'],
 ];
 
 /**
@@ -190,6 +209,16 @@ export async function run(ctx) {
   if (wantsVersionOne(ctx)) {
     const v1 = await import('../cli/check.js');
     return await v1.run(ctx);
+  }
+
+  // Say so when a flag was accepted and will do nothing.
+  //
+  // This goes to standard error, so it cannot corrupt --json, and it is a warning rather
+  // than a refusal: the person asked for a real check and they should still get one.
+  for (const [flag, written] of V1_ONLY_FLAGS) {
+    if (ctx.flags[flag] !== undefined) {
+      warn(`${written} only applies to the version 1 check. This run is the difference engine, so it was ignored — add --pictures or --guards if that is what you wanted.`);
+    }
   }
 
   // --json means the answer belongs to a machine. Every line meant for a person

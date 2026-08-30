@@ -67,43 +67,73 @@ import { globToRegExp } from '../../freeze/network.js';
  */
 
 /**
- * Find Playwright, in the two places it could honestly be.
+ * Find the browser library, in every place it could honestly be.
  *
- * Stays Fixed is installed INTO other people's projects, so "is Playwright here" has two
- * different answers: is it beside us, and is it in the project we were pointed at. Both are
- * tried, because a project that already drives its own tests with Playwright should not be
- * asked to install a second copy.
+ * ## Two packages, not one
  *
- * It is loaded with `import()` rather than named at the top of the file on purpose. A tool
- * that cannot start at all because an optional browser library is missing is a tool that
- * cannot tell you what is missing.
+ * `playwright` and `playwright-core` are the same driver. The difference is that the first
+ * downloads its own copy of Chromium when it installs — about 150MB — and the second
+ * downloads nothing and expects to be told where a browser already is. This tool depends on
+ * `playwright-core` and finds the browser itself, because it already knows how: `browsers.js`
+ * locates Chrome for Testing, Chrome, Edge or Chromium on the machine, and deliberately
+ * prefers one that is not the browser the person actually uses.
+ *
+ * Both names are tried, in both places, because a project that already drives its own tests
+ * with the full `playwright` should never be asked to install a second copy of the same thing.
+ *
+ * ## Why it is loaded like this
+ *
+ * With `import()` rather than named at the top of the file: a tool that cannot start at all
+ * because a browser library is missing is a tool that cannot tell you what is missing.
+ *
+ * ## What went wrong here before, so it does not happen twice
+ *
+ * `playwright` was removed from this package's dependencies on the grounds that nothing in
+ * `src/` imported it. Nothing does — this line does, and a search for a static import cannot
+ * see it. The result shipped: 0.7.2 told every agent that asked that web apps and sites could
+ * be checked "here and now", and then answered every website check with "Playwright is not
+ * installed, so no web page can be opened". A tool that is wrong about its own headline
+ * ability is worse than one that lacks it. `test/v2/web-driver.test.js` now holds the
+ * dependency in place by name.
  *
  * @param {object} [opts]
  * @param {string} [opts.projectRoot]  The project being checked. Looked in second.
  * @returns {Promise<PlaywrightState>}
  */
 export async function loadPlaywright(opts = {}) {
-  const install = 'npm install --save-dev playwright';
+  const install = 'npm install playwright-core';
   /** @type {any} */
   let mod = null;
   /** @type {string|undefined} */
   let version;
+  /** @type {string|null} */
+  let loadedName = null;
 
   /** @param {any} loaded */
   const unwrap = (loaded) => (loaded && loaded.chromium ? loaded : (loaded?.default ?? null));
 
-  try {
-    mod = unwrap(await import('playwright'));
-  } catch {
-    // Not beside us. Try the project we were pointed at.
+  // `playwright` first, because a project that has the full package has a browser downloaded
+  // with it, and using that is one less thing to go looking for.
+  for (const name of ['playwright', 'playwright-core']) {
+    if (mod) break;
+    try {
+      mod = unwrap(await import(name));
+      if (mod) loadedName = name;
+    } catch {
+      // Not beside us under this name. Try the next, then the project we were pointed at.
+    }
   }
 
   if (!mod && opts.projectRoot) {
-    try {
-      const require = createRequire(path.join(opts.projectRoot, 'package.json'));
-      mod = unwrap(await import(require.resolve('playwright')));
-    } catch {
-      // Not there either. That is an answer, and it is reported as one.
+    for (const name of ['playwright', 'playwright-core']) {
+      if (mod) break;
+      try {
+        const require = createRequire(path.join(opts.projectRoot, 'package.json'));
+        mod = unwrap(await import(require.resolve(name)));
+        if (mod) loadedName = name;
+      } catch {
+        // Not there either. That is an answer, and it is reported as one.
+      }
     }
   }
 
@@ -111,14 +141,14 @@ export async function loadPlaywright(opts = {}) {
     return {
       ok: false,
       state: 'no package',
-      why: 'Playwright is not installed, so no web page can be opened. Everything read out of the source still works; nothing that needs a browser does.',
+      why: 'The browser driver is not installed, so no web page can be opened. Everything read out of the source still works; nothing that needs a browser does.',
       howToGet: install,
     };
   }
 
   try {
     const require = createRequire(import.meta.url);
-    version = String(require('playwright/package.json').version);
+    version = String(require(`${loadedName ?? 'playwright-core'}/package.json`).version);
   } catch {
     // A version we cannot read is not a reason to refuse to run.
   }
@@ -131,14 +161,40 @@ export async function loadPlaywright(opts = {}) {
     executable = undefined;
   }
 
-  const there = Boolean(executable) && (await exists(/** @type {string} */ (executable)));
+  let there = Boolean(executable) && (await exists(/** @type {string} */ (executable)));
+
+  // The driver's own browser is not the only browser.
+  //
+  // `playwright-core` downloads nothing, so it always names a Chromium that is not there.
+  // That is not a failure — this tool already knows how to find a browser, and has a
+  // considered opinion about which one: `browsers.js` prefers Chrome for Testing over the
+  // browser the person actually uses, precisely so a check can never take over their
+  // windows, their profile or their sign-ins.
+  //
+  // So: ask it. Only when there is no browser on the machine at all is this a real "no".
+  /** @type {string|undefined} */
+  let borrowedFrom;
+  if (!there) {
+    try {
+      const { surveyBrowsers } = await import('../browsers.js');
+      const survey = await surveyBrowsers({ headless: true });
+      if (survey.chosen?.binary && (await exists(survey.chosen.binary))) {
+        executable = survey.chosen.binary;
+        borrowedFrom = survey.chosen.name;
+        there = true;
+      }
+    } catch {
+      // Nothing found, or the survey itself would not run. Reported as "no browser" below.
+    }
+  }
+
   if (!there) {
     return {
       ok: false,
       state: 'no browser',
       chromium: mod.chromium,
       version,
-      why: `Playwright ${version ?? ''} is installed but its browser has not been downloaded, so no page can be opened yet. This is one command and nobody has to be asked.`.trim(),
+      why: `The browser driver ${version ?? ''} is installed, and there is no browser on this machine for it to open. This is one command and nobody has to be asked.`.trim(),
       howToGet: 'npx playwright install chromium',
       executable,
     };
@@ -150,7 +206,9 @@ export async function loadPlaywright(opts = {}) {
     chromium: mod.chromium,
     version,
     executable,
-    why: `Playwright ${version ?? ''} is here and its Chromium is downloaded, so pages can be opened.`.trim(),
+    why: borrowedFrom
+      ? `The browser driver ${version ?? ''} is here and it will open ${borrowedFrom}, which is a separate application from the browser you use, so pages can be opened.`.trim()
+      : `The browser driver ${version ?? ''} is here and its Chromium is downloaded, so pages can be opened.`.trim(),
   };
 }
 
@@ -192,6 +250,7 @@ async function exists(file) {
  *
  * @param {object} opts
  * @param {any} opts.chromium
+ * @param {string} [opts.executable]  Which browser to open. From `loadPlaywright`.
  * @param {string} opts.scratchDir
  * @param {{width: number, height: number, deviceScaleFactor?: number}} [opts.viewport]
  * @param {'light'|'dark'} [opts.colorScheme]
@@ -209,6 +268,15 @@ export async function openWindow(opts) {
   await fsp.mkdir(profileDir, { recursive: true });
 
   const context = await opts.chromium.launchPersistentContext(profileDir, {
+    // Which browser, said out loud rather than left to the driver's default.
+    //
+    // `playwright-core` has no browser of its own, so without this it looks for one that was
+    // never downloaded and the launch fails with a path nobody recognises. `loadPlaywright`
+    // has already decided which browser this machine should open — usually Chrome for
+    // Testing, deliberately not the browser the person uses — and this is where that decision
+    // is honoured. Left out when there is nothing to say, so the full `playwright` keeps
+    // using the Chromium it downloaded for itself.
+    ...(opts.executable ? { executablePath: opts.executable } : {}),
     headless: opts.headed !== true,
     viewport,
     deviceScaleFactor,
@@ -1243,7 +1311,9 @@ export function flattenAria(nodes) {
       // Two things with the same name in the same place have to be told apart somehow, and
       // counting is the only honest way left. The count is kept per place, so it cannot
       // spread: adding a row to one list never renumbers another.
-      const key = `${scope.join(' ')} ${node.role} ${node.name ?? ''}`;
+      // The separator is written as the escape, never as the byte. A raw NUL makes grep and
+      // file(1) treat this whole module as binary and skip it without saying so.
+      const key = `${scope.join(' ')}\u0000${node.role}\u0000${node.name ?? ''}`;
       const nth = (seen.get(key) ?? 0) + 1;
       seen.set(key, nth);
 

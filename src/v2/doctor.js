@@ -39,6 +39,7 @@ import { surveyBrowsers, INSTALL_COMMAND, PORT_NEVER_USE } from './browsers.js';
 import { POWERSHELL_PATHS } from './remote.js';
 import { messageOf, EXIT } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, mark, shortPath, setLogLevel } from '../core/log.js';
+import { loadPlaywright } from './adapters/web-driver.js';
 
 const exec = promisify(execFile);
 
@@ -256,7 +257,15 @@ export async function capabilities(opts = {}) {
     hosts,
     nextSteps: nextSteps(surfaces, reference, repo),
     limits: PERMANENT_LIMITS,
-    wiring: WIRING,
+    // The wiring block, with the real folder in it.
+    //
+    // `WIRING` carries a placeholder, because it is written once as a constant and a constant
+    // cannot know where it is being asked from. Handing that placeholder straight back is
+    // how `doctor --json` came to answer an agent's "how do I wire this up" with the literal
+    // words `/absolute/path/to/your/project` — a value that fails silently if pasted, and
+    // one the tool knew the real answer to all along. `init` had always filled it in; this
+    // is the same courtesy from the command an agent is told to call first.
+    wiring: { ...WIRING, mcp: mcpWiringFor(root) },
   };
 
   return caps;
@@ -327,6 +336,20 @@ const WIRING = {
     durationMs: 'How long the whole check took.',
   },
 };
+
+/**
+ * The wiring block for one project, with its folder filled in.
+ *
+ * @param {string} root
+ * @returns {Record<string, unknown>}
+ */
+function mcpWiringFor(root) {
+  return {
+    mcpServers: {
+      staysfixed: { command: 'npx', args: ['-y', 'staysfixed', 'mcp'], cwd: root },
+    },
+  };
+}
 
 /**
  * The version out of package.json, read without importing the CLI — doctor has
@@ -470,22 +493,27 @@ async function findTools(cwd, browsers) {
     })(),
 
     (async () => {
-      const installed = hasModule(cwd, 'playwright') || hasModule(cwd, 'playwright-core');
-      // The browsers Playwright downloads live outside any project and survive
-      // every reinstall, so finding them means half the work is already done and
-      // telling somebody to download them again would be wrong.
+      // Ask the thing that actually opens the page, not the folder it might live in.
+      //
+      // This used to look for a `playwright` folder under the project being checked. That is
+      // the wrong question in two directions at once. The driver now ships WITH this tool, so
+      // it is present even when the project has never heard of it; and a project that keeps
+      // its packages somewhere unusual has one when the folder walk says it does not.
+      //
+      // Getting this wrong is how 0.7.2 came to tell every agent that asked that web apps and
+      // sites could be checked "here and now", and then answered every single website check
+      // with "no web page can be opened". `loadPlaywright` is the one piece of code whose
+      // answer is the truth, because it is the code the walk itself runs.
+      const state = await loadPlaywright({ projectRoot: cwd });
       const downloaded = playwrightBrowsersDir();
       add({
         id: 'playwright',
-        name: 'Playwright',
-        found: installed,
-        where: downloaded ?? undefined,
-        why: 'Reads a page’s meaning tree properly, and brings a browser of its own so yours is left alone.',
-        fix: installed
-          ? undefined
-          : downloaded
-            ? `Its browsers are already downloaded in ${downloaded}, so only the package is missing: npm install --save-dev playwright`
-            : INSTALL_COMMAND,
+        name: 'a browser to read pages with',
+        found: state.ok,
+        where: state.executable ?? downloaded ?? undefined,
+        version: state.version,
+        why: 'Reads a page’s meaning tree properly, and opens a browser that is not the one you use, so yours is left alone.',
+        fix: state.ok ? undefined : `${state.howToGet ?? INSTALL_COMMAND}  — nothing to sign up for and nobody to ask.`,
         automatic: true,
       });
     })(),
@@ -498,7 +526,15 @@ async function findTools(cwd, browsers) {
         found: app !== null,
         where: app?.where,
         why: 'A desktop app is driven straight over its own debugging port, so no browser is needed for it — only the app itself.',
-        fix: app ? undefined : 'Only needed if the product you are watching is a desktop app. If it is, name the built app in your settings under app.binary.',
+        // `electron.binary`, not `app.binary`.
+        //
+        // Both keys exist and they belong to different halves of the tool: `app.binary` is
+        // what version 1's picture engine reads, and `electron.binary` is what the difference
+        // engine reads. `doctor` describes the difference engine, so telling somebody to set
+        // `app.binary` sent them to write a setting the adapter they are about to run never
+        // looks at — and the next run says there is no desktop app, for a reason they have
+        // just ruled out.
+        fix: app ? undefined : 'Only needed if the product you are watching is a desktop app. If it is, name the built app in your settings under electron.binary.',
         automatic: false,
       });
     })(),
@@ -745,7 +781,7 @@ function findDesktopApp(cwd) {
       // in a folder that contains one script.
       const text = withoutComments(readFileSync(configFile, 'utf8'));
       const named = /["']?binary["']?\s*:\s*["'`]([^"'`]+)["'`]/.exec(text);
-      if (named) return { where: named[1], how: 'your settings name it under app.binary' };
+      if (named) return { where: named[1], how: 'your settings name it under electron.binary' };
       if (/["']?kind["']?\s*:\s*["'`]electron["'`]/.test(text)) {
         return { where: configFile, how: 'your settings say this project is a desktop app' };
       }
@@ -1409,7 +1445,7 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
             {
               what: 'settings naming the built app',
               why: 'Two builds of one desktop app fight over its single-instance lock and its data folder, so the tool has to know exactly which file to open and give each run its own folder.',
-              fix: `Run \`staysfixed init\`, or set app.binary to ${desktopApp.where}.`,
+              fix: `Run \`staysfixed init\`, or set electron.binary to ${desktopApp.where}.`,
               automatic: true,
               unlocks: 'Your desktop app gets checked end to end, including every IPC channel the code registers — the doors no screenshot has ever seen.',
             },
@@ -1417,7 +1453,7 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   });
   if (desktopApp === null) {
     notInThisProject.add('electron');
-    impossible.set('electron', 'This project has no desktop app in it. If yours is built somewhere else, name the built app in your settings under app.binary and this becomes available — nothing else is needed, and no browser is needed for it at all.');
+    impossible.set('electron', 'This project has no desktop app in it. If yours is built somewhere else, name the built app in your settings under electron.binary and this becomes available — nothing else is needed, and no browser is needed for it at all.');
   }
 
   // Three separate questions, and folding any two of them together is how a surface gets
