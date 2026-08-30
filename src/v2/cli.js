@@ -245,20 +245,12 @@ export async function run(ctx) {
   // checks on the command line and then ships is told their build was "never
   // checked", and the safeguard fires on the honest case instead of the careless
   // one. The agent surface records its own; this is the command line's half.
-  try {
-    const { recordCheck } = await import('./reference.js');
-    const { openStore } = await import('./store.js');
-    await recordCheck(openStore({ root: ctx.cwd ?? process.cwd() }), {
-      buildId: verdict.candidate?.id,
-      product: verdict.product,
-      ok: verdict.ok,
-      blocked: /** @type {any} */ (verdict).blocked === true,
-      findings: verdict.findings.length,
-      by: 'staysfixed check',
-    });
-  } catch {
-    // Never let bookkeeping cost somebody the result they came for.
-  }
+  // NOT recorded again here. The engine writes this line itself, for every surface, inside
+  // `rememberCheck` — and with more in it than this ever had: what was waived, what was
+  // sealed, how much went unaccounted for. This block was added on the belief that only the
+  // agent surface recorded, so every command-line check wrote TWO near-identical rows two
+  // milliseconds apart. Measured 2026-08-30: eight rows for four checks, and `ship` reads
+  // this log to decide whether the last check was clean.
 
   if (asJson) {
     // The README promises these as fields of their own — "a number an agent can read"
