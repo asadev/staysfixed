@@ -117,6 +117,49 @@ export const CASES = [
   },
 
   {
+    // Nothing this product prints changes, deliberately. A server written straight on
+    // node:http registers nothing — there is no `app.get` for a reader to find — so before
+    // the request handler itself was read, the only honest answer here was silence, and
+    // silence is the one answer this corpus exists to make impossible.
+    name: 'a route quietly renamed in a server written by hand',
+    breaks: 'A server built straight on node:http had one of its routes renamed. Nothing it prints changes, so the only way to see it is to read the handler.',
+    expect: 'a finding',
+    mustSay: [/health/i],
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': [
+        "import http from 'node:http';",
+        '',
+        'const server = http.createServer((req, res) => {',
+        "  if (req.url === '/orders') {",
+        "    res.writeHead(200, { 'content-type': 'application/json' });",
+        '    res.end(\'{"orders":2}\');',
+        '    return;',
+        '  }',
+        broken
+          ? "  if (req.url === '/healthz') {"
+          : "  if (req.url === '/health') {",
+        '    res.writeHead(200);',
+        '    res.end(\'{"ok":true}\');',
+        '    return;',
+        '  }',
+        '  res.writeHead(404);',
+        "  res.end('not found');",
+        '});',
+        '',
+        "await new Promise((done) => server.listen(0, '127.0.0.1', done));",
+        'const address = server.address();',
+        "const port = typeof address === 'object' && address ? address.port : 0;",
+        'const reply = await fetch(`http://127.0.0.1:${port}/orders`);',
+        'console.log(`GET /orders -> ${reply.status}`);',
+        'console.log(await reply.text());',
+        'server.close();',
+        '',
+      ].join('\n'),
+    }),
+  },
+
+  {
     name: 'a field dropped from a reply',
     breaks: 'A field quietly disappeared from a reply that everything downstream reads.',
     expect: 'a finding',

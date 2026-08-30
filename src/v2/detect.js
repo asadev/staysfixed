@@ -189,6 +189,14 @@ const ALREADY_COVERED = new Set([
  *                                   whether a screen has an address at all or only a click.
  * @property {string} [startNote]    Why the start command is the one it is, so the settings can
  *                                   say it beside the line itself.
+ * @property {{language: string, reads: string|null}} [sourceBlind]
+ *                                   Set on a product this tool CAN boot and CAN run but cannot
+ *                                   fully read. `reads` names the one thing the source channel
+ *                                   does see, or is null when it sees nothing at all. The
+ *                                   language is carried by name because "some of it is not
+ *                                   checked" is useless and "nothing here reads Go" is not, and
+ *                                   because a product that is partly covered and reported as
+ *                                   covered is worse than one nothing looks at.
  */
 
 /**
@@ -389,50 +397,6 @@ export async function detectProject(options = {}) {
   };
 }
 
-/**
- * The same thing, said out loud, short enough to paste into a message to a person.
- *
- * @param {ProjectShape} shape
- * @returns {string[]}
- */
-export function describeShape(shape) {
-  /** @type {string[]} */
-  const lines = [];
-  lines.push(shape.summary);
-  lines.push('');
-  for (const product of shape.products) {
-    const sure = product.confidence >= 0.8 ? '' : product.confidence >= 0.5 ? ' (fairly sure)' : ' (a guess)';
-    lines.push(`${product.name}${sure} — ${product.why}`);
-    if (product.built.found) lines.push(`    built and ready: ${product.built.where}`);
-    for (const blocker of product.blockers) lines.push(`    in the way: ${blocker}`);
-  }
-  if (shape.products.length > 0) lines.push('');
-  if (shape.tests.runner) {
-    const how = shape.tests.command ? `, run by \`${short(shape.tests.command)}\`` : '';
-    lines.push(`Its own tests: ${shape.tests.files} file${shape.tests.files === 1 ? '' : 's'} written with ${shape.tests.runner}${how}. Those are journeys this tool can borrow instead of inventing its own.`);
-  } else {
-    lines.push('No test suite was found, so every journey has to come from the code or from a recording.');
-  }
-  if (shape.doors.read) {
-    const many = (/** @type {number} */ n, /** @type {string} */ one, /** @type {string} */ lots) => `${n} ${n === 1 ? one : lots}`;
-    lines.push(`Read out of the code without running any of it: ${many(shape.doors.route, 'route', 'routes')}, ${many(shape.doors.ipc, 'private channel', 'private channels')}, ${many(shape.doors.export, 'exported name', 'exported names')}, ${many(shape.doors.command, 'command', 'commands')}.`);
-  }
-  for (const doubt of shape.unsure) lines.push(doubt);
-  return lines;
-}
-
-/**
- * The single most important product, when something has to pick one — the front page of a
- * report, the default when a command takes one name. It is the most certain, and ties break
- * towards the one a person would name first.
- *
- * @param {ProjectShape} shape
- * @returns {Product|null}
- */
-export function mainProduct(shape) {
-  return shape.products[0] ?? null;
-}
-
 // ---------------------------------------------------------------------------
 // Working out the products in one folder
 // ---------------------------------------------------------------------------
@@ -475,12 +439,14 @@ async function productsIn(input) {
    * @param {Record<string, any>} [spec.suggest]
    * @param {Router} [spec.router]
    * @param {string} [spec.startNote]
+   * @param {{language: string, reads: string|null}} [spec.sourceBlind]
    */
   const add = (kind, spec) => {
     const meta = PRODUCT_KINDS[kind];
     found.push({
       kind,
       name: spec.name,
+      sourceBlind: spec.sourceBlind,
       surface: meta.surface,
       adapter: meta.adapter && available.has(meta.adapter) ? meta.adapter : null,
       confidence: spec.confidence,
@@ -593,7 +559,14 @@ async function productsIn(input) {
       why: manifest ? 'There is an Android manifest and a Gradle build here.' : gradle && gradlew ? 'There is a Gradle build with a wrapper script, which is the shape of an Android project.' : 'It depends on React Native, which builds an Android app.',
       evidence: clues,
       built: { found: Boolean(apk), where: apk ? path.relative(root, apk) : null, how: apk ? 'a built package was found' : 'nothing built was found' },
-      suggest: apk ? { apk: path.relative(root, apk) } : {},
+      // The command that would build one, carried out of here rather than worked out later.
+      // Without it init could see that nothing was built and still had nothing to hand
+      // anybody — so it said nothing at all, and an Android app with no APK anywhere read as
+      // covered in full right up until the check said there was nothing to walk.
+      suggest: {
+        ...(apk ? { apk: path.relative(root, apk) } : {}),
+        ...(gradlew || gradle ? { buildWith: `${gradlew ? './gradlew' : 'gradle'} ${folder('app') ? ':app:assembleDebug' : 'assembleDebug'}` } : {}),
+      },
       blockers: available.has('android')
         ? ['It runs on an emulator. Whether two emulator snapshots restore identically is unproven, so a run says which mode it used.']
         : ['Nothing in this copy of the tool can drive an Android app yet. When it can, it will run on an emulator against the stored record.'],
@@ -602,10 +575,17 @@ async function productsIn(input) {
 
   // ── Native desktop that is not Electron ───────────────────────────────────
   if (folder('src-tauri') || (file('Cargo.toml') && folder('src-tauri'))) {
+    // Whether a build is sitting there is a fact, and it was never looked for — so the answer
+    // defaulted to "nothing to build, it runs from source", which is untrue of a native app
+    // and left init with no reason to ask for one.
+    const builtHere = await findBuiltApp(dir);
     add('desktopNative', {
       name: 'the Tauri desktop app',
       confidence: 0.9,
       why: 'There is a src-tauri folder, which is how a Tauri desktop app is built.',
+      built: builtHere?.where
+        ? { found: true, where: path.relative(root, builtHere.where), how: builtHere.how }
+        : { found: false, where: null, how: 'nothing built was found' },
       evidence: [{ where: at('src-tauri'), means: 'Tauri wraps a web front end in a native window, so the window is not an Electron one.' }],
       blockers: available.has('windows')
         ? ['A native window can only be read from the operating system it runs on, so this needs a machine running that system — a reachable SSH host counts.']
@@ -696,26 +676,46 @@ async function productsIn(input) {
 
   // ── Server ────────────────────────────────────────────────────────────────
   const serverFramework = ['express', 'fastify', 'hono', 'koa', '@hapi/hapi', '@nestjs/core', 'polka', 'restify'].find(has) ?? null;
-  const serverish = Boolean(serverFramework) || doors.route > 0 || Boolean(containers.dockerfile && scripts.start);
+  // A hand-written server declares itself nowhere but in its own code, so the code is asked.
+  // Without this, a repository that answers requests all day was read as making only the one
+  // command in its package.json, and its whole HTTP surface went unwatched in silence.
+  const handWritten = serverFramework ? { yes: false, file: null, readsPort: false } : await handWrittenServerIn(dir);
+  const serverish = Boolean(serverFramework) || doors.route > 0 || handWritten.yes || Boolean(containers.dockerfile && scripts.start);
   if (serverish) {
     /** @type {Clue[]} */
     const clues = [];
     if (serverFramework) clues.push({ where: at('package.json'), means: `It depends on ${serverFramework}, which serves requests.` });
     if (doors.route > 0) clues.push({ where: 'the source', means: `${doors.route} route${doors.route === 1 ? '' : 's'} are declared in the code.` });
+    if (handWritten.yes && handWritten.file) clues.push({ where: at(handWritten.file), means: 'It opens an HTTP server on node\'s own http module and starts listening, with no framework under it.' });
     if (containers.dockerfile) clues.push({ where: containers.dockerfile, means: 'It ships as a container, so there is a known way to start it.' });
     // Next.js and its cousins are a website first. Their API routes are real and worth
     // checking, but calling the whole thing "a server" as well as "a website" would report
     // one product twice.
     const alreadyAWebsite = found.some((p) => p.kind === 'web') && !serverFramework;
+    // With no `start` script the entry file is the next best thing, and it is a real answer
+    // rather than a guess: it is the file that was just proven to open the socket. Leaving
+    // the start command empty because package.json was silent is how a server that IS
+    // checkable ends up listed as one nothing can walk.
+    const startsWith = scripts.start
+      ? inFolder(npmRun(scripts, scripts.start), where)
+      : handWritten.file ? inFolder(`node ${handWritten.file}`, where) : null;
     if (!alreadyAWebsite) {
       add('server', {
         name: where === '.' ? 'the server' : `the server in ${where}/`,
-        confidence: serverFramework ? 0.9 : doors.route > 3 ? 0.6 : 0.4,
-        why: serverFramework ? `It uses ${serverFramework} and ${doors.route} route${doors.route === 1 ? '' : 's'} are written in the code.` : `${doors.route} route${doors.route === 1 ? '' : 's'} are written in the code, though no web framework is installed.`,
+        confidence: serverFramework ? 0.9 : handWritten.yes ? 0.8 : doors.route > 3 ? 0.6 : 0.4,
+        why: serverFramework
+          ? `It uses ${serverFramework} and ${doors.route} route${doors.route === 1 ? '' : 's'} are written in the code.`
+          : handWritten.yes
+            ? `${handWritten.file} opens an HTTP server by hand and listens on it, and ${doors.route} route${doors.route === 1 ? '' : 's'} could be read out of the code.`
+            : `${doors.route} route${doors.route === 1 ? '' : 's'} are written in the code, though no web framework is installed.`,
         evidence: clues,
-        blockers: scripts.start ? [] : ['There is no command that starts it. The routes can be listed from the source without one, but none of them can be walked.'],
+        blockers: [
+          ...(startsWith ? [] : ['There is no command that starts it. The routes can be listed from the source without one, but none of them can be walked.']),
+          ...(handWritten.yes && !handWritten.readsPort ? [`${handWritten.file} names its port itself rather than taking one out of the environment. Two builds cannot be booted side by side on one port, so make it read PORT before this can be walked.`] : []),
+        ],
+        startNote: !scripts.start && startsWith ? `package.json names no start script, so this is the file that was found opening the socket: ${handWritten.file}.` : undefined,
         suggest: {
-          ...(scripts.start ? { start: inFolder(npmRun(scripts, scripts.start), where) } : {}),
+          ...(startsWith ? { start: startsWith } : {}),
           // Whether this server keeps anything. Both builds have to see the same rows, so a
           // server with a database needs a command that puts the data back — and a server
           // with NO database needs no such command, and must not be asked for one. Asking is
@@ -757,6 +757,48 @@ async function productsIn(input) {
       evidence: [{ where: at('package.json'), means: `Other projects import it, entering at ${entry}.` }],
       suggest: { imports: [{ name: 'the package entry', module: entry }] },
     });
+  }
+
+  // ── A product in a language nothing here READS ────────────────────────────
+  // Reading it and driving it are two different questions, and answering the second with the
+  // first is what made this tool turn away every Flask app it ever met. It can boot one and
+  // it can run one; it just cannot read one. So the surfaces it CAN reach are offered, and
+  // the one it cannot is carried on the product by name so nothing downstream can quietly
+  // report a half-covered product as covered.
+  const foreign = await foreignProjectIn(dir, listing);
+  if (foreign) {
+    // Python is the one whose addresses ARE read, so its server is half-sighted rather than
+    // blind and has to say which half. Every other language here is read not at all.
+    const readsAddresses = foreign.language === 'Python' && foreign.routes > 0;
+    /** @param {boolean} server */
+    const blindly = (server) => ({
+      language: foreign.language,
+      reads: server && readsAddresses ? 'the addresses it answers on, and nothing else' : null,
+    });
+    if (foreign.start) {
+      add('server', {
+        name: where === '.' ? `the ${foreign.language} server` : `the ${foreign.language} server in ${where}/`,
+        confidence: 0.75,
+        why: foreign.routes > 0
+          ? `It serves requests with ${foreign.framework}, and ${foreign.routes} address${foreign.routes === 1 ? '' : 'es'} were read out of its own source.`
+          : `${foreign.startWhy} Nothing here reads ${foreign.language} source, so its addresses are not known and only the boot itself is watched.`,
+        evidence: foreign.evidence,
+        sourceBlind: blindly(true),
+        startNote: foreign.startWhy,
+        blockers: foreign.readsPort ? [] : [`It names its own port rather than taking one out of the environment, so two builds cannot be booted side by side. Make it read PORT before this can be walked.`],
+        suggest: { start: inFolder(foreign.start, where), stateless: !keepsData(deps, containers) },
+      });
+    }
+    if (foreign.commands.length > 0) {
+      add('cli', {
+        name: foreign.commands.length === 1 ? `the \`${foreign.commands[0].name.replace(/ --help$/, '')}\` command` : `${foreign.commands.length} ${foreign.language} commands`,
+        confidence: 0.7,
+        why: `${foreign.language} commands were found that can be typed and asked to describe themselves, and running one needs no ${foreign.language} read at all.`,
+        evidence: foreign.evidence,
+        sourceBlind: blindly(false),
+        suggest: { commands: foreign.commands },
+      });
+    }
   }
 
   // ── Something real that nothing here can drive ────────────────────────────
@@ -1325,16 +1367,6 @@ function entryPointOf(pkg) {
 }
 
 /**
- * A command short enough to read. The whole of it stays in the data; only the sentence is cut.
- * @param {string} text
- * @returns {string}
- */
-function short(text) {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length <= 70 ? flat : `${flat.slice(0, 67)}...`;
-}
-
-/**
  * @param {Clue[]} clues
  * @returns {Clue[]}
  */
@@ -1743,6 +1775,222 @@ async function findCommandPrograms(input) {
   }
 
   return found;
+}
+
+/**
+ * How each language declares itself, and what it takes to start and to type.
+ *
+ * Not a table of languages this tool understands. It is a table of what can be OFFERED, and
+ * the difference is the whole point of it. Two of this tool's adapters never read a line of
+ * anybody's source — one runs a command and compares what it printed, the other boots a
+ * server on a spare port and asks it for routes — so a Go server and a Ruby app have always
+ * been checkable here, and were being turned away with "a language nothing here drives".
+ * That sentence was true of the source reader and false of everything else, and the person
+ * went away with nothing rather than with most of what they came for.
+ */
+const FOREIGN_LANGUAGES = Object.freeze({
+  Python: { manifests: ['pyproject.toml', 'requirements.txt', 'Pipfile', 'setup.py'], sources: /\.py$/ },
+  Go: { manifests: ['go.mod'], sources: /\.go$/ },
+  Rust: { manifests: ['Cargo.toml'], sources: /\.rs$/ },
+  Ruby: { manifests: ['Gemfile', 'config.ru'], sources: /\.rb$/ },
+  PHP: { manifests: ['composer.json'], sources: /\.php$/ },
+});
+
+/**
+ * What can honestly be offered for a project in a language this tool does not read.
+ *
+ * Python is read properly — its addresses come out of its own source, so the HTTP half works
+ * the way it does for JavaScript. The other four are offered a boot and a command and
+ * nothing more, and that limit is carried out of here by name rather than left to be
+ * noticed. Going further into reading four more route syntaxes would multiply the places
+ * this tool can invent an address that does not exist, and inventing one is worse than
+ * missing one.
+ *
+ * @param {string} dir
+ * @param {{files: string[], dirs: string[]}} listing
+ * @returns {Promise<null|{language: string, manifest: string, framework: string|null, start: string|null, startWhy: string, readsPort: boolean, commands: {name: string, run: string, describe: string}[], routes: number, evidence: Clue[]}>}
+ */
+async function foreignProjectIn(dir, listing) {
+  const language = Object.keys(FOREIGN_LANGUAGES).find(
+    (name) => FOREIGN_LANGUAGES[/** @type {keyof typeof FOREIGN_LANGUAGES} */ (name)].manifests.some((m) => listing.files.includes(m)),
+  );
+  if (!language) return null;
+  const spec = FOREIGN_LANGUAGES[/** @type {keyof typeof FOREIGN_LANGUAGES} */ (language)];
+  const manifest = spec.manifests.find((m) => listing.files.includes(m)) ?? spec.manifests[0];
+  const manifestText = await readTextIfSmall(path.join(dir, manifest)) ?? '';
+  /** @type {Clue[]} */
+  const evidence = [{ where: manifest, means: `This is how a ${language} project declares itself.` }];
+  /** @type {{name: string, run: string, describe: string}[]} */
+  const commands = [];
+  let framework = null;
+  let start = null;
+  let startWhy = '';
+  let readsPort = false;
+  let routes = 0;
+
+  if (language === 'Python') {
+    const { readPython } = await import('./adapters/python.js');
+    const reading = await readPython(dir);
+    routes = reading.doors.length;
+    // Always the plain interpreter, never the one inside the project's environment folder,
+    // and this was learned the hard way rather than chosen.
+    //
+    // Pointing the start command at `./.venv/bin/python` worked beautifully on the build in
+    // front of you and failed on every other one. An environment folder is not committed, so
+    // the OLD build — a clean checkout, which is the entire point of a paired run — has no
+    // such file, and every paired comparison quietly degraded to an unpaired one. The same
+    // path also runs commands inside a throwaway copy of the project, where the link out to
+    // the real interpreter is deliberately not followed.
+    //
+    // `python3` is whatever the person's shell has, which inside an activated environment is
+    // the environment's own. Same answer on both builds, every time, is worth more here than
+    // a cleverer answer that is only right on one of them.
+    const py = 'python3';
+    const typed = 'python3';
+    framework = reading.frameworks[0] ?? null;
+    if (framework === 'flask' && reading.appTarget) {
+      start = `${py} -m flask --app ${reading.appTarget} run --port $PORT`;
+      startWhy = `${reading.appFile} builds a Flask application, and this is how Flask is asked to serve one on a port it is given.`;
+    } else if (framework === 'fastapi' && reading.appTarget) {
+      start = `${py} -m uvicorn ${reading.appTarget} --port $PORT`;
+      startWhy = `${reading.appFile} builds a FastAPI application, and uvicorn is what serves one.`;
+    } else if (framework === 'django' && reading.managePy) {
+      start = `${py} ${reading.managePy} runserver $PORT`;
+      startWhy = `${reading.managePy} is Django's own way in, and runserver takes the port it is given.`;
+    }
+    if (start) {
+      readsPort = true;
+      evidence.push({ where: reading.appFile ?? reading.managePy ?? manifest, means: `It serves requests with ${framework}, and ${routes} address${routes === 1 ? '' : 'es'} were read out of its own source.` });
+    }
+    for (const entry of reading.entries) {
+      const name = path.basename(entry, '.py');
+      commands.push({ name: `${name} --help`, run: `${typed} ${entry} --help`, describe: `ask ${name} to print its help, and compare every word of it` });
+    }
+    // A console script is a command somebody types after installing, exactly like package.json's bin.
+    const scripts = /\[project\.scripts\]([\s\S]*?)(\n\[|$)/.exec(manifestText);
+    for (const line of (scripts?.[1] ?? '').split('\n')) {
+      const named = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
+      if (named && !commands.some((c) => c.name.startsWith(`${named[1]} `))) {
+        commands.push({ name: `${named[1]} --help`, run: `${named[1]} --help`, describe: `ask ${named[1]} to print its help, and compare every word of it` });
+      }
+    }
+  } else {
+    const listens = await foreignServerIn(dir, spec.sources, language);
+    framework = listens.framework;
+    readsPort = listens.readsPort;
+    if (listens.yes) {
+      if (language === 'Go') { start = 'go run .'; startWhy = 'go.mod makes this a module go can build and run where it stands.'; }
+      if (language === 'Rust') { start = 'cargo run'; startWhy = 'Cargo.toml makes this a crate cargo can build and run where it stands.'; }
+      if (language === 'Ruby') {
+        start = listing.files.includes('config.ru') ? 'bundle exec rackup -p $PORT' : 'bundle exec bin/rails server -p $PORT';
+        startWhy = listing.files.includes('config.ru') ? 'config.ru is the file rack serves.' : 'A Rails app is served by its own bin/rails.';
+      }
+      if (language === 'PHP') {
+        const web = listing.dirs.includes('public') ? ' -t public' : '';
+        start = `php -S 127.0.0.1:$PORT${web}`;
+        startWhy = 'PHP has a server of its own, and it takes the address it is given.';
+      }
+      if (listens.file) evidence.push({ where: listens.file, means: `It opens a server and listens on it${framework ? `, using ${framework}` : ''}.` });
+    }
+  }
+
+  // A Makefile target is a command somebody types, in any language at all. Only `help` is
+  // taken, and for the same reason package.json's commands are only ever asked for their
+  // help: `make deploy` is sitting right there in the same file, and running one because it
+  // was there would be this tool causing the very kind of damage it exists to catch.
+  if (listing.files.includes('Makefile')) {
+    const makefile = await readTextIfSmall(path.join(dir, 'Makefile')) ?? '';
+    if (/^help\s*:/m.test(makefile)) {
+      commands.push({ name: 'make help', run: 'make help', describe: 'ask the Makefile to print its help, and compare every word of it' });
+    }
+  }
+
+  if (!start && commands.length === 0) return null;
+  return { language, manifest, framework, start, startWhy, readsPort, commands, routes, evidence };
+}
+
+/**
+ * Does a folder hold a server in a language this tool cannot read?
+ *
+ * This looks for one thing only — that a server is started — and never for what it answers.
+ * Knowing a server is there is enough to boot it and watch it come up; claiming to know its
+ * addresses without reading them would be the invention this whole file exists to avoid.
+ *
+ * @param {string} dir
+ * @param {RegExp} sources
+ * @param {string} language
+ * @returns {Promise<{yes: boolean, file: string|null, framework: string|null, readsPort: boolean}>}
+ */
+async function foreignServerIn(dir, sources, language) {
+  const listens = /** @type {Record<string, RegExp>} */ ({
+    Go: /\bhttp\.ListenAndServe\b|\bhttp\.Server\s*\{|\.ListenAndServe\s*\(/,
+    Rust: /\bHttpServer::new\b|\baxum::(Server|serve)\b|\brocket::(build|ignite)\b|\bwarp::serve\b|\bTcpListener::bind\b/,
+    Ruby: /\bSinatra::Base\b|\brun\s+Sinatra\b|\bRails\.application\b|\bRack::Server\b/,
+    PHP: /\$app\s*->\s*run\s*\(|\bApp::run\b|\bKernel::handle\b|\brequire.*autoload/,
+  })[language];
+  const names = /** @type {Record<string, RegExp>} */ ({
+    Go: /\b(gin-gonic\/gin|labstack\/echo|go-chi\/chi|gofiber\/fiber|gorilla\/mux)\b/,
+    Rust: /\b(actix-web|axum|rocket|warp|tide)\b/,
+    Ruby: /\b(sinatra|rails|hanami|roda)\b/,
+    PHP: /\b(laravel\/framework|symfony\/framework-bundle|slim\/slim|laminas)\b/,
+  })[language];
+  if (!listens) return { yes: false, file: null, framework: null, readsPort: false };
+
+  const { files } = await readSome(dir, { match: sources, most: 80, depth: 3 });
+  for (const one of files) {
+    const where = one.rel.split(path.sep).join('/');
+    if (/(^|\/)(tests?|spec|fixtures|examples?|vendor)\//.test(where)) continue;
+    if (!listens.test(one.text)) continue;
+    return {
+      yes: true,
+      file: one.rel,
+      framework: names?.exec(one.text)?.[1] ?? null,
+      readsPort: /\bPORT\b/.test(one.text),
+    };
+  }
+  return { yes: false, file: null, framework: null, readsPort: false };
+}
+
+/**
+ * Does a folder hold a server somebody wrote by hand, on node's own http module?
+ *
+ * A product with no framework in its package.json used to be invisible here, and the whole
+ * HTTP half of it went unwatched while init said the repository made one command and nothing
+ * was being left out. There is no dependency to find, so the code itself has to say it.
+ *
+ * Three things have to be true in one file, and the third is the one that matters. This
+ * tool's own source imports node:net, calls createServer and calls listen — five files do —
+ * and not one of them is a server: they are port probes, `createServer()` with nothing
+ * inside the brackets. A server is handed something to answer requests with. That single
+ * character of difference is what keeps this from calling every repository a server.
+ *
+ * @param {string} dir
+ * @returns {Promise<{yes: boolean, file: string|null, readsPort: boolean}>}
+ */
+async function handWrittenServerIn(dir) {
+  const { files } = await readSome(dir, { most: 80, depth: 3 });
+  for (const one of files) {
+    const where = one.rel.split(path.sep).join('/');
+    // A server standing in a fixtures folder is a prop for somebody's test, not the product.
+    // This tool's own repository has one, and without this line it reported ITSELF as a
+    // server — which is exactly the kind of confident wrong answer that gets a tool switched
+    // off. The filename rule alone is not enough; the folder is what gives it away.
+    if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(where)) continue;
+    if (/(^|\/)(__tests__|__mocks__|tests?|e2e|fixtures|examples?|samples?|demos?)\//.test(where)) continue;
+    if (!/\bnode:(http|https|net)\b|require\(\s*['"](?:node:)?(?:http|https|net)['"]\s*\)/.test(one.text)) continue;
+    if (!/\bcreateServer\s*\(\s*[^)\s]/.test(one.text)) continue;
+    if (!/\.listen\s*\(/.test(one.text)) continue;
+    // And it has to listen somewhere a person could go. A server on `listen(0)` took whatever
+    // port was free, which is what a program does when it is talking to itself — this tool's
+    // own Android driver stands up a real HTTP server that way to catch an app's outbound
+    // calls, and it is nobody's product. A server this tool can drive has to take the port it
+    // is given, or at least name one.
+    const readsPort = /process\.env\.PORT|env\.PORT|Deno\.env\.get\(\s*['"]PORT/.test(one.text);
+    const namesAPort = /\.listen\s*\(\s*[1-9][0-9]{2,4}\b/.test(one.text);
+    if (!readsPort && !namesAPort) continue;
+    return { yes: true, file: one.rel, readsPort };
+  }
+  return { yes: false, file: null, readsPort: false };
 }
 
 /**

@@ -78,6 +78,14 @@ import { PRODUCT_KINDS, detectProject } from './detect.js';
  *                                one need said twice — doctor asks "what is missing on this
  *                                machine", this file asks "what is missing from these
  *                                settings", and on a server with no snapshot both answer.
+ * @property {boolean} [stopgap]  A need that exists only so a surface can never read as ready
+ *                                because the machine check came back with nothing to say. The
+ *                                machine check has actually looked at this machine, so when it
+ *                                does answer on the same topic its answer is better and this
+ *                                one steps aside. It is here for the case where it answers
+ *                                nothing at all, which is exactly when it goes quiet: doctor
+ *                                returns no Windows needs when there is no Windows host, which
+ *                                is the very situation somebody has to be told about.
  */
 
 /**
@@ -267,7 +275,7 @@ const SURFACE_FOR_PRODUCT = /** @type {Record<string, string>} */ ({
  * @param {Capabilities|null} machine
  * @returns {Readiness[]}
  */
-function readinessFor(project, machine) {
+export function readinessFor(project, machine) {
   /** @type {Readiness[]} */
   const out = [];
 
@@ -296,8 +304,18 @@ function readinessFor(project, machine) {
     }
 
     const mine = productNeeds(product, project);
+    // A stopgap is deliberately kept out of what the machine check is told is already
+    // covered, so the machine check still gets to answer on that topic. If it does, its
+    // answer wins — it has looked at this actual machine and can name the host it found —
+    // and the stopgap drops out. If it says nothing, the stopgap is what stops the product
+    // being called ready over a surface that cannot run at all.
+    const fromMachine = machineNeeds(surface, product, mine.filter((need) => !need.stopgap));
+    const answered = new Set(fromMachine.map((need) => need.topic).filter(Boolean));
     /** @type {Need[]} */
-    const needs = [...mine, ...machineNeeds(surface, product, mine)];
+    const needs = [
+      ...mine.filter((need) => !(need.stopgap && need.topic && answered.has(need.topic))),
+      ...fromMachine,
+    ];
 
     if (needs.length === 0) {
       out.push({
@@ -311,15 +329,25 @@ function readinessFor(project, machine) {
       continue;
     }
 
-    const everythingIsACommand = needs.every((need) => need.who === 'the agent');
+    // A need nobody can clear is not a job, and telling somebody they have work to do when
+    // they have none is how a set-up list gets a line that never comes off it. It still keeps
+    // the product out of "covered in full", which is the entire reason it exists.
+    const actionable = needs.filter((need) => need.who !== 'nobody');
+    const permanent = needs.filter((need) => need.who === 'nobody');
+    const everythingIsACommand = actionable.length > 0 && actionable.every((need) => need.who === 'the agent');
+    const alsoPermanent = permanent.length > 0 && actionable.length > 0
+      ? ` One other thing about it can never be checked here, and it is listed below.`
+      : '';
     out.push({
       product: product.name,
       kind: product.kind,
       surface: product.surface,
       state: everythingIsACommand ? 'the agent can fix this' : 'only a person can do this',
-      summary: everythingIsACommand
-        ? `${sentenceCase(product.name)} needs ${needs.length === 1 ? 'one thing' : `${needs.length} things`} setting up, and all of it can be done without asking anybody.`
-        : `${sentenceCase(product.name)} needs ${needs.filter((n) => n.who === 'a person').length === 1 ? 'one thing' : 'a few things'} only you can supply.`,
+      summary: actionable.length === 0
+        ? `${sentenceCase(product.name)} is checked as far as this tool can reach it, and one thing about it can never be checked here: ${permanent[0].what}.`
+        : everythingIsACommand
+          ? `${sentenceCase(product.name)} needs ${actionable.length === 1 ? 'one thing' : `${actionable.length} things`} setting up, and all of it can be done without asking anybody.${alsoPermanent}`
+          : `${sentenceCase(product.name)} needs ${actionable.filter((n) => n.who === 'a person').length === 1 ? 'one thing' : 'a few things'} only you can supply.${alsoPermanent}`,
       needs,
     });
   }
@@ -371,6 +399,26 @@ function productNeeds(product, project) {
   /** @type {Need[]} */
   const needs = [];
   const suggest = product.suggest ?? {};
+
+  // A product this tool can boot and can run but cannot READ. Nothing anybody does clears
+  // this one, and that is exactly why it is here: without it a Go server that gets booted
+  // and answered was reported as covered in full, and "in full" was a lie about the half
+  // nobody was looking at. A permanent hole said out loud is worth more than a clean result
+  // that means less than it says.
+  if (product.sourceBlind) {
+    const { language, reads } = product.sourceBlind;
+    needs.push({
+      what: reads ? `the rest of the ${language} source, which nothing here reads` : `the ${language} source, which nothing here reads`,
+      why: reads
+        ? `The source channel reads ${reads} out of this ${language} project. Everything else it holds — what it exports, what it reads out of the environment — is not read at all, so a change to any of that is invisible to this tool.`
+        : `Nothing here reads ${language} source. ${product.kind === 'server' ? 'The server is booted and watched, but its addresses were never read, so a route that quietly disappears is invisible.' : 'The command is run and every word it prints is compared, but a change inside it that never reaches the output is invisible.'}`,
+      unlocks: 'nothing anybody can do today — it is written down so a clean run here is never mistaken for a full one',
+      fix: `Nobody can fix this. It is a limit of this tool, not of your project. What IS checked here is real: ${product.kind === 'server' ? 'the server is booted on a spare port and asked for every address that could be read' : 'the command is run and everything it prints, returns and touches is compared'}.`,
+      who: 'nobody',
+      product: product.name,
+      topic: 'source',
+    });
+  }
 
   if (product.kind === 'electron') {
     if (!product.built.found) {
@@ -426,6 +474,83 @@ function productNeeds(product, project) {
       who: 'the agent',
       product: product.name,
       topic: 'app',
+    });
+  }
+
+  // An Android app with no package built. Exactly the same hole the iPhone one above was
+  // written to close, and it was still open here: a bare Gradle project was told "the Android
+  // app can be checked here now" and "nothing is being left out", and then the very next
+  // command said there was nothing to walk in this project at all. Setup promising more than
+  // the run can deliver is the one failure this tool cannot afford, because it is the failure
+  // that makes a clean result mean nothing.
+  if (product.kind === 'android' && !product.built.found) {
+    const build = typeof suggest.buildWith === 'string' ? String(suggest.buildWith) : null;
+    needs.push({
+      what: 'the app built as a package',
+      why: 'An Android app is checked by installing a built package on an emulator. There is no built package here yet, and a repository usually does not commit one.',
+      unlocks: 'opening the app on an emulator and reading what the screen says every control is and does',
+      fix: build
+        ? `cd ${product.where} && ${build}    (then set android.apk in the settings to the .apk it wrote)`
+        : 'Build the app the way this project normally does, then set android.apk in the settings to the .apk it wrote.',
+      who: build ? 'the agent' : 'a person',
+      product: product.name,
+      topic: 'app',
+    });
+  }
+
+  // A native desktop app, which needs two things this machine may not have, and which had no
+  // branch here at all. Its adapter refuses to run without a machine of the right operating
+  // system AND a built program — and doctor returns NO Windows needs at all when there is no
+  // Windows host, which is precisely the case somebody has to be told about. Empty needs plus
+  // an empty machine list read as "ready", so a Tauri app on a machine with no Windows box
+  // was reported as covered in full, and then the run said there was nowhere to open it.
+  //
+  // Both are stopgaps: on a machine where doctor DID find a host it says so by name, which is
+  // more useful than anything that can be written here, and these step aside for it.
+  if (product.kind === 'desktopNative') {
+    needs.push({
+      what: 'a machine running the operating system this app is built for',
+      why: 'A native window can only be read from the operating system it runs on, so this needs a machine running that one. Any ssh host that gets you a shell counts, including a shell on a Windows box, and nothing has to be installed on it.',
+      unlocks: 'opening the window and reading what it says every control is and does',
+      fix: 'Put {"host": "your-windows-box"} under "windows" in the settings.',
+      who: 'a person',
+      product: product.name,
+      topic: 'host',
+      stopgap: true,
+    });
+    if (!product.built.found) {
+      needs.push({
+        what: 'the built program',
+        why: 'A native app is checked by opening the built program, not the source, and there is no built program here yet.',
+        unlocks: 'opening the real window instead of reading about it',
+        fix: `Build it the way this project normally does${project.scripts.build ? ` — \`${project.scripts.build}\`` : ''}, then put {"exe": "path/to/YourApp.exe"} under "windows" in the settings — or {"remoteExe": "C:\\\\path\\\\to\\\\YourApp.exe"} if the build already lives on that machine, which is much faster.`,
+        who: project.scripts.build ? 'the agent' : 'a person',
+        product: product.name,
+        topic: 'app',
+        stopgap: true,
+      });
+    }
+  }
+
+  // A command-line program or a library with nothing named to run or import. The process
+  // adapter refuses outright in that state, and nothing here said so: doctor's answer for
+  // this surface is hardcoded to an empty list, so an empty needs list met an empty machine
+  // list and the product read as ready over an adapter that would not start.
+  const somethingToRun = (Array.isArray(suggest.commands) ? suggest.commands.length : 0)
+    + (Array.isArray(suggest.imports) ? suggest.imports.length : 0);
+  if ((product.kind === 'cli' || product.kind === 'library') && somethingToRun === 0) {
+    needs.push({
+      what: product.kind === 'library' ? 'something to import and compare' : 'a list of commands worth running',
+      why: 'Nothing was worked out here that this could actually run or import, and a run with nothing to do proves nothing about anything.',
+      unlocks: product.kind === 'library'
+        ? 'comparing what it exports and what those exports do'
+        : 'every word of what a command prints, what it exits with and every file it touches',
+      fix: product.kind === 'library'
+        ? 'Put {"imports": [{"name": "the package entry", "module": "./src/index.js"}]} under "process" in the settings.'
+        : 'Put {"commands": [{"name": "help", "run": "your-command --help"}]} under "process" in the settings. Only ever --help: a command in a manifest could deploy or publish, and running one because it was there would be this tool causing the damage it exists to catch.',
+      who: 'a person',
+      product: product.name,
+      topic: 'commands',
     });
   }
 
@@ -651,7 +776,16 @@ function topicOf(text) {
   const words = text.toLowerCase();
   if (/snapshot|restore|database|the same data|data folder/.test(words)) return 'data';
   if (/starts it|command that starts|start\b/.test(words)) return 'start';
-  if (/built app|app\.binary|electron\.binary/.test(words)) return 'app';
+  // "a built app", "a built iPhone app", "a built package" and "the app built as a package"
+  // are one missing thing, not four. The pattern used to be the two literal words "built app"
+  // and so it matched none of the ones with the platform's name in the middle — which is how
+  // an iPhone app with nothing built ended up asked for twice on one screen, once with a
+  // command to run and once with a paragraph saying the tool would never run it. Two lines
+  // about one missing file, apparently disagreeing, in front of somebody who does not write
+  // code.
+  if (/built (?:[a-z]+ )?(?:app|bundle|package|program)|built as a (?:package|bundle)|app\.binary|electron\.binary|android\.apk|\bapk\b|windows\.exe|remoteexe/.test(words)) return 'app';
+  if (/machine with a windows desktop|windows machine|ssh host|"host":/.test(words)) return 'host';
+  if (/commands worth running|to import and compare|process\.commands/.test(words)) return 'commands';
   if (/device id|identity|identityenv/.test(words)) return 'identity';
   if (/sample|real value/.test(words)) return 'samples';
   if (/browser|playwright|chromium/.test(words)) return 'browser';
@@ -1421,14 +1555,28 @@ function whatItCovers(readiness) {
   const covered = readiness.filter((r) => r.state === 'ready').map((r) => r.product);
   const partly = readiness.filter((r) => r.state === 'the agent can fix this' || r.state === 'only a person can do this').map((r) => r.product);
   const notCovered = readiness.filter((r) => r.state === 'not possible here').map((r) => r.product);
+  // A product whose only outstanding thing is a permanent limit is still not covered in
+  // full — but "not covered YET" would promise somebody a job that will never exist, so it
+  // gets the sentence further down instead of this one.
+  const waiting = readiness
+    .filter((r) => partly.includes(r.product) && r.needs.some((n) => n.who !== 'nobody'))
+    .map((r) => r.product);
 
   /** @type {string[]} */
   const parts = [];
   if (covered.length > 0) parts.push(`Right now a check here covers ${plainList(covered)} in full.`);
   else parts.push('Right now a check here covers nothing in full.');
-  if (partly.length > 0) parts.push(`${plainList(partly, true)} ${partly.length === 1 ? 'is' : 'are'} not covered yet, and the list below says exactly what is in the way and who has to do it.`);
+  if (waiting.length > 0) parts.push(`${plainList(waiting, true)} ${waiting.length === 1 ? 'is' : 'are'} not covered yet, and the list below says exactly what is in the way and who has to do it.`);
   if (notCovered.length > 0) parts.push(`${plainList(notCovered, true)} ${notCovered.length === 1 ? 'is' : 'are'} not checked at all, so a clean result says nothing whatever about ${notCovered.length === 1 ? 'it' : 'them'}.`);
   if (partly.length === 0 && notCovered.length === 0 && covered.length > 0) parts.push('Nothing is being left out.');
+
+  // The hole that never closes, named with the language that causes it. "Not covered yet"
+  // reads as a job somebody will get to; this one is nobody's job and saying so is the
+  // difference between an honest limit and a promise that is never kept.
+  const blind = readiness.filter((r) => r.needs.some((n) => n.who === 'nobody' && n.topic === 'source'));
+  if (blind.length > 0) {
+    parts.push(`${plainList(blind.map((r) => r.product), true)} ${blind.length === 1 ? 'is' : 'are'} written in a language this tool cannot read the way it reads JavaScript, so what is watched is what ${blind.length === 1 ? 'it does' : 'they do'} when run rather than what the code says — the list below names the language. No amount of setting up changes that.`);
+  }
 
   return { covered, partly, notCovered, short: parts.join(' ') };
 }
@@ -1468,58 +1616,6 @@ function nextCommands(readiness, project) {
 // ---------------------------------------------------------------------------
 // Words
 // ---------------------------------------------------------------------------
-
-/**
- * The plan, said out loud, short.
- *
- * Short is a requirement rather than a preference. Everything here also exists as data in the
- * plan object, and an agent reads that; a person reads this, and a person reading twenty lines
- * reads none of them.
- *
- * @param {InitPlan} plan
- * @returns {string[]}
- */
-export function describePlan(plan) {
-  /** @type {string[]} */
-  const lines = [];
-  lines.push(plan.project.summary);
-  lines.push('');
-  lines.push(plan.covers.short);
-
-  if (plan.needs.person.length > 0) {
-    lines.push('');
-    lines.push(plan.needs.person.length === 1 ? 'One thing needs you:' : `${plan.needs.person.length} things need you:`);
-    for (const need of plan.needs.person) {
-      lines.push(`  ${need.what} — ${need.why} It unlocks ${need.unlocks}.`);
-      lines.push(`    ${need.fix}`);
-    }
-  }
-  for (const need of plan.needs.impossible) {
-    lines.push('');
-    lines.push(`Not possible here: ${need.what}. ${need.fix}`);
-  }
-  // Code nothing could account for is the quietest way a run over-claims, so it is said in
-  // the summary a person reads rather than left in the data an agent might not open.
-  if (plan.project.unsure.length > 0) {
-    lines.push('');
-    lines.push('Worth knowing:');
-    for (const doubt of plan.project.unsure) lines.push(`  ${doubt}`);
-  }
-  return lines;
-}
-
-/**
- * @param {InitResult} result
- * @returns {string[]}
- */
-export function describeResult(result) {
-  const lines = describePlan(result.plan);
-  lines.push('');
-  if (result.written.length > 0) lines.push(`Written: ${result.written.map((f) => shortPath(f)).join(', ')}.`);
-  if (result.kept.length > 0) lines.push(`Left exactly as it was: ${result.kept.map((f) => shortPath(f)).join(', ')}.`);
-  for (const problem of result.problems) lines.push(problem);
-  return lines;
-}
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -1665,7 +1761,12 @@ export async function run(ctx) {
       continue;
     }
     for (const need of item.needs) {
-      say(paint.grey(`    ${mark.info} ${need.what} — ${need.who === 'the agent' ? 'the tool can do this itself: ' : 'somebody has to: '}${need.fix}`));
+      // A need nobody can clear must not read like a job. "Somebody has to" in front of a
+      // permanent limit sends a person looking for the thing they are supposed to do.
+      const label = need.who === 'the agent' ? 'the tool can do this itself: '
+        : need.who === 'nobody' ? 'nobody can do anything about this: '
+        : 'somebody has to: ';
+      say(paint.grey(`    ${mark.info} ${need.what} — ${label}${need.fix}`));
     }
   }
 

@@ -31,6 +31,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import nodeModule from 'node:module';
 import { defineAdapter, joinPath, notCovered, observation } from './contract.js';
+import { readPythonRoutes } from './python.js';
 
 // ---------------------------------------------------------------------------
 // The lexer
@@ -318,6 +319,19 @@ const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', '
  */
 const ROUTER_NAMES = new Set(['app', 'router', 'server', 'fastify', 'api', 'routes']);
 
+/**
+ * The two names a hand-written request handler almost always gives its arguments. A server
+ * written straight on `node:http` registers nothing — there is no `app.get` to find — so the
+ * only thing that says "this function is where requests arrive" is the shape of its
+ * parameters. Both halves have to match before either name is believed, because a lone
+ * `req` could be anything and a function taking `(req, res)` could not.
+ */
+const REQUEST_PARAM_NAMES = new Set(['req', 'request', 'incoming']);
+const RESPONSE_PARAM_NAMES = new Set(['res', 'response', 'reply']);
+
+/** What a route reads as when the code never checks which verb it is. */
+const METHOD_UNKNOWN = 'ANY';
+
 /** @param {string} file */
 export function looksLikeATest(file) {
   const normalised = file.split(path.sep).join('/');
@@ -524,6 +538,13 @@ export function readFile(relFile, text) {
     }
   }
 
+  // A server written straight on node:http registers nothing. There is no `app.get` for the
+  // sweep above to find, so every route in it was invisible — and a repository whose entire
+  // HTTP surface is invisible was then reported as covered in full, which is the worst
+  // sentence this tool can say. In a hand-written server the routes live in the comparisons
+  // instead, and that is what this reads.
+  doors.push(...handWrittenRoutes(tokens, relFile, inTest, fromConstant));
+
   return { doors, constants: exportedConstants, recoveries, typesStripped };
 }
 
@@ -556,6 +577,342 @@ function isRouterFactory(tokens, at) {
   if (/^(express|fastify|Fastify|Router|Hono|polka|connect)$/.test(first.v)) return true;
   // express.Router(), http.createServer()
   return tokens[at + 1]?.v === '.' && /^(Router|createServer)$/.test(tokens[at + 2]?.v ?? '');
+}
+
+// ---------------------------------------------------------------------------
+// Servers written by hand, with no framework under them
+// ---------------------------------------------------------------------------
+
+/**
+ * A path a hand-written server would really answer on.
+ *
+ * The comparison this came from is already strong evidence — the left-hand side had to be
+ * proven to hold the request's own address before we got here — so this only has to throw
+ * out the shapes no route ever has. It deliberately does NOT reject a path because it ends
+ * in something that looks like a file: `/favicon.ico` and `/api/data.json` are real routes,
+ * and a reader that quietly dropped them would be hiding doors to look tidy.
+ *
+ * @param {Token|undefined} token
+ * @returns {string|null}
+ */
+function routePathIn(token) {
+  if (!token) return null;
+  if (token.t !== 'string' && token.t !== 'template') return null;
+  if (token.built) return null;
+  const value = token.v;
+  if (!value.startsWith('/')) return null;
+  if (value.length > 120) return null;
+  if (/[\\<>{}()\s]/.test(value)) return null;
+  return value;
+}
+
+/**
+ * The first parameter of the function written at `at`, when one is written there.
+ *
+ * Only a function literal counts. `createServer(handler)` names a function defined
+ * somewhere else, and guessing what that one calls its arguments would be inventing a fact —
+ * the `(req, res)` rule below is what covers that case, and it needs both names to agree
+ * before it believes either.
+ *
+ * @param {Token[]} tokens
+ * @param {number} at
+ * @returns {string|null}
+ */
+function firstParameterAt(tokens, at) {
+  let i = at;
+  while (tokens[i]?.t === 'name' && (tokens[i].v === 'async' || tokens[i].v === 'function')) i++;
+  if (tokens[i]?.v === '*') i++;
+  // A named function expression: skip its name, but only when a parameter list follows.
+  if (tokens[i]?.t === 'name' && tokens[i + 1]?.v === '(' && tokens[at]?.v !== tokens[i]?.v) i++;
+  const first = tokens[i];
+  if (!first) return null;
+  if (first.t === 'name' && tokens[i + 1]?.v === '=>') return first.v;
+  if (first.v !== '(') return null;
+  const name = tokens[i + 1];
+  if (name?.t !== 'name') return null;
+  const close = matchBracket(tokens, i);
+  const arrow = tokens[close + 1]?.v === '=>';
+  const wasFunction = tokens[at]?.v === 'function' || tokens[at]?.v === 'async';
+  if (!arrow && !wasFunction) return null;
+  return name.v;
+}
+
+/**
+ * Every name in this file that holds an arriving request.
+ *
+ * Two ways in, and both need proof. A function handed straight to `createServer` is a
+ * request handler by definition, whatever it calls its arguments. Everything else has to be
+ * a function taking `(req, res)` — BOTH halves conventional — because a lone `req` could be
+ * anything at all, and a pair could not be.
+ *
+ * @param {Token[]} tokens
+ * @returns {Set<string>}
+ */
+function requestNamesIn(tokens) {
+  /** @type {Set<string>} */
+  const names = new Set();
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.t !== 'name') continue;
+    let callbackAt = -1;
+    if (t.v === 'createServer' && tokens[i + 1]?.v === '(') callbackAt = i + 2;
+    else if (
+      t.v === 'on' && tokens[i - 1]?.v === '.' && tokens[i + 1]?.v === '('
+      && tokens[i + 2]?.t === 'string' && tokens[i + 2].v === 'request' && tokens[i + 3]?.v === ','
+    ) callbackAt = i + 4;
+    if (callbackAt === -1) continue;
+    const found = firstParameterAt(tokens, callbackAt);
+    if (found) names.add(found);
+  }
+
+  for (let i = 0; i + 4 < tokens.length; i++) {
+    if (tokens[i].v !== '(') continue;
+    const [a, comma, b, close] = [tokens[i + 1], tokens[i + 2], tokens[i + 3], tokens[i + 4]];
+    if (a?.t !== 'name' || comma?.v !== ',' || b?.t !== 'name' || close?.v !== ')') continue;
+    if (REQUEST_PARAM_NAMES.has(a.v) && RESPONSE_PARAM_NAMES.has(b.v)) names.add(a.v);
+  }
+
+  return names;
+}
+
+/**
+ * The bracket closing `new URL(<the request address>, …)` when that is what sits at `at`.
+ * @param {Token[]} tokens
+ * @param {number} at
+ * @param {(i: number) => number} pathEnd
+ * @returns {number}
+ */
+function urlBuiltFromRequest(tokens, at, pathEnd) {
+  if (tokens[at]?.v !== 'new' || tokens[at + 1]?.v !== 'URL' || tokens[at + 2]?.v !== '(') return -1;
+  if (pathEnd(at + 3) < 0) return -1;
+  return matchBracket(tokens, at + 2);
+}
+
+/**
+ * Every name in this file that holds the address being asked for, and every name that holds
+ * a parsed URL it was built from.
+ *
+ * Run to a standstill rather than once, because `const p = req.url` and
+ * `const q = p.split('?')[0]` is two hops and reading only the first hop loses the routes
+ * that hang off the second.
+ *
+ * @param {Token[]} tokens
+ * @param {Set<string>} requestNames
+ * @returns {{pathNames: Set<string>, urlNames: Set<string>}}
+ */
+function pathNamesIn(tokens, requestNames) {
+  /** @type {Set<string>} */
+  const pathNames = new Set();
+  /** @type {Set<string>} */
+  const urlNames = new Set();
+  /** @param {number} i */
+  const pathEnd = (i) => pathExpressionEnd(tokens, i, requestNames, pathNames, urlNames);
+
+  for (let round = 0; round < 4; round++) {
+    const before = pathNames.size + urlNames.size;
+    for (let i = 0; i + 3 < tokens.length; i++) {
+      const t = tokens[i];
+      if (t.t !== 'name' || (t.v !== 'const' && t.v !== 'let' && t.v !== 'var')) continue;
+
+      // const { pathname } = new URL(req.url, …)
+      if (tokens[i + 1]?.v === '{') {
+        const close = matchBracket(tokens, i + 1);
+        if (tokens[close + 1]?.v !== '=') continue;
+        if (urlBuiltFromRequest(tokens, close + 2, pathEnd) < 0) continue;
+        for (let j = i + 2; j < close; j++) {
+          if (tokens[j]?.t !== 'name' || tokens[j].v !== 'pathname') continue;
+          const renamed = tokens[j + 1]?.v === ':' && tokens[j + 2]?.t === 'name' ? tokens[j + 2].v : null;
+          pathNames.add(renamed ?? 'pathname');
+        }
+        continue;
+      }
+
+      const target = tokens[i + 1];
+      if (target.t !== 'name' || tokens[i + 2]?.v !== '=') continue;
+      if (pathEnd(i + 3) > 0) { pathNames.add(target.v); continue; }
+      if (urlBuiltFromRequest(tokens, i + 3, pathEnd) > 0) urlNames.add(target.v);
+    }
+    if (pathNames.size + urlNames.size === before) break;
+  }
+
+  return { pathNames, urlNames };
+}
+
+/**
+ * Where the expression starting at `at` ends, when that expression is the address being
+ * asked for. Anything else answers -1.
+ *
+ * `.split('?')[0]` is allowed on the end because cutting the query string off is the one
+ * thing every hand-written server does to the address before comparing it. `.replace(…)` and
+ * friends are not, and that is deliberate: they change the value into something we can no
+ * longer claim is the route, and inventing a route is worse than missing one.
+ *
+ * @param {Token[]} tokens
+ * @param {number} at
+ * @param {Set<string>} requestNames
+ * @param {Set<string>} pathNames
+ * @param {Set<string>} urlNames
+ * @returns {number}
+ */
+function pathExpressionEnd(tokens, at, requestNames, pathNames, urlNames) {
+  const t = tokens[at];
+  if (!t || t.t !== 'name') return -1;
+  /** @param {number} i */
+  const again = (i) => pathExpressionEnd(tokens, i, requestNames, pathNames, urlNames);
+
+  let end = -1;
+  const dotted = tokens[at + 1]?.v === '.' ? tokens[at + 2]?.v : null;
+  if (pathNames.has(t.v) && dotted !== 'pathname') end = at + 1;
+  else if (requestNames.has(t.v) && dotted === 'url') end = at + 3;
+  else if (urlNames.has(t.v) && dotted === 'pathname') end = at + 3;
+  else if (t.v === 'new') {
+    const close = urlBuiltFromRequest(tokens, at, again);
+    if (close > 0 && tokens[close + 1]?.v === '.' && tokens[close + 2]?.v === 'pathname') end = close + 3;
+  } else if (dotted === 'parse' && tokens[at + 3]?.v === '(') {
+    // The shape node's own `url` module has had since forever: url.parse(req.url).pathname.
+    const close = matchBracket(tokens, at + 3);
+    if (again(at + 4) > 0 && tokens[close + 1]?.v === '.' && tokens[close + 2]?.v === 'pathname') end = close + 3;
+  }
+  if (end < 0) return -1;
+
+  for (;;) {
+    if (tokens[end]?.v !== '.' || tokens[end + 1]?.v !== 'split' || tokens[end + 2]?.v !== '(') break;
+    const close = matchBracket(tokens, end + 2);
+    const separator = tokens[end + 3];
+    const cutsTheQuery = separator?.t === 'string' && (separator.v === '?' || separator.v === '#');
+    const takesTheFirst = tokens[close + 1]?.v === '[' && tokens[close + 2]?.v === '0' && tokens[close + 3]?.v === ']';
+    if (!cutsTheQuery || !takesTheFirst) break;
+    end = close + 4;
+  }
+  return end;
+}
+
+/**
+ * The verb this route is guarded by, when the same condition says.
+ *
+ * A hand-written server that never looks at `req.method` answers a route on every verb, and
+ * writing GET on it would be putting a fact in the report that is not in the code. Only what
+ * the condition itself says is believed; anything further out reads as unknown, which the
+ * rest of the tool already has a word for.
+ *
+ * @param {Token[]} tokens
+ * @param {number} at
+ * @param {Set<string>} requestNames
+ * @returns {string}
+ */
+function methodGuarding(tokens, at, requestNames) {
+  let depth = 0;
+  let open = -1;
+  for (let j = at - 1, steps = 0; j >= 0 && steps < 400; j--, steps++) {
+    const t = tokens[j];
+    if (t.t !== 'punct') continue;
+    if (t.v === ')' || t.v === ']' || t.v === '}') { depth++; continue; }
+    if (t.v === '[' || t.v === '{') { if (depth === 0) return METHOD_UNKNOWN; depth--; continue; }
+    if (t.v === '(') { if (depth === 0) { open = j; break; } depth--; }
+  }
+  if (open < 0) return METHOD_UNKNOWN;
+  const keyword = tokens[open - 1];
+  if (keyword?.t !== 'name' || (keyword.v !== 'if' && keyword.v !== 'while')) return METHOD_UNKNOWN;
+
+  const close = matchBracket(tokens, open);
+  for (let j = open + 1; j + 3 < close; j++) {
+    if (tokens[j].t !== 'name' || !requestNames.has(tokens[j].v)) continue;
+    if (tokens[j + 1]?.v !== '.' || tokens[j + 2]?.v !== 'method') continue;
+    const operator = tokens[j + 3]?.v;
+    if (operator !== '===' && operator !== '==') continue;
+    const verb = tokens[j + 4];
+    if (verb?.t !== 'string' || !/^[a-z]+$/i.test(verb.v)) continue;
+    return verb.v.toUpperCase();
+  }
+  return METHOD_UNKNOWN;
+}
+
+/**
+ * Read the routes out of a server nobody used a framework to write.
+ *
+ * The whole thing is gated on there being a proven request handler in the file, so a project
+ * with no server in it walks straight back out. That gate is also what keeps the trap out:
+ * a string like '/etc/app/config.json' compared against an ordinary variable never reaches
+ * here, because the left-hand side was never shown to hold the request's own address.
+ *
+ * @param {Token[]} tokens
+ * @param {string} relFile
+ * @param {boolean} inTest
+ * @param {(raw: string) => {name: string|Pending, via: string}} fromConstant
+ * @returns {RawDoor[]}
+ */
+function handWrittenRoutes(tokens, relFile, inTest, fromConstant) {
+  const requestNames = requestNamesIn(tokens);
+  if (requestNames.size === 0) return [];
+  const { pathNames, urlNames } = pathNamesIn(tokens, requestNames);
+
+  /** @type {RawDoor[]} */
+  const doors = [];
+  const via = 'a hand-written request handler';
+  /** @param {number} i */
+  const pathEnd = (i) => pathExpressionEnd(tokens, i, requestNames, pathNames, urlNames);
+
+  /** @param {Token} token @param {string} method @param {boolean} prefix */
+  const take = (token, method, prefix) => {
+    const value = routePathIn(token);
+    if (value === null) return;
+    // A prefix match is not one route, it is a family of them. Written as a changing part it
+    // joins the flow that already exists for `/users/:id` — the tool asks for a real value
+    // and, until it gets one, says out loud that nothing under here was ever looked at.
+    const name = prefix ? `${value.replace(/\/+$/, '')}/:rest` : value;
+    doors.push(door('route', name, method, relFile, token.line, inTest, true, via));
+  };
+
+  for (let i = 0; i < tokens.length; i++) {
+    // switch (pathname) { case '/a': … }
+    if (tokens[i].t === 'name' && tokens[i].v === 'switch' && tokens[i + 1]?.v === '(') {
+      const close = matchBracket(tokens, i + 1);
+      if (pathEnd(i + 2) !== close || tokens[close + 1]?.v !== '{') continue;
+      const endOfBody = matchBracket(tokens, close + 1);
+      for (let j = close + 2; j < endOfBody; j++) {
+        if (tokens[j].t !== 'name' || tokens[j].v !== 'case') continue;
+        const label = tokens[j + 1];
+        if (label?.t === 'name') {
+          const known = fromConstant(label.v);
+          if (typeof known.name === 'string' && known.name.startsWith('/')) {
+            doors.push(door('route', known.name, METHOD_UNKNOWN, relFile, label.line, inTest, true, known.via));
+          }
+          continue;
+        }
+        take(label, METHOD_UNKNOWN, false);
+      }
+      i = endOfBody;
+      continue;
+    }
+
+    // '/a' === req.url, which reads the same and is written often enough to matter.
+    const mirrored = routePathIn(tokens[i]);
+    if (mirrored !== null && (tokens[i + 1]?.v === '===' || tokens[i + 1]?.v === '==') && pathEnd(i + 2) > 0) {
+      take(tokens[i], methodGuarding(tokens, i, requestNames), false);
+      continue;
+    }
+
+    const end = pathEnd(i);
+    if (end < 0) continue;
+    const operator = tokens[end]?.v;
+    if (operator === '===' || operator === '==') {
+      const label = tokens[end + 1];
+      if (label?.t === 'name') {
+        const known = fromConstant(label.v);
+        if (typeof known.name === 'string' && known.name.startsWith('/')) {
+          doors.push(door('route', known.name, methodGuarding(tokens, i, requestNames), relFile, label.line, inTest, true, known.via));
+        }
+      } else {
+        take(label, methodGuarding(tokens, i, requestNames), false);
+      }
+    } else if (operator === '.' && tokens[end + 1]?.v === 'startsWith' && tokens[end + 2]?.v === '(') {
+      take(tokens[end + 3], methodGuarding(tokens, i, requestNames), true);
+    }
+    i = end - 1;
+  }
+
+  return doors;
 }
 
 /**
@@ -929,9 +1286,16 @@ async function collectFiles(root, folders, maxFileBytes) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Every route that is not written as a call in JavaScript.
+ *
  * Next.js puts its routes in folder names, so no amount of reading calls will find them.
  * Both layouts are handled: an app folder, where a `route` file's exported method names are
  * the verbs, and a pages/api folder, where the file itself is the route.
+ *
+ * Python's routes are read here too, and this is the reason they are read HERE rather than
+ * somewhere of their own: five places in this tool ask for routes, and four of them would
+ * have had to be found and changed. A Flask app that had routes in one of them and none in
+ * the others is a worse bug than no Python support at all.
  *
  * A folder that cannot be opened takes every route behind it, so it is named rather than
  * skipped. This is the same bug as the one fixed in the file walk on 2026-08-30 — a hole that
@@ -1013,6 +1377,10 @@ export async function readFileRoutes(root) {
       });
     });
   }
+
+  const python = await readPythonRoutes(root);
+  doors.push(...python.doors);
+  problems.push(...python.problems);
 
   return { doors, problems };
 }
@@ -1183,16 +1551,15 @@ export function surfaceOf(project) {
   return 'library';
 }
 
-/** @type {ContractReading|null} */
-let lastReading = null;
-
 /**
  * The static-contract adapter.
  *
  * It applies to every project, always, because every project has source. It is the one
  * adapter that costs nothing to run and can never break anything, so the engine runs it
- * first and hands its result to the others — the HTTP adapter learns its routes from here
- * rather than by crawling a running server.
+ * first. It does NOT hand its reading to the other adapters: the HTTP adapter calls
+ * readContract() itself, which costs a second read and buys not caring what order the
+ * adapters ran in. A shared cache was tried and taken out again, because an adapter that
+ * silently needs another one to have gone first is the bug this tool exists to catch.
  */
 export const sourceAdapter = defineAdapter({
   name: 'source',
@@ -1271,22 +1638,10 @@ export const sourceAdapter = defineAdapter({
     for (const found of reading.doors) {
       reading.report.counts[found.kind] = (reading.report.counts[found.kind] ?? 0) + 1;
     }
-    lastReading = reading;
     return contractObservations(reading, journey.name);
   },
 
   async teardown() {
-    lastReading = null;
+    // Nothing to tear down. Nothing was started and nothing was written.
   },
 });
-
-/**
- * The last thing the source adapter read.
- *
- * The HTTP adapter uses this to find its routes without crawling. Anything that cannot
- * guarantee it runs after the source adapter should call {@link readContract} itself rather
- * than depend on run order.
- */
-export function lastContractReading() {
-  return lastReading;
-}
