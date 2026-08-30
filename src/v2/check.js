@@ -637,6 +637,70 @@ function comparedNothing(verdict) {
 }
 
 /**
+ * Copies left behind by runs that never finished.
+ *
+ * A check copies the whole project into a scratch folder, and a run that is killed — Ctrl-C,
+ * a laptop closing, a CI job cancelled — never gets to delete it. Nothing else ever did
+ * either: measured on 2026-08-30, an ordinary machine had 777 MB of `staysfixed-check-*`
+ * sitting in the temporary folder, one copy of it 485 MB, and a later run added to the pile
+ * rather than clearing it. A tool that quietly fills somebody's disk is not one they keep.
+ *
+ * The rule is the one the browser sweep already uses: never touch something in use. A folder
+ * whose owner is still running is left completely alone, and one with no owner recorded is
+ * only taken once it is far older than any real run could be. A dead process id that has
+ * since been reused reads as "still running" and the folder survives, which is the safe way
+ * round to be wrong.
+ *
+ * @returns {Promise<void>}
+ */
+export async function sweepAbandonedScratch() {
+  const AN_HOUR = 60 * 60 * 1000;
+  const MOST_PER_RUN = 20;
+  let names = [];
+  try {
+    names = await fsp.readdir(os.tmpdir());
+  } catch {
+    return;
+  }
+  let taken = 0;
+  for (const name of names) {
+    if (taken >= MOST_PER_RUN) break;
+    if (!name.startsWith('staysfixed-check-')) continue;
+    const dir = path.join(os.tmpdir(), name);
+    let abandoned = false;
+    try {
+      const owner = JSON.parse(await fsp.readFile(path.join(dir, 'owner.json'), 'utf8'));
+      abandoned = typeof owner?.pid !== 'number' || !processAlive(owner.pid);
+    } catch {
+      // No owner recorded: either an older copy or one that died before it could say. Age is
+      // all there is to go on, and an hour is well past the longest run this tool makes.
+      try {
+        abandoned = Date.now() - (await fsp.stat(dir)).mtimeMs > AN_HOUR;
+      } catch {
+        abandoned = false;
+      }
+    }
+    if (!abandoned) continue;
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    taken += 1;
+  }
+}
+
+/**
+ * Is that process still running? Signal 0 asks without sending anything.
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * One gap's sentence, trimmed to something that fits inside another sentence.
  * @param {string} what
  * @returns {string}
@@ -1390,9 +1454,12 @@ async function openProject(options) {
     storeTrouble.push(`The folder Stays Fixed keeps its records in could not be made: ${messageOf(e)}`);
   }
 
+  await sweepAbandonedScratch();
   const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-check-'));
   const evidenceDir = path.join(scratch, 'evidence');
   await fsp.mkdir(evidenceDir, { recursive: true });
+  // Who this belongs to, so a later run can tell an abandoned copy from one in use.
+  await fsp.writeFile(path.join(scratch, 'owner.json'), JSON.stringify({ pid: process.pid, at: new Date().toISOString() })).catch(() => {});
 
   // Working out what there is to walk comes FIRST, before anything is asked of git. Somebody
   // standing in a folder they have not set up yet should be told to run `init`, not told

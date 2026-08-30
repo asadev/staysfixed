@@ -20,6 +20,7 @@
 
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,6 +39,7 @@ import {
   takePort,
 } from '../../src/v2/adapters/isolate.js';
 import { scratchDir, cleanUp } from '../support.mjs';
+import { sweepAbandonedScratch } from '../../src/v2/check.js';
 
 after(cleanUp);
 
@@ -333,5 +335,37 @@ describe('proving it is gone', () => {
     await releaseIsolation(one);
     const again = await releaseIsolation(one);
     assert.equal(again.proved, true, again.why);
+  });
+});
+
+describe('copies left behind by a run that never finished', () => {
+  test('an abandoned copy is reclaimed and one still in use is left completely alone', async () => {
+    // A check copies the whole project into a scratch folder, and a killed run never gets to
+    // delete it. Nothing else ever did either: measured on 2026-08-30, an ordinary machine
+    // had 777 MB of them sitting in the temporary folder, one copy 485 MB, and later runs
+    // added to the pile rather than clearing it.
+    const here = await scratchDir('staysfixed-sweeproot');
+    const realTmp = process.env.TMPDIR;
+    process.env.TMPDIR = here;
+    try {
+      const dead = path.join(here, 'staysfixed-check-dead');
+      const busy = path.join(here, 'staysfixed-check-busy');
+      const nameless = path.join(here, 'staysfixed-check-nameless');
+      for (const d of [dead, busy, nameless]) await fsp.mkdir(d, { recursive: true });
+      // 999997 is not a process. This one is: we are it.
+      await fsp.writeFile(path.join(dead, 'owner.json'), JSON.stringify({ pid: 999997 }));
+      await fsp.writeFile(path.join(busy, 'owner.json'), JSON.stringify({ pid: process.pid }));
+
+      await sweepAbandonedScratch();
+
+      assert.equal(fs.existsSync(dead), false, 'a copy whose owner is gone is the whole point');
+      assert.equal(fs.existsSync(busy), true, 'and one still in use must never be touched');
+      // No owner recorded and made moments ago: too young to judge, so it stays. Deleting it
+      // would be exactly the mistake this guards against, one directory along.
+      assert.equal(fs.existsSync(nameless), true, 'a fresh copy with no owner is not evidence of abandonment');
+    } finally {
+      if (realTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = realTmp;
+    }
   });
 });
