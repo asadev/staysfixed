@@ -270,6 +270,16 @@ function testingBrowsers() {
         take('chromium', path.join(inner, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'));
         take('chrome-for-testing', path.join(inner, 'chrome-linux', 'chrome'));
         take('chrome-for-testing', path.join(inner, 'chrome-win', 'chrome.exe'));
+        // The 64 matters, and leaving it off made this tool blind to full Chrome on every
+        // machine that is not a Mac. Playwright unpacks Linux into `chrome-linux64` and
+        // Windows into `chrome-win64`; Puppeteer does the same. Only macOS uses the names
+        // above, which is why it was never noticed here. On Linux this meant `npx playwright
+        // install chromium` - the command THIS FILE tells people to run - left a browser the
+        // survey could not see, and checks quietly fell back to the headless shell, or said
+        // there was no browser at all when the shell was not there too. Measured on a real
+        // Linux box on 2026-08-30: three Chromes present, none of them found.
+        take('chrome-for-testing', path.join(inner, 'chrome-linux64', 'chrome'));
+        take('chrome-for-testing', path.join(inner, 'chrome-win64', 'chrome.exe'));
         take('headless-shell', path.join(inner, 'chrome-headless-shell-mac-arm64', 'chrome-headless-shell'), true);
         take('headless-shell', path.join(inner, 'chrome-headless-shell-mac-x64', 'chrome-headless-shell'), true);
         take('headless-shell', path.join(inner, 'chrome-headless-shell-linux64', 'chrome-headless-shell'), true);
@@ -534,11 +544,56 @@ function killNow(pid, home) {
     } catch {
       // Already gone. That is the outcome we wanted.
     }
+    // SIGKILL is a request to the kernel, not something that has already happened, and a
+    // browser is not one process. While the parent is being reaped its children are still
+    // writing into the profile, so deleting the folder in the same breath loses the race:
+    // the sweep starts, a file appears behind it, the directory is not empty, and the
+    // profile outlives the run - which is the one thing `nothing it opened outlives the
+    // run` promises. It passed on macOS and on an idle Linux box and failed on a loaded CI
+    // runner for four releases, which is exactly how a race behaves.
+    for (let i = 0; i < 40 && stillThere(pid); i++) waitSync(10);
   }
+  // Then remove it, and more than once. One rmSync is a snapshot; a file recreated a
+  // millisecond after the sweep began turns it into ENOTEMPTY and a leftover folder.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      fs.rmSync(home, { recursive: true, force: true });
+      return;
+    } catch {
+      waitSync(20);
+    }
+  }
+  // A profile left in the temporary folder is untidy, not harmful — and it is exactly what
+  // `staysfixed browsers --clean` is for.
+}
+
+/**
+ * Is that process still running? Signal 0 asks without sending anything.
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function stillThere(pid) {
   try {
-    fs.rmSync(home, { recursive: true, force: true });
+    process.kill(pid, 0);
+    return true;
   } catch {
-    // A profile left in the temporary folder is untidy, not harmful.
+    return false;
+  }
+}
+
+/**
+ * A real sleep, in the one place nothing may be awaited: this runs inside
+ * `process.on('exit')`, where the event loop is already over and a promise never
+ * resolves. `Atomics.wait` is the only thing that actually pauses here.
+ *
+ * @param {number} ms
+ */
+function waitSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    // No SharedArrayBuffer here. Falling straight through is still better than throwing
+    // out of a cleanup handler.
   }
 }
 

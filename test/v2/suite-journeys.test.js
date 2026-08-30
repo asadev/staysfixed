@@ -613,6 +613,33 @@ describe('the watcher that rides inside every run', () => {
     );
   });
 
+  test('refusing a connection does not kill the program that made it', async () => {
+    // The refusal has to arrive the way a real one does. Emitting 'error' on the socket
+    // ourselves looked right and killed the product: at that moment nothing is listening on
+    // the socket yet, and in Node an 'error' event with no listener is a thrown exception.
+    // Nobody attaches a handler to the socket underneath `http.get`, and plenty of ordinary
+    // code never attaches one at all — so a product that so much as pinged something died
+    // with exit 1, and the run then reported the product as broken. A tool blaming a product
+    // for something the tool did is the whole thing this package exists to prevent.
+    const ran = await under('node program.mjs', [
+      "import net from 'node:net';",
+      "import http from 'node:http';",
+      '// Not one error handler on a socket anywhere, which is how most code is written.',
+      "net.connect(80, 'blocked.invalid');",
+      "http.get('http://blocked.invalid/pay').on('error', () => {});",
+      "await new Promise((done) => setTimeout(done, 600));",
+      "console.log('the product finished its own work');",
+    ].join('\n'));
+
+    assert.equal(ran.code, 0, `the product was killed by the boundary meant to protect it: ${ran.stderr}`);
+    assert.equal(ran.stdout.trim(), 'the product finished its own work');
+    assert.equal(
+      ran.watched.reachedOut.filter((a) => a.host === 'blocked.invalid').length,
+      2,
+      'and both attempts still have to be written down, or the run looks like one that reached for nothing',
+    );
+  });
+
   test('this machine is still reachable, or nothing with a server of its own could be checked', async () => {
     const ran = await under('node program.mjs', [
       "import http from 'node:http';",

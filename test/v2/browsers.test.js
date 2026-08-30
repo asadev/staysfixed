@@ -191,6 +191,41 @@ describe('choosing a browser', () => {
     }
   });
 
+  test('a browser unpacked the way Linux and Windows unpack one is found', async () => {
+    // Only macOS uses `chrome-mac`/`chrome-mac-arm64`. Playwright unpacks Linux into
+    // `chrome-linux64` and Windows into `chrome-win64`, and so does Puppeteer — so leaving
+    // the 64 off made this survey blind to full Chrome on every machine that is not a Mac.
+    // On Linux that meant `npx playwright install chromium`, the command this very file
+    // hands people, left a browser the survey could not see: checks quietly dropped to the
+    // headless shell, or said there was no browser at all when the shell was absent too.
+    // It was invisible here because it was written on a Mac.
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-layouts-'));
+    /** @param {...string} bits */
+    const put = async (...bits) => {
+      const file = path.join(root, ...bits);
+      await fsp.mkdir(path.dirname(file), { recursive: true });
+      await fsp.writeFile(file, '');
+      return file;
+    };
+    const onLinux = await put('chromium-9999', 'chrome-linux64', 'chrome');
+    const onWindows = await put('chromium-9998', 'chrome-win64', 'chrome.exe');
+
+    const realCache = process.env.PLAYWRIGHT_BROWSERS_PATH;
+    process.env.PLAYWRIGHT_BROWSERS_PATH = root;
+    try {
+      // No probing: these are empty files standing in for a browser, and what is being
+      // proved is that the survey looks in the right place, not that they run.
+      const seen = await surveyBrowsers({ refresh: true, probe: false });
+      const paths = seen.found.map((f) => f.binary);
+      assert.ok(paths.includes(onLinux), 'the Linux layout has to be found');
+      assert.ok(paths.includes(onWindows), 'and the Windows one');
+    } finally {
+      if (realCache === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+      else process.env.PLAYWRIGHT_BROWSERS_PATH = realCache;
+      survey = await surveyBrowsers({ refresh: true });
+    }
+  });
+
   test('what it says out loud names the browser and the reason', () => {
     const said = describeBrowsers(survey).join('\n');
     assert.ok(said.includes(survey.note));
