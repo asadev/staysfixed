@@ -139,4 +139,19 @@ export const GITIGNORE_LINES = [
   // Where one person dragged the watch panel on one screen. Nobody else's business,
   // and it would otherwise turn up in their commits.
   '.staysfixed/watch-window.json',
+  // Version 2's evidence, which none of the lines above match — they were all written for
+  // version 1's folders. Measured 2026-08-30 on a Next.js project: 151 untracked files and
+  // 1.9 MB of run evidence sitting in `git status` after nine checks, and every release then
+  // warning that it was made from a dirty tree. `builds/` is the bulk of it: one folder per
+  // build, holding what each run observed.
+  '.staysfixed/v2/builds/',
+  '.staysfixed/v2/last-check.json',
+  // The lock a run holds while it changes the record. Never anybody's to commit.
+  '.staysfixed/**/*.lock',
 ];
+
+/*
+ * Deliberately NOT ignored: `references.json` and `reference-log.json`. Those are the record
+ * of what this product calls working and which release said so — the one thing here a team
+ * genuinely shares, and the thing a new clone needs in order to compare against anything.
+ */

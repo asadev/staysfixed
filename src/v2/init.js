@@ -1151,7 +1151,10 @@ export function configText(project) {
   w('  // "working" means, so the name is how two of them are told apart.');
   if (project.products.length > 1) {
     w('  // This repository makes more than one thing. A check covers whichever of them the');
-    w('  // settings below describe; run the others with `staysfixed check --product <name>`.');
+    // `--product` is not an option on `check` and never has been. Naming it here sent people
+    // to a flag the CLI rejects, in the settings file the tool itself wrote for them.
+    w('  // settings below describe. To check one of the others, run `staysfixed check` from');
+    w('  // inside that package, or point at its settings with `--config <file>`.');
   }
   w(`  product: ${JSON.stringify(project.name)},`);
   w('');

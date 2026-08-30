@@ -37,6 +37,7 @@ import { escalationBlock, escalationsFor, productFor, writeEscalations } from '.
 // module is still being evaluated.
 import { watchFlags } from '../cli/watch-flags.js';
 import { INIT_COMMANDS } from './init.js';
+import { whatWasNotChecked } from './check.js';
 
 /**
  * What comes back from a check. Everything that did not change never appears
@@ -260,7 +261,18 @@ export async function run(ctx) {
   }
 
   if (asJson) {
-    process.stdout.write(JSON.stringify(verdict) + '\n');
+    // The README promises these as fields of their own — "a number an agent can read"
+    // rather than a sentence it has to parse — and only the MCP reply had them. So a human
+    // asking for JSON on the command line got a strictly worse answer about what was NOT
+    // checked than an agent asking over MCP, about the very same run.
+    const coverage = verdict.coverage ?? null;
+    process.stdout.write(
+      JSON.stringify({
+        ...verdict,
+        notChecked: whatWasNotChecked(coverage),
+        doorsNeverOpened: Math.max(0, (coverage?.doorsKnown ?? 0) - (coverage?.doorsWalked ?? 0)),
+      }) + '\n',
+    );
   } else {
     report(verdict);
   }

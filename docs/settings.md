@@ -61,6 +61,21 @@ twice, and subtracted. And there is nothing to approve: the build you say
 
 ---
 
+
+### `process.alsoWatch`
+
+A list of extra folders a command is allowed to touch, so that what it writes there is
+watched rather than counted as a surprise. The tool's own run output names this option, and
+until 2026-08-30 it appeared nowhere here — in a page whose promise is every option, per kind
+of product.
+
+```js
+process: {
+  commands: [{ name: 'build', run: 'npm run build' }],
+  alsoWatch: ['dist', '../shared/generated'],
+}
+```
+
 ## `product`
 
 ```js

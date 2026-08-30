@@ -229,7 +229,7 @@ watch it notice. There is a built-in version of the same idea:
 staysfixed check --selfcheck
 ```
 
-which builds seventeen deliberately broken products and proves the engine still behaves on
+which builds twenty deliberately broken products and proves the engine still behaves on
 every one — twelve breaks it must catch, four clean pairs it must stay silent about, and one
 product so unsteady that the only correct answer is that the run says nothing at all. A case that
 misbehaves is built again and run again before that counts: fail twice and it is a real

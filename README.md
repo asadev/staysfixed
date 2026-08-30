@@ -808,7 +808,7 @@ A tool that reports "nothing changed" looks exactly like a tool that is broken,
 and there is no way to tell the two apart from the outside. So:
 
 **It has to prove it still catches things.** `staysfixed check --selfcheck`
-builds seventeen tiny products — each a real repository with a working commit and
+builds twenty tiny products — each a real repository with a working commit and
 an uncommitted change on top, which is the shape an agent actually points this
 tool at — and requires the engine to behave on every one.
 
@@ -843,7 +843,7 @@ a false accusation people learn to ignore. Measured on 2026-08-30: eleven of
 eleven, three times running, with the project's own suite running in parallel and
 the machine's load average between 227 and 334; then twelve of twelve after the
 second sweep of silences, three times running, with the suite in parallel again
-and the load average between 208 and 343; and finally **seventeen of seventeen**,
+and the load average between 208 and 343; and finally **twenty of twenty**,
 with the suite in parallel, at the end of the same day.
 
 **The unstable app.** `fixtures/unstable-app` is a page built to be impossible to
