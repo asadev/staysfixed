@@ -49,7 +49,7 @@
  * the last one.
  */
 
-import { SURFACE_WORDS, SOURCE_WORDS, surfaceWord } from './events.js';
+import { SURFACE_WORDS, SURFACE_NOTES, SOURCE_WORDS, CLASS_WORDS, surfaceWord } from './events.js';
 
 /** @typedef {import('./events.js').PanelPlanShape} PanelPlan */
 /** @typedef {import('./events.js').PanelJourney} PanelJourney */
@@ -201,6 +201,12 @@ export function panelHtml(plan = {}) {
     reference,
     words: SURFACE_WORDS,
     sources: SOURCE_WORDS,
+    // Embedded, never re-typed. This page used to keep its own hand-written copy of the
+    // class words and the two had already drifted apart — it said "a bug already reported
+    // once" where events.js says "a bug you already reported", and it had no word at all for
+    // an ordinary finding. One list, one place, the same rule SURFACE_WORDS has always had.
+    classes: CLASS_WORDS,
+    surfaceNotes: SURFACE_NOTES,
   });
 
   const subtitle = surfaces.length ? surfaces.join(' · ') : '';
@@ -231,7 +237,8 @@ export function panelHtml(plan = {}) {
     `<span class="app" id="surfaces"${subtitle ? '' : ' hidden'}>${escapeHtml(subtitle)}</span></p>`,
     // The one sentence a person reads from four feet away.
     '<p class="state" id="state">getting ready</p>',
-    '<p class="what" id="what"></p>',
+    '<div class="what" id="what"></div>',
+    '<button class="whatmore" id="whatmore" type="button" hidden></button>',
     '<div class="meter">',
     '<div class="track" id="track"><div class="fill" id="fill"></div></div>',
     '<span class="counts mono" id="counts"></span>',
@@ -531,6 +538,12 @@ button { font: inherit; color: inherit; }
   to { opacity: 1; transform: none; filter: blur(0); }
 }
 .what { margin: 7px 0 0; font-size: var(--t-small); color: var(--faint); line-height: 1.5; overflow-wrap: anywhere; }
+.what p { margin: 0 0 5px; }
+.what p:last-child { margin-bottom: 0; }
+.whatmore { margin: 6px 0 0; padding: 0; border: 0; background: none; font: inherit; font-size: var(--t-small); color: var(--dim); cursor: pointer; letter-spacing: .02em; }
+.whatmore:hover { color: var(--text); }
+.whatmore::before { content: '\\25B8'; display: inline-block; margin-right: 5px; transition: transform .18s ease; }
+.whatmore[data-open="1"]::before { transform: rotate(90deg); }
 
 /* One hairline, not a row of blocks: each journey adds its own slice, so
    progress and outcome are the same object. A walk where everything held ends
@@ -615,6 +628,9 @@ button { font: inherit; color: inherit; }
   font-size: var(--t-meta); color: var(--faintest);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* What "walked" actually MEANT on this surface. "Website" alone does not tell anybody what
+   was looked at, and the whole worth of a green run is the reader knowing what it covers. */
+.surfacewhat { padding: 0 3px 7px; font-size: var(--t-meta); color: var(--faintest); }
 .items { border-radius: var(--radius); background: var(--card); overflow: hidden; box-shadow: inset 0 0 0 1px var(--line); }
 .item + .item { box-shadow: inset 0 1px 0 var(--line); }
 .item { transition: background var(--calm) var(--ease); }
@@ -825,7 +841,7 @@ const SCRIPT = `
   // This page only ever runs in the window Stays Fixed just opened, so there is no
   // compatibility question to answer and nothing to load.
 
-  var plan = { product: '', project: '', journeys: [], surfaces: [], reference: null, words: {}, sources: {} };
+  var plan = { product: '', project: '', journeys: [], surfaces: [], reference: null, words: {}, sources: {}, classes: {}, surfaceNotes: {} };
   try {
     var blob = document.getElementById('staysfixed-plan');
     if (blob && blob.textContent) plan = JSON.parse(blob.textContent) || plan;
@@ -838,7 +854,7 @@ const SCRIPT = `
 
   var ui = {
     clock: el('clock'), product: el('product'), surfaces: el('surfaces'), targetsep: el('targetsep'),
-    state: el('state'), what: el('what'), track: el('track'), fill: el('fill'), counts: el('counts'),
+    state: el('state'), what: el('what'), whatMore: el('whatmore'), track: el('track'), fill: el('fill'), counts: el('counts'),
     refstrip: el('refstrip'), refname: el('refname'), refhow: el('refhow'), refwarn: el('refwarn'),
     groupWalk: el('groupWalk'), surfaceList: el('surfaceList'), countWalk: el('countWalk'),
     groupWobble: el('groupWobble'), wSteady: el('wSteady'), wUnstable: el('wUnstable'),
@@ -968,9 +984,60 @@ const SCRIPT = `
     ui.aura.style.setProperty('--tint', map[tone] || 'var(--accent)');
   }
 
+  // The summary, one sentence to a line, with the tail folded away.
+  //
+  // The engine's summary is a single paragraph that carries every fact a run produced, and
+  // on a real check it runs to fifteen lines. In a terminal that is a wall of text; in a
+  // window three hundred pixels wide it is a grey block nobody reads, sitting directly under
+  // the one sentence that matters. The facts are not the problem — dropping any of them
+  // would be worse — so nothing is thrown away here. It is split at sentence ends, the
+  // first two are shown, and the rest are one click away with the count on the button, so
+  // the window opens on something a person can actually take in.
+  var whatRest = [];
+  var whatOpen = false;
+
+  // Note the doubled backslashes, and never write a backtick in this file.
+  //
+  // Everything in this function lives inside a template literal in panel.js, and a template
+  // literal eats an unknown escape exactly the way a string literal does: a single
+  // backslash-s arrives in the browser as a plain letter s. Written once, this split ran as
+  // (?<=[.!?])s+ — it matched letters instead of spaces, never split anything, and the
+  // window went on showing the same fifteen-line paragraph while every test passed.
+  function splitSentences(paragraph) {
+    var raw = String(paragraph || '').split(/(?<=[.!?])\\s+(?=[A-Z0-9"'\u201c])/);
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var one = raw[i].replace(/^\\s+|\\s+$/g, '');
+      if (one) out.push(one);
+    }
+    return out;
+  }
+
+  function paintWhat() {
+    while (ui.what.firstChild) ui.what.removeChild(ui.what.firstChild);
+    var lines = whatShown.concat(whatOpen ? whatRest : []);
+    for (var i = 0; i < lines.length; i++) {
+      var p = document.createElement('p');
+      p.appendChild(document.createTextNode(lines[i]));
+      ui.what.appendChild(p);
+    }
+    show(ui.what, lines.length > 0);
+    if (whatRest.length === 0) {
+      show(ui.whatMore, false);
+      return;
+    }
+    show(ui.whatMore, true);
+    ui.whatMore.setAttribute('data-open', whatOpen ? '1' : '0');
+    text(ui.whatMore, whatOpen ? 'less' : whatRest.length + ' more ' + plural(whatRest.length, 'thing', 'things') + ' this run says');
+  }
+
+  var whatShown = [];
+
   function setWhat(sentence) {
-    text(ui.what, sentence || '');
-    show(ui.what, !!sentence);
+    var all = splitSentences(sentence);
+    whatShown = all.slice(0, 2);
+    whatRest = all.slice(2);
+    paintWhat();
   }
 
   function updateCounts() {
@@ -1012,7 +1079,7 @@ const SCRIPT = `
   // The walk
   // -------------------------------------------------------------------------
 
-  function surfaceBox(word, note) {
+  function surfaceBox(word, surface) {
     if (surfaces[word]) return surfaces[word];
     var box = document.createElement('section');
     box.className = 'surface';
@@ -1023,12 +1090,22 @@ const SCRIPT = `
     name.textContent = word;
     var hint = document.createElement('span');
     hint.className = 'surfacenote';
-    hint.textContent = note || '';
+    hint.textContent = '';
     head.appendChild(name);
     head.appendChild(hint);
     var items = document.createElement('div');
     items.className = 'items';
     box.appendChild(head);
+    // How this surface is watched, in one line. A person reading "iPhone · 4 journeys" has
+    // been told nothing about what the tool actually looked at, and on a green run that is
+    // the only thing that says how much the green is worth.
+    var what = surface && plan.surfaceNotes ? plan.surfaceNotes[surface] : '';
+    if (what) {
+      var line = document.createElement('p');
+      line.className = 'surfacewhat';
+      line.textContent = what;
+      box.appendChild(line);
+    }
     box.appendChild(items);
     if (ui.surfaceList) ui.surfaceList.appendChild(box);
     show(ui.groupWalk, true);
@@ -1041,7 +1118,7 @@ const SCRIPT = `
     if (journeys[name]) return journeys[name];
     var info = meta || {};
     var word = surfaceWord(info.surface, info.surfaceWord);
-    var group = surfaceBox(word);
+    var group = surfaceBox(word, info.surface);
     group.count++;
     group.hint.textContent = commas(group.count) + ' ' + plural(group.count, 'journey', 'journeys');
 
@@ -1309,7 +1386,10 @@ const SCRIPT = `
     if (f.sealed) sealedFindings.push(f);
     show(ui.groupFindings, true);
     show(ui.nothing, false);
-    ui.findingList.appendChild(findingRow(f));
+    // The row is kept ON the finding, because a finding can be taken back — see
+    // dropFindingsNotIn below. Without a handle on its own row there is no way to unsay one.
+    f.node = findingRow(f);
+    ui.findingList.appendChild(f.node);
     text(ui.countFindings, commas(findings.length));
     renderNeeds();
 
@@ -1445,12 +1525,10 @@ const SCRIPT = `
     return item;
   }
 
+  // The one list, embedded from events.js. There used to be a second copy written out here
+  // by hand, and it had already drifted from the first.
   function classWord(name) {
-    var words = {
-      money: 'money', 'sign-in': 'signing in', 'data-loss': 'losing data',
-      crash: 'a crash', guard: 'a bug already reported once'
-    };
-    return words[name] || name;
+    return (plan.classes && plan.classes[name]) || name;
   }
 
   function onCoverage(ev) {
@@ -1458,6 +1536,13 @@ const SCRIPT = `
     if (!c) return;
     show(ui.groupCoverage, true);
     show(ui.nothing, false);
+    // ONE count of addresses on this page, not two. The header counts up as each journey
+    // reports in; the coverage ledger is the finished tally, worked out over every address
+    // the run touched. Where a journey and its neighbour watch the same address the running
+    // total counts it twice and the ledger counts it once, and the page ended up carrying
+    // two figures with the same words on them and different numbers underneath. The ledger
+    // is the one that was counted properly, so when it lands it is the one that stands.
+    if (typeof c.paths === 'number') { watched = c.paths; updateCounts(); }
     ui.covFigures.textContent = '';
     addFigure(commas(c.paths), plural(c.paths, 'address watched', 'addresses watched'));
     addFigure(commas(c.journeys), plural(c.journeys, 'journey walked', 'journeys walked'));
@@ -1567,12 +1652,37 @@ const SCRIPT = `
       return;
     }
 
-    var tone = v.sealed > 0 ? 'wait' : (v.findings > 0 ? 'moved' : 'held');
+    // The waived ones go. A finding only ever arrived here; there was no way to take one
+    // away, and findings ARE taken away — the engine's verdict carries every difference it
+    // found, then the gates remove the ones an agent has recorded as intended and the
+    // settled verdict arrives second. Both reach this window, so a waived finding stayed on
+    // screen, in the "What survived" list, beside a terminal that had already stopped
+    // reporting it. The window was the only place still calling it a problem.
+    // Only ever done when the check actually named the survivors: a verdict that arrives
+    // already trimmed carries a count and no list, and clearing the list on that would wipe
+    // the findings rather than settle them.
+    if (Array.isArray(ev.findingIds)) dropFindingsNotIn(ev.findingIds);
+
+    // WHAT THE RUN SAYS ABOUT ITSELF, not just how many findings came out of it. The
+    // headline was picked from the finding counts alone and never read ok at all, so the run
+    // that compared NOTHING with anything — no findings, because nothing was compared — got
+    // this tool's all-clear sentence. That is the single most dangerous sentence it can produce,
+    // said about the one run that proves least. The engine already exits ok:false with
+    // "NO ANSWER FROM THIS RUN" on it; the window says the same thing.
+    var tone = v.sealed > 0 ? 'wait' : (v.findings > 0 ? 'moved' : (v.ok === false ? 'wait' : 'held'));
     var sentence;
     if (v.sealed > 0) {
       sentence = commas(v.sealed) + ' ' + plural(v.sealed, 'thing needs', 'things need') + ' you.';
     } else if (v.findings > 0) {
       sentence = commas(v.findings) + ' ' + plural(v.findings, 'finding', 'findings') + ' the agent has to deal with.';
+    } else if (v.newlyUnstable > 0) {
+      // No finding, and still not a pass: something that used to give the same answer every
+      // time does not any more. A change that made a product unpredictable has broken
+      // something, even when no single value can be pointed at.
+      sentence = commas(v.newlyUnstable) + ' ' + plural(v.newlyUnstable, 'address that was', 'addresses that were') +
+        ' steady before this change ' + plural(v.newlyUnstable, 'wobbles', 'wobble') + ' now.';
+    } else if (v.ok === false) {
+      sentence = 'No answer from this run — that is not a pass.';
     } else {
       sentence = 'Everything that worked still works.';
     }
@@ -1582,12 +1692,52 @@ const SCRIPT = `
     // hundreds of unopened doors, or measured against a stored record, is a smaller claim
     // than it looks, and the smaller claim is the true one.
     var caveats = [];
-    if (v.modeWarning) caveats.push(v.modeWarning);
+    // Said ONCE. The engine already ends the summary with this exact sentence, and pushing
+    // it again here printed the whole "compared against the stored record, that is genuinely
+    // weaker..." paragraph twice in a row, one straight after the other, on every single
+    // stored-record run. A window that repeats itself reads like a window that is broken.
+    if (v.modeWarning && String(v.summary || '').indexOf(v.modeWarning) === -1) caveats.push(v.modeWarning);
     if (v.differencesNoise) {
       caveats.push(commas(v.differencesNoise) + ' ' + plural(v.differencesNoise, 'difference was', 'differences were') + ' this build arguing with itself, and were subtracted.');
     }
     if (v.summary) caveats.unshift(v.summary);
     setWhat(caveats.join(' '));
+    renderNeeds();
+  }
+
+  // Take back every finding the check no longer stands behind.
+  function dropFindingsNotIn(ids) {
+    var keep = {};
+    for (var i = 0; i < ids.length; i++) keep[ids[i]] = true;
+    var left = [];
+    var repaint = {};
+    for (var j = 0; j < findings.length; j++) {
+      var f = findings[j];
+      if (keep[f.id]) { left.push(f); continue; }
+      if (f.node && f.node.parentNode) f.node.parentNode.removeChild(f.node);
+      if (f.journey) repaint[f.journey] = true;
+    }
+    findings = left;
+    // The journey a waived finding was found on goes back to whatever its REMAINING findings
+    // say, not straight to clean. A journey with two findings, one of them waived, is still a
+    // journey with a finding on it, and blanking its mark would hide the other one.
+    for (var name in repaint) {
+      if (!Object.prototype.hasOwnProperty.call(repaint, name) || !journeys[name]) continue;
+      var worst = 'held';
+      for (var m = 0; m < findings.length; m++) {
+        if (findings[m].journey !== name) continue;
+        var t = findings[m].sealed ? 'wait' : (findings[m]['class'] === 'crash' ? 'broke' : 'moved');
+        if (rank(t) > rank(worst)) worst = t;
+      }
+      markJourney(journeys[name], worst, worst !== 'held');
+    }
+    var stillSealed = [];
+    for (var k = 0; k < sealedFindings.length; k++) if (keep[sealedFindings[k].id]) stillSealed.push(sealedFindings[k]);
+    sealedFindings = stillSealed;
+    text(ui.countFindings, commas(findings.length));
+    show(ui.groupFindings, findings.length > 0);
+    // The footer is the one part a person is meant to act on, so it is redrawn from what is
+    // left rather than kept from what there was.
     renderNeeds();
   }
 
