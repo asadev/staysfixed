@@ -697,6 +697,101 @@ export async function guardNames(root) {
 }
 
 /**
+ * Is the thing that ran older than the code it was built from?
+ *
+ * This tool never builds anything — deliberately, because building somebody's project is not
+ * its business. But a project whose start command runs `dist/server.js` and whose source
+ * lives in `src/` will happily run YESTERDAY's build against today's source, compare it
+ * against a reference cut from the same stale output, and answer "Nothing that worked has
+ * changed" — about code it has never once executed. Measured 2026-08-31.
+ *
+ * It cannot be fixed by building; it can be SAID, which is all a coverage gap has to do.
+ *
+ * @param {string} root
+ * @param {any} config
+ * @returns {Promise<CoverageGap|null>}
+ */
+async function builtBeforeItsSource(root, config) {
+  try {
+    let pkg = {};
+    try {
+      pkg = JSON.parse(await fsp.readFile(path.join(root, 'package.json'), 'utf8'));
+    } catch {
+      return null;
+    }
+    const scripts = /** @type {any} */ (pkg).scripts ?? {};
+    // `npm run start` says nothing about where the product lives; the answer is one level
+    // down, in the script it runs. Following that indirection is the difference between this
+    // check firing and never firing, because `init` writes exactly `npm run start`.
+    const through = (/** @type {string} */ line) => {
+      const run = /(?:npm run|yarn|pnpm run|pnpm)\s+([\w:-]+)/.exec(line);
+      const named = run ? scripts[run[1]] : line.includes('npm start') ? scripts.start : null;
+      return `${line} ${typeof named === 'string' ? named : ''}`;
+    };
+    const starts = [
+      ...(config?.process?.commands ?? []).map((/** @type {any} */ c) => String(c?.run ?? '')),
+      String(config?.http?.start ?? ''),
+      String(config?.web?.start ?? ''),
+    ].map(through).join(' ');
+    const named = /\b(dist|build|out|lib)\b/.exec(starts);
+    const builds = typeof scripts.build === 'string';
+    if (!named || !builds) return null;
+
+    const outDir = path.join(root, named[1]);
+    const srcDir = path.join(root, 'src');
+    const [built, source] = await Promise.all([newestUnder(outDir), newestUnder(srcDir)]);
+    if (built === 0 || source === 0 || source <= built) return null;
+
+    const behind = Math.round((source - built) / 1000);
+    /** @param {number} n @param {string} unit */
+    const plural = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+    const howLong =
+      behind > 86400 ? plural(Math.round(behind / 86400), 'day') : behind > 3600 ? plural(Math.round(behind / 3600), 'hour') : plural(Math.max(1, Math.round(behind / 60)), 'minute');
+    return {
+      what: `What ran is older than the code it was built from — \`${named[1]}/\` is ${howLong} behind \`src/\`.`,
+      why: `This tool runs your product, it never builds it. So the build in \`${named[1]}/\` is what was walked, and your newer source was not executed at all. A clean result here says nothing whatever about the code you have just written — and the reference it was compared against was cut from the same stale output.`,
+      unlockedBy: 'Run your build before the check — `npm run build && npx staysfixed check` — or put the build into the start command in your settings.',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The newest modification time anywhere under a folder, or 0 if there is nothing there.
+ * @param {string} dir
+ * @returns {Promise<number>}
+ */
+async function newestUnder(dir) {
+  let newest = 0;
+  /** @param {string} at @param {number} depth */
+  const walk = async (at, depth) => {
+    if (depth > 6) return;
+    let entries = [];
+    try {
+      entries = await fsp.readdir(at, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      const full = path.join(at, entry.name);
+      if (entry.isDirectory()) await walk(full, depth + 1);
+      else {
+        try {
+          const at2 = (await fsp.stat(full)).mtimeMs;
+          if (at2 > newest) newest = at2;
+        } catch {
+          // gone between the listing and the question
+        }
+      }
+    }
+  };
+  await walk(dir, 0);
+  return newest;
+}
+
+/**
  * The ways into the product that were never tried, and why.
  *
  * A build that would not start does not produce one finding — it produces one at every
@@ -1630,6 +1725,8 @@ async function openProject(options) {
       unlockedBy: `Fix package.json, or put the name you want in your settings file as product: '<name>'. Until then every comparison starts from nothing.`,
     });
   }
+  const stale = await builtBeforeItsSource(root, config);
+  if (stale) gaps.push(stale);
   if (storeTrouble.length > 0) {
     gaps.push({
       what: 'This run was NOT written down, so the next check has nothing from today to compare against.',
