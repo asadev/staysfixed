@@ -85,24 +85,62 @@ evidence. So it grows: one record per check, in your repository, for ever. A
 project checked on every commit was accumulating that record with nothing ever
 removing it.
 
-At the end of a successful check the older records are now thinned out. Five are
-kept in full by default. Four things are never touched, whatever this is set to:
+At the end of a successful check the older records are cleared out, in three
+tiers. Three things are outside the count entirely and are never touched, whatever
+this is set to: the reference — the build you shipped, which is the whole point of
+the store — the build this run just walked, and anything named by `--against`.
 
-- the reference — the build you shipped, which is the whole point of the store
-- the build this run just walked
-- anything named by `--against`
-- the newest `keepBuilds` after those
+After those:
 
-Everything older is thinned to one recording per journey rather than deleted, so
-it can still say what that build did without keeping every take of it.
+- the newest `keepBuilds` are kept whole, every recording intact;
+- the next `keepBuilds` × 4 are thinned to one recording per journey, so they can
+  still say what that build did without keeping every take of it;
+- everything behind that is removed, folder and all, oldest first.
 
-If any stored record could not be read, nothing is thinned at all and the run
-says so. Deleting on an incomplete listing is how you lose the one record that
-mattered.
+The count is builds, not days, and that is deliberate. A project checked on every
+commit writes fifty folders a day, so "keep thirty days" is fifteen hundred
+folders in somebody's git history — and the same rule throws away a two-month-old
+build on a project checked twice a week. The thinned middle tier is the grace
+period, and it is cheap: fifteen thinned builds cost about what one untouched one
+costs, and they buy back the case a plain cap gets wrong — thirty checks in an
+afternoon, then `--against` the build from before lunch.
 
-The run prints one line saying what it removed. Set it higher if you use
+If any stored record could not be read, **nothing is removed or thinned at all**
+and the run says so. Deleting on an incomplete listing is how you lose the one
+record that mattered, and a thinned folder can be walked again where a deleted one
+cannot.
+
+The run prints one line saying what it cleared. Set it higher if you use
 `staysfixed check --against` on older builds a lot; there is no reason to set it
 lower than 2.
+
+---
+
+## `suite` — walking your own test suite
+
+```js
+suite: { budgetMs: 90000 },
+```
+
+`staysfixed check --journeys suite` runs the project's own test suite as well as
+everything else: each test file twice inside the scratch copy, every check
+reported by name, why each failure failed, and a fingerprint of the test file
+itself — so an edited test says plainly that the change is yours.
+
+`budgetMs` is how long that is allowed to take. It defaults to 90 seconds, which
+is a statement about how long anyone waits inside an edit-and-check loop before
+switching the tool off, not a guess at how long suites take. **Every file the
+budget did not reach is named, one by one**, in the report and in the coverage
+ledger — never "some tests were skipped" — and every run says which budget was
+applied and where it came from.
+
+Set `0` for no budget at all, and the whole suite is walked however long it takes.
+Raise it when your suite is slower than 90 seconds and you would rather wait than
+have the tail named as uncovered.
+
+The harvest is off unless you ask for it. Running a stranger's whole suite twice
+on every check is not a thing to do by default, and a check nobody can afford to
+run is a check nobody runs.
 
 ---
 

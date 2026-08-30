@@ -74,6 +74,100 @@ const CLEAN_SNAPSHOT = 'staysfixed-clean';
 const DECLARED = 'what the app declares';
 
 // ---------------------------------------------------------------------------
+// The virtual device this tool asks for
+// ---------------------------------------------------------------------------
+
+/**
+ * The API level to build a virtual device at when nothing says otherwise.
+ *
+ * Newer is the safe direction and it is the only direction that is safe. A device must be at
+ * least as new as the app's `minSdkVersion` or the app cannot be installed on it at all; an app
+ * that TARGETS something older installs on a newer device and runs under compatibility rules.
+ * So the failure from picking too high is a behaviour difference the tool would report, and the
+ * failure from picking too low is "it would not install", which looks like a broken product.
+ *
+ * When there is an APK in hand its own minSdk is read and this is raised to match — see
+ * `deviceFor`. This number is only the answer for somebody who has not built anything yet.
+ */
+export const EMULATOR_API = 35;
+
+/**
+ * The processor the image has to be built for.
+ *
+ * Both files that recommended an image used to hardcode `arm64-v8a`, so the command handed to
+ * anybody on an Intel Mac or an x86 Linux box named an image that does not exist for their
+ * machine and failed with a message about the image rather than about the architecture.
+ *
+ * @returns {string|null} null when this machine's architecture has no emulator image at all.
+ */
+export function emulatorAbi() {
+  // Only three answers exist, and anything else has to say so rather than pick one.
+  //
+  // This used to be arm64 or x86_64, with x86_64 as the fallback for every other
+  // architecture. On a 32-bit Intel machine, or an s390x, or anything else Node runs on, that
+  // names an emulator image Google does not publish — so the command handed over as "the tool
+  // can do this itself" fails with an error about a package that does not exist, and the
+  // person is left looking for a typo in a line this tool wrote for them.
+  if (process.arch === 'arm64') return 'arm64-v8a';
+  if (process.arch === 'x64') return 'x86_64';
+  if (process.arch === 'ia32') return 'x86';
+  return null;
+}
+
+/**
+ * What to install, and the two commands that install it — kept together on purpose.
+ *
+ * The warning is part of the answer, not a footnote beside it. A Play Store image refuses root
+ * permanently, and without root the files an app writes are invisible, so a person who follows
+ * a command printed without this sentence ends up with a device that silently checks less than
+ * they think. That happened because two files each had their own copy of the command and only
+ * one carried the warning. There is one copy now, and the warning cannot be separated from it.
+ *
+ * `google_apis` and NOT `google_apis_playstore` is the whole of the rule.
+ *
+ * @param {{api?: number, name?: string}} [opts]
+ * @returns {{image: string|null, install: string|null, create: string|null, why: string, both: string}}  image, install and create are null where this machine has no emulator image at all; `why` and `both` then say so.
+ */
+export function deviceToMake(opts = {}) {
+  const api = Math.max(EMULATOR_API, opts.api ?? 0);
+  const name = opts.name ?? 'staysfixed';
+  const abi = emulatorAbi();
+  const warning = 'Pick a plain Google APIs image, NOT a Play Store one: a Play Store device refuses root forever, and without root the files an app writes cannot be seen.';
+
+  // No image exists for this machine, and saying so beats naming one that does not exist.
+  //
+  // Google publishes emulator images for arm64, x86_64 and x86 and nothing else. Handing
+  // somebody a command that fails on a package nobody has ever published sends them looking
+  // for a typo in a line this tool wrote for them, which is a worse place to be than being
+  // told plainly that their machine cannot run one.
+  if (!abi) {
+    const cannot = `No Android emulator image is published for a ${process.arch} machine, so an emulator cannot be created here. Plug in a real Android device, or run the check from a machine on arm64, x86_64 or x86.`;
+    return { image: null, install: null, create: null, why: cannot, both: cannot };
+  }
+
+  const image = `system-images;android-${api};google_apis;${abi}`;
+  const install = `sdkmanager --install "${image}"`;
+  const create = `avdmanager create avd -n ${name} -k "${image}"`;
+  return {
+    image,
+    install,
+    create,
+    why: warning,
+    both: `${install} then ${create}. ${warning}`,
+  };
+}
+
+/**
+ * The same answer, raised to whatever the app in front of us actually needs.
+ *
+ * @param {{minSdk?: number|null}|null} apk
+ * @returns {ReturnType<typeof deviceToMake>}
+ */
+export function deviceFor(apk) {
+  return deviceToMake({ api: apk?.minSdk ?? 0 });
+}
+
+// ---------------------------------------------------------------------------
 // Finding the APK
 // ---------------------------------------------------------------------------
 
@@ -522,7 +616,7 @@ export const androidAdapter = defineAdapter({
       missing.push({
         what: 'a virtual device for the emulator to run',
         unlocks: 'having somewhere to install the app',
-        howToGet: 'sdkmanager --install "system-images;android-33;google_apis;arm64-v8a" then avdmanager create avd -n staysfixed -k "system-images;android-33;google_apis;arm64-v8a". Pick a plain Google APIs image, NOT a Play Store one: a Play Store device refuses root forever, and without root the files an app writes cannot be seen.',
+        howToGet: deviceFor(apk).both,
       });
     }
 
@@ -531,7 +625,8 @@ export const androidAdapter = defineAdapter({
       missing.push({
         what: 'a virtual device built from a plain Google APIs image rather than a Play Store one',
         unlocks: 'seeing the files the app writes, and stopping the clock. A Play Store device refuses root permanently, and both of those need it',
-        howToGet: 'avdmanager create avd -n staysfixed -k "system-images;android-33;google_apis;arm64-v8a"',
+        // Null on a machine with no emulator image at all; `why` then carries the reason.
+        howToGet: deviceFor(apk).create ?? deviceFor(apk).why,
       });
     }
     if (usable.some((d) => !d.emulator)) {
