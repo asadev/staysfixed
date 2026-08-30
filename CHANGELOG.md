@@ -6,7 +6,21 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Not released yet. Everything below is in the working tree.
+Nothing yet.
+
+## [0.8.0] — 2026-08-30
+
+The night this was pointed at itself. Everything below was found the same way:
+the published build was installed the way a stranger installs it, and used on
+throwaway products — a plain-Node server, an Express API, a Flask app, a static
+site, a Vite app, a bare Gradle project, an empty Xcode project, a CLI that
+reaches the internet three ways — until it said something untrue. Reading the
+code found none of it.
+
+**Two of them were the tool lying about itself**, which is the worst thing this
+product can do: it told every agent that asked that it could read web pages and
+then could not open one, and it reported a clean run over an entire uncovered
+HTTP surface. Both are closed.
 
 ### Changed
 
@@ -150,6 +164,187 @@ Not released yet. Everything below is in the working tree.
   works and always did — it is handled first thing, before the logging module
   decides. `--color` has been taken away rather than left as a switch that turns
   nothing on.
+
+### Added — products it could not see before
+
+- **A hand-written `node:http` server is read.** A product with `createServer`, a
+  chain of `req.url === '/x'` and `.listen(PORT)` was reported as "one thing: the
+  `notes` command", found zero routes, left the `http` block commented out, and
+  said **"a check here covers the `notes` command in full. Nothing is being left
+  out."** over an entire uncovered surface. The same product written with Express
+  was handled perfectly, so the machinery worked and the reading stopped at
+  frameworks. Eight hand-rolled routing shapes are now read — `req.url === '/x'`,
+  `.startsWith`, a `switch` on a pathname, `new URL(req.url, base).pathname`,
+  `url.parse`, the `split('?')[0]` variant, `if`/`else if` chains, and a path held
+  in a constant — and a method is claimed only where the code checks one, `ANY`
+  otherwise, never `GET`.
+
+- **Python products are checkable.** A Flask app was told "a Python project is not
+  being checked… in a language nothing here drives". The honesty was right and the
+  conclusion was wrong: the two adapters that would run it read no source at all.
+  The process adapter runs a command and compares what it printed, exited with and
+  touched; the http adapter boots a server and asks it for routes. Flask, FastAPI
+  (including an `APIRouter` prefix) and Django `urlpatterns` are now read, and
+  their path parameters become the same "somebody has to give a real value" flow
+  every other route uses. Go, Rust, Ruby and PHP get the boot and the command
+  without the routes — and every one of them says, **by name**, that the source
+  channel is blind for that language, so none can reach "covered in full".
+
+- **`--journeys suite` walks the project's own test suite.** It was written,
+  tested and reachable by nothing. Each test file runs twice inside the scratch
+  copy with the same frozen clock, seed and watcher as everything else, and every
+  check is reported by name, along with why each failure failed and a fingerprint
+  of the test file itself — so an edited test says plainly that the change is
+  yours. It earns its keep: take the penny-rounding out of a `total()` and the
+  product's own output does not move by one character, the discovered journeys say
+  nothing has changed, and the harvest names the check that turned red. Off unless
+  asked for, held to `suite: { budgetMs }` (90 seconds by default, `0` for none),
+  and **every file the budget did not reach is named one by one** rather than
+  summarised as "some tests were skipped".
+
+- **`keepBuilds` — how much of the record is kept.** The store grew for ever: one
+  build folder per commit, in your git history, with the function that would have
+  stopped it written and called by nothing. Three tiers now, capped by count and
+  not by age, and it refuses to remove anything at all if any record could not be
+  read.
+
+### Fixed — the tool being wrong about itself
+
+- **It could not open a single web page, and said it could.** `playwright` was
+  dropped from the dependencies on the reasonable-looking grounds that nothing
+  under `src/` imported it. Nothing does — the web adapter reaches it through
+  `await import()`, which no search for an import statement can see. So every
+  website check on a fresh install answered "Playwright is not installed, so no
+  web page can be opened", while `staysfixed_capabilities` told the calling agent
+  that web apps and sites could be checked *here and now*. The dependency is back
+  as `playwright-core` — the driver without a browser in it, 13MB and no download,
+  because this tool already knows how to find Chrome for Testing, Chrome, Edge or
+  Chromium and deliberately prefers one that is not the browser you use. A test
+  holds it in place by name, and holds `doctor` and the walk to the same answer.
+
+- **An Android project with no APK built was reported as covered in full,** and
+  then could not be walked at all. iOS already named the missing build and the
+  exact `xcodebuild` line; Android now names the Gradle one. A Tauri app read as
+  ready on any machine with no Windows host, because `doctor` returns no Windows
+  needs precisely when there is no Windows to ask about.
+
+- **Version 1 passed a page with a letter missing from its heading.** The picture
+  check's default allowed 0.05% of a picture through, described in a comment as
+  "enough for font hinting noise, nowhere near enough to hide a missing
+  stylesheet". On a 2880×1800 screenshot that is **2,592 pixels**; taking one
+  letter out of an `h1` moves **593**. The replacement was measured rather than
+  chosen — ten fresh takes of the same build differ by **zero** pixels — so the
+  default is now zero, and a project that sets `tolerance.pixels` is told, per
+  screen, how many pixels its setting just swallowed.
+
+- **The network boundary let everything out.** The watcher injected into every run
+  read the host off the first argument, but Node normalises `Socket.connect` to
+  `[options, callback]` — so the host read as an empty string, which was in the
+  loopback allow-list. `fetch`, `http.get` and `net.connect` to the open internet
+  all succeeded and the report came back empty, while the tool's loudest safety
+  claim said every outbound connection had been refused. All three are now refused
+  and recorded by host and port.
+
+- **`npm run start` died silently** — the default start command `init` writes for
+  every Node server. The watcher wrapped `process.env` in a Proxy with only `get`
+  and `has` traps, so `process.env.X = 'y'` quietly failed, npm could not pass
+  `npm_lifecycle_event` to the script, and it exited 1 without printing a word.
+  Every trap now forwards through `Reflect`, with `set` taking the target as the
+  receiver.
+
+- **Every route, and every command, read as never walked.** A door is addressed
+  `route.<VERB>.<url>` and `cli.<the command>`; the adapters wrote `api.<journey>`
+  and `cli.<journey name>`. So the coverage ledger — the one part of this tool
+  that must never be optimistic — was instead permanently and wrongly pessimistic,
+  and a genuinely uncovered door was invisible in the noise.
+
+- **A normalisation-rules caveat fired on every run, for ever.** A per-run
+  temporary folder was baked into a rule pattern and collided with the real
+  project-root rule, so the rule set contained a fresh random pattern every run —
+  and the real rule was silently deleted, meaning absolute paths under your
+  checkout were never normalised at all.
+
+- **A committed change could not be ranked.** "The change" meant the working tree
+  and nothing else, so the moment an agent committed its work — which is what an
+  agent does at the end of a task — the distance measure went blind and every
+  finding carried "nothing in the working tree has changed, so there is no edit to
+  measure this against" over a change that was perfectly well known.
+
+- **The scratch copy copied every byte.** On the project this was built against —
+  twelve gigabytes, most of it an iOS build folder — that is twelve gigabytes of
+  real disk per build and twenty-four per check. It now asks the filesystem to
+  clone: **41.5 seconds and no bytes moved**, measured on that tree. Never a
+  symlink and never a hardlink, because both point back at the project this exists
+  to protect.
+
+### Fixed — caps that decided things quietly
+
+- **A finding's nearby files were cut to five, and the sealed classes are searched
+  in that list.** A finding whose sixth file was `src/billing/refund.js` was
+  classified `ordinary` — precisely the class an agent may close on its own.
+
+- **A waiver was pinned to the first 40 differences and 20 addresses of a
+  finding.** A waiver written over a three-hundred-address finding went on
+  covering it after the value at address 41, 150 or 299 became something else.
+
+- **A wobble storm needed twelve addresses before it counted,** so ten of eleven
+  wobbling was not a storm: ten real differences subtracted, and the run passed.
+
+- **Eight address truncations with no fingerprint,** across four files. Two long
+  labels, two journey names, two log lines or two checkpoints that agreed for the
+  first 60 to 200 characters landed on one address and one of the two answers was
+  thrown away at the door. Two of them were screenshot filenames, so the picture
+  offered as evidence for a finding could be a photograph of a different screen.
+
+- **`trimForStorage` cut in characters against a byte limit.** On box-drawing or
+  CJK output, 90,000 bytes in produced 180,061 bytes stored — the whole text twice
+  — under a marker claiming 24,464 bytes had been left out of the middle.
+
+- **Files over 8MB were compared by a size bracket, not a fingerprint,** so a
+  build that wrote a different 40MB file compared equal. They are stream-hashed
+  now, and the remaining ceiling is named in the ledger.
+
+- **An adapter that did not answer in time made its surface READY.** The race
+  resolved an empty needs list, and no needs meant covered — so an Android adapter
+  hanging for sixteen seconds produced "Covered against the stored record."
+
+### Changed — words a person reads
+
+- **The watch window opened on a fifteen-line paragraph.** Its headline was right
+  and the engine's entire summary sat underneath it as one grey block. Nothing is
+  dropped — the summary is split at sentence ends, two are shown, and the rest sit
+  behind one control.
+
+- **A finding titled with the tool's own word.** A renamed route read as
+  `"declared" is gone`. Twenty-seven such words are now recognised, so it reads
+  `"/notes / declared" is gone` instead.
+
+- **A sentence that said a thing was now what it already was.** When both sides of
+  a change summarised to the same words, the summary was the wrong thing to print.
+  The flagship case now reads: *"GET /invoice / body" now has "line" reading "A
+  desk lamp ......... 49.99 GBP" where it read "A desk lamp ......... £49.99"*.
+
+- **The first error anybody meets writing a guard was raw JavaScript** —
+  `page.goto is not a function`. It now says what the object it was handed
+  actually has, in one sentence, and suggests a name only when exactly one is
+  close.
+
+- **The shipped examples were for a shape the tool no longer uses.** Both said
+  "copy this to the root of your project"; doing that today gets you a settings
+  file the difference engine rejects. Each now says which half it belongs to, and
+  points at `staysfixed init` — which beats any example, because it reads the
+  project in front of it.
+
+### Removed
+
+- **Fourteen exports nothing called.** Ten were genuinely dead. Two were missing
+  features and are now wired: `treeMovedSince`, the one thing `intent.js` promised
+  and nothing checked, and `RUNNER_KINDS`, which validated nothing while an unknown
+  runner kind was silently treated as posix. Two were kept and wired because
+  deleting them would have quietly broken a promise the documentation makes.
+
+- **`ios.suite` was advertised in a message telling somebody how to switch
+  something on.** Nothing anywhere read it.
 
 ## [0.7.2] — 2026-08-30
 
