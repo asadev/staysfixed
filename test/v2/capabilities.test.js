@@ -82,6 +82,22 @@ describe('what this machine can check', () => {
     }
   });
 
+  test('an empty folder is never told a check there covers anything', async () => {
+    // What this MACHINE can drive and what a check in THIS FOLDER would cover are two
+    // different questions, and only one was answered. In a folder with nothing in it, doctor
+    // said "A check here covers command-line tools and libraries and web apps and sites in
+    // full" and exited 0, while `check` in that same folder refused to run: "No Stays Fixed
+    // config found here, so there is nothing to check." `doctor --json` is the first call an
+    // agent is told to make, which is the worst possible place for "here" to mean elsewhere.
+    const empty = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-emptyfolder-'));
+    const bare = await capabilities({ cwd: empty, offline: true });
+    assert.equal(bare.project.configFile, null, 'nothing is set up in this folder');
+    assert.equal(bare.covers.canRunHere, false, 'a machine must be able to read that without parsing English');
+    assert.doesNotMatch(bare.covers.short, /A check here covers .* in full/, 'and it must not say it does');
+    assert.match(bare.covers.short, /cannot run here at all|Nothing is set up/i);
+    assert.match(bare.covers.short, /staysfixed init/, 'and it has to say what would change that');
+  });
+
   test('the way to put a build on record is shipping, and nothing else is offered as it', async () => {
     // This used to offer `staysfixed check --paired`, and that command cannot do it: run it
     // twice on a fresh project and both runs answer "there is no build on record as

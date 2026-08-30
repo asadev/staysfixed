@@ -254,7 +254,7 @@ export async function capabilities(opts = {}) {
     },
     surfaces,
     drivers,
-    covers: whatThisRunActuallyCovers(surfaces),
+    covers: whatThisRunActuallyCovers(surfaces, configFile !== null),
     browsers: {
       willOpen: browsers.chosen,
       borrowingYourOwn: browsers.borrowingHis,
@@ -1808,6 +1808,9 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
  * @property {{name: string, why: string}[]} partly   Looked at, but not completely, and why.
  * @property {{name: string, why: string, whoFixes: SurfaceState}[]} notCovered
  * @property {boolean} everything    True only when nothing at all is left out.
+  * @property {boolean} [canRunHere]
+ *   False when nothing is set up in this folder, so a check cannot run here at all
+ *   whatever this machine could otherwise drive.
  */
 
 /**
@@ -1819,9 +1822,10 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
  * covers your website; your iPhone app is not being checked, and here is why.
  *
  * @param {SurfaceReport[]} surfaces
+ * @param {boolean} setUpHere   Whether a check can actually run in this folder at all.
  * @returns {Covers}
  */
-function whatThisRunActuallyCovers(surfaces) {
+function whatThisRunActuallyCovers(surfaces, setUpHere = true) {
   // Three buckets, not two. Folding "partly" into "covered" is exactly the
   // over-claim this function exists to stop: an iPhone app whose screens cannot
   // be read is not a covered iPhone app.
@@ -1845,7 +1849,23 @@ function whatThisRunActuallyCovers(surfaces) {
 
   /** @type {string[]} */
   const parts = [];
-  parts.push(full.length > 0 ? `A check here covers ${plainList(out.covered)} in full.` : 'A check here covers nothing in full.');
+  // What this MACHINE can drive and what a check in THIS FOLDER would cover are two
+  // different questions, and only one of them was being answered. In an empty folder — no
+  // settings, no code — this said "A check here covers command-line tools and libraries and
+  // web apps and sites in full" and doctor exited 0, while `check` in that same folder
+  // refused to run at all: "No Stays Fixed config found here, so there is nothing to check."
+  // Measured 2026-08-30. `doctor --json` is the first call an agent is told to make, which
+  // is the worst place there is for a sentence with "here" in it to mean somewhere else.
+  //
+  // Everything below still says what it said — a reader needs the whole picture either way —
+  // it is just no longer written as though a check could run.
+  if (!setUpHere) {
+    out.canRunHere = false;
+    parts.push('Nothing is set up in this folder, so a check cannot run here at all and would cover nothing. Run `staysfixed init` first.');
+    parts.push(full.length > 0 ? `Once it is set up, this machine could cover ${plainList(out.covered)} in full.` : 'Even set up, this machine could cover nothing in full.');
+  } else {
+    parts.push(full.length > 0 ? `A check here covers ${plainList(out.covered)} in full.` : 'A check here covers nothing in full.');
+  }
   if (some.length > 0) parts.push(`It covers ${plainList(some.map((s) => s.name))} only partly — read the summary for each before treating a clean result as proof.`);
   if (missing.length > 0) {
     parts.push(`It does NOT check ${plainList(missing.map((s) => s.name))} at all, so a clean result says nothing whatever about ${missing.length === 1 ? 'that' : 'those'}.`);
