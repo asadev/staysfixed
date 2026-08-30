@@ -22,6 +22,7 @@ import {
   DEFAULT_MCP,
 } from '../src/core/config.js';
 import { StaysFixedError } from '../src/core/errors.js';
+import { versionTwoState } from '../src/cli/status.js';
 import { scratchDir, cleanUp } from './support.mjs';
 
 /** The smallest config that is allowed to exist. */
@@ -343,6 +344,37 @@ describe('loading a config from disk', () => {
     const desktop = resolveConfig({ product: 'desk', electron: { binary: '/tmp/Some.app/Contents/MacOS/Some' } });
     assert.equal(desktop.app.kind, 'electron');
     assert.equal(desktop.app.binary, '/tmp/Some.app/Contents/MacOS/Some');
+  });
+
+  test('status sees a version 2 run, so it never says nothing has happened after one', async () => {
+    // Measured on 2026-08-30, one command after a check that walked 36 addresses and a ship
+    // that cut the reference: `status` answered "Nothing has been checked here yet. Start
+    // with: staysfixed check". It only ever counted version 1's things. The command whose
+    // whole promise is to say instantly what is going on here was the one saying nothing
+    // had happened.
+    const root = await scratchDir('staysfixed-v2state');
+    const dir = path.join(root, '.staysfixed', 'v2');
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(
+      path.join(dir, 'last-check.json'),
+      JSON.stringify({ at: '2026-08-30T09:11:15.968Z', verdict: 'nothing unaccounted for', reference: 'no-reference-yet', findings: [] }),
+    );
+    // The check wrote "no-reference-yet" because the ship had not happened yet. It has now,
+    // and the reference is read from where it is kept rather than from that memory of it.
+    await fsp.writeFile(
+      path.join(dir, 'reference-log.json'),
+      JSON.stringify([{ id: 'ref-older', product: 'p' }, { id: 'ref-20260830-131116-98896f', product: 'p' }]),
+    );
+
+    const state = versionTwoState(root);
+    assert.ok(state, 'a project that has been checked has something to say');
+    assert.equal(state.verdict, 'nothing unaccounted for');
+    assert.equal(state.reference, 'ref-20260830-131116-98896f', 'the newest cut, not the check\'s stale field');
+  });
+
+  test('a project where nothing has run still says so', async () => {
+    const root = await scratchDir('staysfixed-v2none');
+    assert.equal(versionTwoState(root), null);
   });
 
   test('a config named on the command line is used instead of searching', async () => {

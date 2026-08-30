@@ -561,6 +561,8 @@ export function printFlakes(history, flakeLimit = 2) {
  * @property {number} [markers]       Known-good markers saved.
  * @property {{label: string, at?: string}|null} [lastMarker]
  * @property {import('../types.js').RunSummary|null} [lastRun]
+ * @property {{at: string, verdict: string, reference: string|null, findings: number}|null} [v2]
+ *   What version 2 has recorded here. Version 1's counts say nothing about it.
  * @property {string[]} [condemned]   Names from the flake register, if the CLI already has them.
  * @property {string} [configFile]
  * @property {string} [root]
@@ -591,7 +593,15 @@ export function printStatus(status) {
 
   blank();
   const run = s.lastRun ?? null;
-  if (!run) {
+  if (!run && s.v2) {
+    // Version 2 has run here even though version 1's picture record has not. Saying
+    // "nothing has been checked here yet" one command after a real run is the sort of
+    // wrongness that costs a person their trust in everything else the tool says.
+    say(paint.grey(`  last checked ${ago(s.v2.at)} — ${s.v2.verdict}`));
+    if (s.v2.findings > 0) say(paint.grey(`  ${s.v2.findings} ${plural(s.v2.findings, 'thing', 'things')} nobody had accounted for`));
+    if (s.v2.reference) say(paint.grey(`  compared against ${s.v2.reference}`));
+    else say(`  Nothing is on record as working yet — run ${paint.cyan('staysfixed check')}, then ${paint.cyan('staysfixed ship')}.`);
+  } else if (!run) {
     say('  Nothing has been checked here yet.');
     say(`  Start with: ${paint.cyan('staysfixed check')}`);
   } else {

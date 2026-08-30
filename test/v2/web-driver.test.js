@@ -30,19 +30,20 @@ const repoRoot = path.resolve(here, '..', '..');
 describe('a step that does nothing says so', () => {
   /** Enough of a page to prove which calls were made, and no more. */
   const stubPage = () => {
+    /** @type {string[]} */
     const did = [];
     return {
       did,
-      async goto(u) { did.push(`goto ${u}`); },
-      async click(w) { did.push(`click ${w}`); },
-      async type(w, t) { did.push(`type ${w} ${t}`); },
-      async press(k) { did.push(`press ${k}`); },
-      async hover(w) { did.push(`hover ${w}`); },
-      async scrollTo(w) { did.push(`scrollTo ${w}`); },
-      async waitFor(w) { did.push(`waitFor ${w}`); },
-      async waitForGone(w) { did.push(`waitForGone ${w}`); },
-      async wait(ms) { did.push(`wait ${ms}`); },
-      async evaluate(x) { did.push(`evaluate ${x}`); },
+      async goto(/** @type {string} */ u) { did.push(`goto ${u}`); },
+      async click(/** @type {string} */ w) { did.push(`click ${w}`); },
+      async type(/** @type {string} */ w, /** @type {string} */ t) { did.push(`type ${w} ${t}`); },
+      async press(/** @type {string} */ k) { did.push(`press ${k}`); },
+      async hover(/** @type {string} */ w) { did.push(`hover ${w}`); },
+      async scrollTo(/** @type {string} */ w) { did.push(`scrollTo ${w}`); },
+      async waitFor(/** @type {string} */ w) { did.push(`waitFor ${w}`); },
+      async waitForGone(/** @type {string} */ w) { did.push(`waitForGone ${w}`); },
+      async wait(/** @type {number} */ ms) { did.push(`wait ${ms}`); },
+      async evaluate(/** @type {string} */ x) { did.push(`evaluate ${x}`); },
     };
   };
 
@@ -54,7 +55,7 @@ describe('a step that does nothing says so', () => {
     const page = stubPage();
     await assert.rejects(
       () => runStep(/** @type {any} */ (page), { fill: '#email', with: 'a@b.c' }),
-      (error) => {
+      (/** @type {any} */ error) => {
         assert.match(String(error.message), /does nothing/);
         assert.match(String(error.message), /`fill`/, 'it has to name the word it did not know');
         assert.match(String(error.message), /type/, 'and the word it should have been');
