@@ -1,10 +1,27 @@
 /**
- * A web app, checked end to end.
+ * A web app, photographed screen by screen. THIS IS VERSION 1'S SHAPE.
  *
- * Copy this to the root of your project as `staysfixed.config.js`, point it at
- * your dev server, and delete the parts you do not need. Every option here is
- * optional except `app` and `screens` — the defaults are chosen so that a config
- * of five lines already works.
+ * Read this before copying it anywhere. Stays Fixed has two halves, and this file
+ * belongs to the older one — the picture check, reached with `staysfixed check
+ * --pictures`. It is still supported and still works, and this is what its
+ * settings look like: an `app` to open and `screens` to photograph.
+ *
+ * **It is not what `staysfixed check` runs.** The everyday command is the
+ * difference engine, and its settings are a different shape entirely — `product`,
+ * `source`, `process`, `http`, `web`, `electron`, `android`, `ios`, `windows`.
+ * Copy this file into a project as `staysfixed.config.js` and a plain
+ * `staysfixed check` will tell you the settings do not name anything to open.
+ *
+ * **For the difference engine, do not copy an example at all.** Run `staysfixed
+ * init` in your project: it reads what is actually there and writes a settings
+ * file with every option in it, the ones that do not apply commented out rather
+ * than left out, filled in from your own code. That is better than any example
+ * here could be, because it is about your project. Every key is documented in
+ * `docs/settings.md`.
+ *
+ * With that said — for a picture check, copy this to the root of your project,
+ * point it at your dev server, and delete the parts you do not need. Every option
+ * here is optional except `app` and `screens`.
  */
 
 /** @type {import('../src/types.js').StaysFixedConfig} */

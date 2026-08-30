@@ -1,12 +1,23 @@
 /**
- * An Electron desktop app, checked end to end.
+ * A desktop app, photographed screen by screen. THIS IS VERSION 1'S SHAPE.
  *
- * The difference from a web app is small on purpose: instead of an address, you
- * give it the executable to launch. Everything after that — screens, freezing,
- * masks, guards — works exactly the same way, because an Electron window is a
- * Chromium window with a different frame around it.
+ * Read this before copying it anywhere. Stays Fixed has two halves, and this file
+ * belongs to the older one — the picture check, reached with `staysfixed check
+ * --pictures`. It is still supported and still works.
+ *
+ * **It is not what `staysfixed check` runs.** The everyday command is the
+ * difference engine, whose settings are a different shape: `product`, `source`,
+ * `process`, `http`, `web`, `electron`, `android`, `ios`, `windows`. For a desktop
+ * app there it is `electron: { binary: '...' }`, not `app: { binary: '...' }` —
+ * one of the two most common ways to write settings the adapter never reads.
+ *
+ * **For the difference engine, do not copy an example.** Run `staysfixed init`:
+ * it reads your project and writes every option, filled in from your own code,
+ * with the ones that do not apply commented out rather than left out. Every key
+ * is documented in `docs/settings.md`.
+ *
+ * What follows is the picture check's settings, fully commented.
  */
-
 import path from 'node:path';
 
 /**

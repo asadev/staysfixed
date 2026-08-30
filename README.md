@@ -767,11 +767,20 @@ writing JavaScript. It may also live at `.staysfixed/config.js` (or `.mjs`, or
 surface the exact programs, environment variables, install commands and
 permissions, rather than "you may need Xcode".
 
-Three fully commented examples are in [`examples/`](examples/):
-[a web app](examples/staysfixed.config.web.js),
-[an Electron app](examples/staysfixed.config.electron.js), and
-[a guard](examples/guards/the-sidebar-still-collapses.js). All three are written
-for the picture check, which is the half that needs an `app`.
+**Do not copy an example to set the difference engine up.** Run `staysfixed
+init`: it reads what is actually in your project and writes a settings file with
+every option in it — the ones that do not apply commented out rather than left
+out — filled in from your own code. That is better than any example, because it
+is about your project rather than somebody else's.
+
+The three fully commented examples in [`examples/`](examples/) — [a web
+app](examples/staysfixed.config.web.js), [an Electron
+app](examples/staysfixed.config.electron.js) and [a
+guard](examples/guards/the-sidebar-still-collapses.js) — are all **version 1's
+shape**, for the picture check, which is the half that needs an `app`. Each file
+says so at the top now. Copy one into a project and a plain `staysfixed check`
+will tell you the settings do not name anything to open, which is correct and
+confusing if you were not expecting it.
 
 The design behind all of it is in [docs/how-v2-works.md](docs/how-v2-works.md).
 
