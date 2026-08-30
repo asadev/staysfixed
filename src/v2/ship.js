@@ -156,15 +156,29 @@ export async function onShip(opts = {}) {
     const store = openStore({ root });
     await ensureStore(store);
 
-    const build = await resolveBuild(store, product, release, opts.build);
+    /** @type {string[]} */
+    const unreadable = [];
+    const build = await resolveBuild(store, product, release, opts.build, (/** @type {string} */ why) => unreadable.push(String(why)));
+    if (unreadable.length > 0) {
+      // Said whether or not a build was found, because a damaged record changes what the
+      // answer is worth either way: if none was found it may be the reason, and if one was
+      // found it may not be the right one.
+      result.lines.push(
+        `${unreadable.length} stored ${unreadable.length === 1 ? 'record' : 'records'} of ${product} could not be read, so ${unreadable.length === 1 ? 'it was' : 'they were'} left out of this decision: ${unreadable.join('; ')}`,
+      );
+    }
     if (!build) {
       result.cut = false;
+      const because = unreadable.length > 0
+        ? ` ${unreadable.length} of its stored ${unreadable.length === 1 ? 'record' : 'records'} could not be read, which may be why.`
+        : '';
       result.lines = [
         `${product} ${release.describe}`,
-        `Stays Fixed has no record of this build, so it did not become the reference. Nothing about ${product} is being compared against anything yet.`,
+        `Stays Fixed has no record of this build, so it did not become the reference. Nothing about ${product} is being compared against anything yet.${because}`,
         'Run `staysfixed check` once before the next release and it will record itself from then on.',
+        ...(unreadable.length > 0 ? [`What could not be read: ${unreadable.join('; ')}`] : []),
       ];
-      result.summary = `${product} shipped ${release.what}, but Stays Fixed had never seen this build, so what "working" means has not moved. Run a check before the next release.`;
+      result.summary = `${product} shipped ${release.what}, but Stays Fixed had never seen this build, so what "working" means has not moved.${because} Run a check before the next release.`;
       return result;
     }
 
@@ -381,10 +395,20 @@ async function versionBump(root) {
  * @param {string} product
  * @param {Release} release
  * @param {string|BuildFingerprint} [told]
+ * @param {(why: string) => void} [onProblem]  Told about any stored record that would not open.
  * @returns {Promise<BuildFingerprint|null>}
  */
-async function resolveBuild(store, product, release, told) {
-  const builds = await listBuilds(store, { product });
+async function resolveBuild(store, product, release, told, onProblem) {
+  // A record nobody could read must never be silently absent here.
+  //
+  // This function decides which build becomes the definition of "working" for a whole
+  // product. `listBuilds` skips a damaged record rather than failing, which is right for a
+  // listing and wrong here twice over: a build whose record will not open looks exactly like
+  // a build that was never walked, so the answer is "Stays Fixed has never seen this build"
+  // when the truth is "it has, and the record is broken"; and where two builds share a
+  // commit, losing the clean one to a damaged record leaves the dirty one to be blessed in
+  // its place. Neither is a thing to work out from an empty list.
+  const builds = await listBuilds(store, { product, onProblem });
 
   if (told) {
     const id = typeof told === 'string' ? told : told.id;

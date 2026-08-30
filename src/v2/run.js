@@ -34,6 +34,7 @@ import {
   wobbleStorm,
 } from './observation.js';
 import { ensureStore, saveBuild, saveCapture, latestCapture, referenceFor, listBuilds } from './store.js';
+import { describeRuleChange } from './normalise.js';
 import { clusterDifferences } from './cluster.js';
 import { rankFindings } from './rank.js';
 
@@ -135,6 +136,10 @@ const VERSION = /** @type {{version?: string}} */ (require('../../package.json')
  * @property {string} [journey]
  * @property {string} [run]
  * @property {number} [count]
+ * @property {number} [steady]    Only on 'wobble'. Addresses this build answered the same
+ *                                way twice, counted rather than inferred by subtraction.
+ * @property {boolean} [measured] Only on 'wobble'. False when the wobble was never taken,
+ *                                which is not the same as a wobble of nothing.
  * @property {number} [durationMs]
  * @property {Verdict} [verdict]
  */
@@ -251,6 +256,11 @@ export async function runCheck(opts) {
     /** @type {string[]} */
     const steadyInReference = [];
     let referenceWobbleMeasured = true;
+    // One fact about one pair of rule sets, gathered here and said once at the end.
+    /** @type {Set<string>} */
+    const rulesMoved = new Set();
+    /** @type {string[]} */
+    const rulesMovedOn = [];
 
     for (const journey of journeys) {
       stop();
@@ -294,12 +304,22 @@ export async function runCheck(opts) {
           surface: journey.surface,
         });
       }
+      // ADDRESSES, not rows. This used to send `a.observations.length`, which counts every
+      // observation the adapter wrote down — and two observations at the SAME address are one
+      // address written down twice, not two addresses. Every other number on the page is
+      // counted by address: `foldCoverage` builds a Set, and the wobble arithmetic indexes by
+      // path. So a walk with two duplicate addresses put "18 addresses watched" in the header
+      // beside "14 addresses watched" in the coverage ledger and "18 answered the same way
+      // twice" for a build that only ever had 14 addresses to answer at. Three numbers about
+      // one run, disagreeing, on a page whose entire job is being believed. The duplicates
+      // themselves are not swallowed — `duplicateGaps` above reports each one.
+      const addresses = new Set(a.observations.map((o) => o.path)).size;
       say({
         type: 'journey:done',
         at: events.elapsed(),
         journey: journey.name,
-        count: a.observations.length,
-        message: `${a.observations.length} ${plural(a.observations.length, 'thing', 'things')} looked at, ${wobble.unstable.length} of which this build cannot answer the same way twice.`,
+        count: addresses,
+        message: `${addresses} ${plural(addresses, 'thing', 'things')} looked at, ${wobble.unstable.length} of which this build cannot answer the same way twice.`,
       });
 
       if (!reference) continue;
@@ -337,9 +357,8 @@ export async function runCheck(opts) {
         gaps.push({
           what: `The old build could not be walked for "${journey.describe || journey.name}", so this was not a paired comparison after all.`,
           why:
-            `${nameOf(reference)} was put back on this machine, and then there was nothing there to run: ${
-              wasA.observations[0]?.meta?.describe ?? 'the adapter could not open it'
-            }. This usually means the product is BUILT rather than committed — an APK, a .app, a packaged desktop app — and a checkout of the old commit does not contain one.`,
+            `${nameOf(reference)} was put back on this machine, and then there was nothing there to run: ${whyNothingRan(wasA)} ` +
+            'This usually means the product is BUILT rather than committed — an APK, a .app, a packaged desktop app — and a checkout of the old commit does not contain one.',
           unlockedBy:
             'Build the old commit before the run, or point the settings at a kept copy of the old build\'s artifact. Until then this journey falls back to the record the old build left last time.',
           surface: journey.surface,
@@ -383,18 +402,41 @@ export async function runCheck(opts) {
       // one normalised under another produces differences that are about the RULES — either a
       // wall of noise that reads like a regression, or, when the change was to add a rule,
       // quiet where there should not be any. Either way the reader has to be told.
-      if (stored.capture.rules && a.rules && stored.capture.rules !== a.rules) {
-        gaps.push({
-          what: `"${journey.describe || journey.name}" is being compared across a change to the normalisation rules.`,
-          why:
-            `The stored record of the old build was tidied up by rule set ${stored.capture.rules} and this run used ${a.rules}. ` +
-            'Some of what you see may be the rules changing rather than the product, and a rule that was added since could be covering something up.',
-          unlockedBy: 'Run a paired check, which walks the old build live under today\'s rules, or ship again to cut a fresh reference.',
-          surface: journey.surface,
-        });
+      //
+      // WHAT changed, not two hashes. This used to print "v1-fcf4b8000217 versus
+      // v1-29141a9ec069" and nothing else, which tells an agent nothing it can act on, so it
+      // acts on nothing. `describeRuleChange` owns the judgement — a rule that rewrites
+      // something differently makes the whole comparison suspect; a rule that merely reaches
+      // one more address makes only that address suspect and names it; and a record older
+      // than the scope stamp says so rather than reporting every glob as new.
+      //
+      // ONCE PER RUN, not once per journey. It is one fact about one pair of rule sets, and
+      // it was being written out again for every journey — four identical paragraphs in the
+      // coverage list on a four-journey project, on every run, saying the same thing. The
+      // coverage list is the one section that must never be skimmed, and nothing teaches a
+      // reader to skim it faster than a block that is always there and always the same.
+      const ruleChange = describeRuleChange(
+        { fingerprint: stored.capture.rules, scope: stored.capture.rulesScope },
+        { fingerprint: a.rules, scope: a.rulesScope },
+      );
+      if (!ruleChange.same) {
+        rulesMoved.add(ruleChange.say);
+        rulesMovedOn.push(journey.describe || journey.name);
       }
       if (stored.wobble) steadyInReference.push(...steadyPaths(stored.capture, stored.wobble));
       else referenceWobbleMeasured = false;
+    }
+
+    if (rulesMovedOn.length > 0) {
+      const which =
+        rulesMovedOn.length === 1
+          ? `"${rulesMovedOn[0]}" is`
+          : `${rulesMovedOn.length} journeys are`;
+      gaps.push({
+        what: `${which} being compared across a change to the normalisation rules.`,
+        why: [...rulesMoved].join(' '),
+        unlockedBy: 'Run a paired check, which walks the old build live under today\'s rules, or ship again to cut a fresh reference.',
+      });
     }
 
     stop();
@@ -405,10 +447,19 @@ export async function runCheck(opts) {
     const walkedLive = liveWalks > 0;
     const mode = /** @type {'paired'|'stored-record'} */ (walkedLive ? 'paired' : 'stored-record');
     const wobble = wobbles.length > 0 ? mergeWobble(wobbles) : unmeasuredWobble(opts.candidate.id, '*');
+    // `steady` and `measured` are sent because they were MEASURED here, and nothing
+    // downstream can work them out. Anything drawing this event had to guess steady as
+    // "everything watched, minus the unstable ones" — a subtraction across two different
+    // populations, so it reported addresses as having answered the same way twice when the
+    // build had never been asked at them. And `measured: false` is the difference between a
+    // build that wobbled about nothing and a build whose wobble was never taken; two noughts
+    // cannot tell those apart, and only the first one is good news.
     say({
       type: 'wobble',
       at: events.elapsed(),
       count: wobble.unstable.length,
+      steady: wobble.steady,
+      measured: wobble.measured,
       message:
         wobble.unstable.length === 0
           ? 'This build gives the same answer twice, everywhere.'
@@ -599,6 +650,16 @@ export async function runCheck(opts) {
       cwd: opts.cwd,
       guards: opts.guards ?? [],
       touches: touchMap(walked),
+      // Where "your change" starts.
+      //
+      // Without this, "the change" means the working tree and nothing else — so the moment
+      // an agent commits its work, which is exactly what an agent does at the end of a task,
+      // the distance measure goes blind, the ranking loses its ordering, and every finding
+      // carries the sentence "nothing in the working tree has changed, so there is no edit
+      // to measure this against" over a change that is perfectly well known. The reference
+      // is a shipped build, which is a commit; the diff from there to here is the change,
+      // whether it has been committed or not.
+      since: reference?.gitSha ?? undefined,
     });
 
     const warning = modeWarning(mode, provedLive, reference);
@@ -919,6 +980,34 @@ const PROVEN_LIVE_WARNING =
 
 const NO_REFERENCE_WARNING =
   'Until you ship once with the reference hook in place there is nothing to compare against, so this run proves nothing about what still works.';
+
+/**
+ * Why the old build came back with nothing that could be walked.
+ *
+ * The adapter always says why. It says it in the observation's own sentence, which
+ * `observation()` in adapters/contract.js files under `meta.describe` — "there is no APK in
+ * the exported checkout", "the runtime this needs is not on this machine". Reading only
+ * `observations[0]` threw that away in the two cases that matter most: a capture that came
+ * back completely EMPTY has no observation nought to read, so the reader got the generic
+ * "the adapter could not open it" while the real reason sat in the capture's note; and a
+ * capture whose first observation happens to be one the adapter did cover names the wrong
+ * hole. So the first REFUSED observation is the one that answers the question, its reason
+ * category stands in when it has no sentence of its own, and the capture's note is read
+ * before anything generic is said.
+ *
+ * The sentence is also finished properly. The adapter's `says` is already a whole sentence,
+ * and the old template appended a full stop of its own — the same fault already fixed once
+ * in check.js's explain reply, which was giving agents "...real money..".
+ *
+ * @param {Capture} was   The walk of the old build that produced nothing usable.
+ * @returns {string}      One finished sentence.
+ */
+function whyNothingRan(was) {
+  const refused = was?.observations?.find((o) => o.meta?.refused === true);
+  const said = refused?.meta?.describe || refused?.meta?.refusedWhy || was?.note || 'the adapter could not open it';
+  const text = String(said).trim();
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
 
 /**
  * @param {'paired'|'stored-record'} mode

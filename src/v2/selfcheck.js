@@ -425,6 +425,111 @@ export const CASES = [
         .join('\n'),
     }),
   },
+
+  {
+    name: "a break only the project's own tests can see",
+    breaks:
+      'A total stops rounding. The command-line program only ever adds whole pounds, so what it prints does not move by one character and every journey this tool can discover on its own stays silent. The project\'s own test adds pennies, and it is the only thing in the repository that notices.',
+    expect: 'a finding',
+    mustSay: [/pennies/i],
+    journeys: [
+      {
+        name: 'suite-test-total-test',
+        describe: 'run the 3 checks in test/total.test.js and watch what they touch',
+        source: 'suite',
+        surface: 'cli',
+        from: 'test/total.test.js',
+        channels: ['results', 'complaints', 'counters'],
+        steps: [
+          {
+            act: 'run-tests',
+            runner: 'node:test',
+            file: 'test/total.test.js',
+            // Named rather than given as a path, so this case runs on a machine whose Node
+            // lives somewhere else. `node` is on the path of any machine that got this far.
+            command: 'node',
+            argv: ['--test', '--test-reporter=tap', 'test/total.test.js'],
+            note: 'Run this exactly as it was harvested. A test file run a different way is a different journey.',
+          },
+        ],
+      },
+    ],
+    build: (broken) => ({
+      'package.json': JSON.stringify(
+        { name: 'widget', version: '1.0.0', type: 'module', bin: { widget: 'cli.js' }, scripts: { test: 'node --test' } },
+        null,
+        2,
+      ) + '\n',
+      'total.js': [
+        'export function total(items) {',
+        '  let sum = 0;',
+        '  for (const item of items) sum += item.price;',
+        broken ? '  return sum;' : '  return Math.round(sum * 100) / 100;',
+        '}',
+        '',
+      ].join('\n'),
+      'cli.js': [
+        "import { total } from './total.js';",
+        '// Whole pounds only, which is why running the product proves nothing here.',
+        'console.log(total([{ price: 2 }, { price: 3 }]));',
+        '',
+      ].join('\n'),
+      'test/total.test.js': [
+        "import { test } from 'node:test';",
+        "import assert from 'node:assert/strict';",
+        "import { total } from '../total.js';",
+        '',
+        "test('adds whole pounds', () => {",
+        '  assert.equal(total([{ price: 2 }, { price: 3 }]), 5);',
+        '});',
+        '',
+        "test('adds pennies without floating point dust', () => {",
+        '  assert.equal(total([{ price: 0.1 }, { price: 0.2 }]), 0.3);',
+        '});',
+        '',
+      ].join('\n'),
+    }),
+  },
+
+  {
+    name: 'a break behind an npm script',
+    breaks:
+      'A message changes, behind `npm run`. Nothing about the product is unusual — what this case really watches is the watcher: it rides inside the child, and until 2026-08-30 the proxy it put over the environment had no `set` trap, so npm wrote npm_lifecycle_event, read back nothing, and exited 1 without printing a word. Every product whose start command went through npm looked like a product that would not boot, on both builds equally, which is a silence rather than a finding.',
+    expect: 'a finding',
+    mustSay: [/two orders|three orders/i],
+    journeys: [
+      {
+        name: 'run-it',
+        describe: 'Run the product the way its own package.json says to run it.',
+        source: 'code',
+        surface: 'cli',
+        steps: [
+          {
+            act: 'run',
+            run: 'npm run --silent report',
+            note: 'through npm, because that is what `staysfixed init` writes by default',
+            env: {
+              // npm's own update check reaches for the registry, which is refused - and an
+              // attempt that happens on one run and not the next is noise this case would
+              // then have to argue about. Switched off rather than subtracted.
+              NO_UPDATE_NOTIFIER: '1',
+              npm_config_update_notifier: 'false',
+              npm_config_audit: 'false',
+              npm_config_fund: 'false',
+            },
+          },
+        ],
+      },
+    ],
+    build: (broken) => ({
+      'package.json': JSON.stringify(
+        { name: 'widget', version: '1.0.0', type: 'module', scripts: { report: 'node report.js' } },
+        null,
+        2,
+      ) + '\n',
+      'report.js': `console.log('${broken ? 'three' : 'two'} orders');\n`,
+    }),
+  },
 ];
 
 /**
@@ -477,20 +582,49 @@ async function makeStoreUnwritable(dir, working) {
     return { ready: false, why: `the warm-up run did not work: ${why(e)}` };
   }
 
-  /** @type {string[]} */
-  const shut = [];
-  for (const build of await fsp.readdir(builds, { withFileTypes: true })) {
-    if (!build.isDirectory()) continue;
-    const inside = path.join(builds, build.name);
-    for (const journey of await fsp.readdir(inside, { withFileTypes: true })) {
-      if (!journey.isDirectory()) continue;
-      const folder = path.join(inside, journey.name);
-      await fsp.chmod(folder, 0o555);
-      shut.push(folder);
-    }
-  }
-  if (shut.length === 0) return { ready: false, why: 'the warm-up run stored nothing, so there was nothing to make read-only' };
+  // Shut every folder under the store, not only the ones the captures land in.
+  //
+  // This walked two levels by hand — builds, then journeys — which left the build record
+  // itself writable. That is the wrong half: `openProject` writes the build record before a
+  // single journey runs, so a disk that has given out fails THERE first, and a case that
+  // only shuts the capture folders never exercises the path the real failure takes.
+  // Shutting the whole store is the mirror of `relax`, which is what puts it back.
+  const shut = await shutTight(path.join(dir, '.staysfixed', 'v2'));
+  if (shut === 0) return { ready: false, why: 'the warm-up run stored nothing, so there was nothing to make read-only' };
   return { ready: true, why: '' };
+}
+
+/**
+ * Make a folder and everything under it read-only, and say how many folders that was.
+ *
+ * The exact mirror of `relax`, which undoes it. Failures are ignored on purpose: a folder
+ * that will not change permissions is one this case cannot use, and the count tells the
+ * caller whether enough of the store was shut for the case to mean anything.
+ *
+ * @param {string} dir
+ * @returns {Promise<number>}
+ */
+async function shutTight(dir) {
+  /** @type {import('node:fs').Dirent[]} */
+  let inside = [];
+  try {
+    inside = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let shut = 0;
+  for (const entry of inside) {
+    if (entry.isDirectory()) shut += await shutTight(path.join(dir, entry.name));
+  }
+  // The folder itself last: shut it first and its own children become unreachable.
+  try {
+    await fsp.chmod(dir, 0o555);
+    shut += 1;
+  } catch {
+    // Read-only already, or a filesystem that will not say no. Either way, not a reason
+    // to stop — `relax` will still walk it, and the count tells the caller what happened.
+  }
+  return shut;
 }
 
 // ---------------------------------------------------------------------------
