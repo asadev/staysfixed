@@ -39,7 +39,7 @@ import {
   takePort,
 } from '../../src/v2/adapters/isolate.js';
 import { scratchDir, cleanUp } from '../support.mjs';
-import { sweepAbandonedScratch } from '../../src/v2/check.js';
+import { sweepAbandonedScratch, guardNames } from '../../src/v2/check.js';
 
 after(cleanUp);
 
@@ -367,5 +367,37 @@ describe('copies left behind by a run that never finished', () => {
       if (realTmp === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = realTmp;
     }
+  });
+});
+
+describe('the guards a project has', () => {
+  test('their names are found, so the seal that exists because somebody was burned can fire', async () => {
+    // `settle` takes guard names so a difference touching a bug somebody already had once is
+    // sealed and no agent may wave it through. Both call sites handed it nothing, so that
+    // class was empty on every run this tool has ever done — and a check on a project with a
+    // guard sitting in `.staysfixed/guards` printed the word "guard" exactly zero times.
+    // Measured 2026-08-30.
+    const root = await scratchDir('staysfixed-guards');
+    const dir = path.join(root, '.staysfixed', 'guards');
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(
+      path.join(dir, 'order-button.guard.mjs'),
+      [
+        'export default {',
+        "  name: 'the order button is still on the front page',",
+        "  fixed: '2026-08-30',",
+        "  because: 'It was removed once by a careless edit and nobody noticed for a week.',",
+        '  async run() {},',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    assert.deepEqual(await guardNames(root), ['the order button is still on the front page']);
+  });
+
+  test('a project with no guards is not an error, it is just none', async () => {
+    const root = await scratchDir('staysfixed-noguards');
+    assert.deepEqual(await guardNames(root), []);
   });
 });

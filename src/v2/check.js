@@ -315,8 +315,31 @@ export async function check(options = {}) {
     // "nothing was walked" on a run that walked plenty.
     await countTheDoors(verdict, project);
 
+    // THE GUARDS. `settle` takes the names so that a difference touching a bug somebody
+    // already had once is sealed and no agent may wave it through — and both call sites used
+    // to hand it nothing, so that class was empty on every run this tool has ever done. The
+    // one seal that exists because a person was burned before could never fire.
+    //
+    // Running them is version 1's job and needs its browser driver, which this path does not
+    // have. That is a real hole and it is now SAID rather than left silent: measured on
+    // 2026-08-30, a check on a project with a guard sitting in `.staysfixed/guards` printed
+    // the word "guard" exactly zero times. A tool built to catch silent breakage must not do
+    // nothing silently.
+    const named = await guardNames(project.root);
+    if (named.length > 0 && verdict.coverage) {
+      verdict.coverage.gaps = [
+        ...(verdict.coverage.gaps ?? []),
+        {
+          what: `${named.length} guard${named.length === 1 ? '' : 's'} written against bugs that already happened once`,
+          why:
+            `They are sealed by name, so nothing touching one can be waved through quietly — but they were not RUN on this check. ` +
+            `\`staysfixed check --guards\` walks them. ${named.map((n) => `"${n}"`).join(', ')}`,
+        },
+      ];
+    }
+
     /** @type {CheckOutcome} */
-    const outcome = await settle(verdict, project.store, project.product);
+    const outcome = await settle(verdict, project.store, project.product, named);
     // Only a run that really did reach the surface it was aimed at may say so. The
     // confirmation is what lets a caller tell "it went there and found nothing" from
     // "it checked something else and found nothing", and those are not the same answer.
@@ -634,6 +657,28 @@ function comparedNothing(verdict) {
     /never been walked against|no stored record of the old build/i.test(`${gap.what} ${gap.why}`),
   ).length;
   return nothingToCompare >= walked ? 'no stored record' : null;
+}
+
+/**
+ * The guards this project has, by name.
+ *
+ * Names only: sealing a difference by the guard it touches needs the name, and nothing on
+ * this path can run one. `loadGuards` wants only the folder, and it is the same reader
+ * version 1 uses, so a guard version 1 accepts is a guard this counts.
+ *
+ * @param {string} root
+ * @returns {Promise<string[]>}
+ */
+export async function guardNames(root) {
+  try {
+    const { loadGuards } = await import('../guard/load.js');
+    const guards = await loadGuards(/** @type {any} */ ({ paths: { guards: path.join(root, '.staysfixed', 'guards') } }));
+    return guards.map((g) => String(g?.name ?? '')).filter(Boolean);
+  } catch {
+    // A guards folder that will not load must never stop a check running. Version 1 says the
+    // same about the same folder, and a check that refuses is worse than one without a seal.
+    return [];
+  }
 }
 
 /**
