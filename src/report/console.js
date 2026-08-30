@@ -124,7 +124,11 @@ function tally(run) {
     missing: pictures.filter((p) => p.status === 'missing').length,
     broken: pictures.filter((p) => p.status === 'failed').length,
     wobbled: pictures.filter((p) => p.status === 'flaky').length,
-    guardsFailed: guards.filter((g) => g.status === 'failed').length,
+    // Two different things wear the same status, and calling both of them "a bug is back"
+    // sends somebody hunting a regression that never happened. A guard that asked no
+    // question at all has not caught anything; it has admitted it cannot.
+    guardsFailed: guards.filter((g) => g.status === 'failed' && !(/** @type {any} */ (g).assertedNothing)).length,
+    guardsEmpty: guards.filter((g) => /** @type {any} */ (g).assertedNothing === true).length,
   };
 }
 
@@ -139,6 +143,8 @@ export function verdictFor(run) {
   const parts = [];
   if (t.guardsFailed === 1) parts.push({ n: 1, text: '1 guard failed — a bug that was already fixed is back.' });
   else if (t.guardsFailed > 1) parts.push({ n: t.guardsFailed, text: `${countText(t.guardsFailed)} guards failed — bugs that were already fixed are back.` });
+  if (t.guardsEmpty === 1) parts.push({ n: 1, text: '1 guard checks nothing, so it is not protecting anything.' });
+  else if (t.guardsEmpty > 1) parts.push({ n: t.guardsEmpty, text: `${countText(t.guardsEmpty)} guards check nothing, so they are not protecting anything.` });
   if (t.changed === 1) parts.push({ n: 1, text: '1 thing changed. Look at it before you ship.' });
   else if (t.changed > 1) parts.push({ n: t.changed, text: `${countText(t.changed)} things changed. Look at them before you ship.` });
   if (t.fresh === 1) parts.push({ n: 1, text: '1 new screen is waiting for a person to approve it.' });
@@ -162,9 +168,12 @@ export function verdictFor(run) {
  * @param {import('../types.js').RunSummary} run
  * @returns {boolean}
  */
-function allClear(run) {
+export function allClear(run) {
   const t = tally(run);
-  return t.changed + t.fresh + t.missing + t.broken + t.wobbled + t.guardsFailed === 0;
+  // `guardsEmpty` counts too. Splitting it out of `guardsFailed` was so the SENTENCE could
+  // tell a returned bug from a guard that asks nothing — not so that one of them could
+  // quietly become a pass.
+  return t.changed + t.fresh + t.missing + t.broken + t.wobbled + t.guardsFailed + t.guardsEmpty === 0;
 }
 
 /**

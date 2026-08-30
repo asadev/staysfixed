@@ -28,6 +28,7 @@ const FRESH_KEY = 'fresh';
 /**
  * @typedef {import('../types.js').GuardResult & {
  *   retriedToPass?: boolean,
+ *   assertedNothing?: boolean,
  *   checks?: import('../types.js').CheckStep[],
  * }} GuardRunResult
  */
@@ -136,10 +137,22 @@ export async function runGuards(project, app, guards, opts = {}) {
       if (opts.signal?.aborted) break;
     }
 
+    // A guard that asserted NOTHING has not held. It cannot hold, and it cannot fail — it is
+    // a name over an empty room. Measured on 2026-08-30: a guard called "the checkout total
+    // is never charged twice", whose `run()` was an empty function, came back as
+    // "ok ... still holds". That is a false all-clear wearing the friendliest face this tool
+    // has, and it would go on saying it every day for ever. The whole promise here is one
+    // plain-English rule per bug somebody already had; a rule that checks nothing is worse
+    // than no rule, because somebody believes it.
+    // Its OWN questions, not the runner's. Every guard gets a "fresh start" step from this
+    // file whether it asks anything or not, so counting the whole list would always find one.
+    const asked = checks.filter((c) => c.key !== FRESH_KEY && !String(c.key ?? '').endsWith(`-${FRESH_KEY}`));
+    const assertedNothing = outcome.ok && asked.length === 0;
+
     /** @type {GuardRunResult} */
     const result = {
       name: guard.name,
-      status: outcome.ok ? 'passed' : 'failed',
+      status: outcome.ok && !assertedNothing ? 'passed' : 'failed',
       file: guard.file,
       because: guard.because,
       durationMs: Date.now() - startedAt,
@@ -147,7 +160,13 @@ export async function runGuards(project, app, guards, opts = {}) {
     };
     if (checks.length > 0) result.checks = checks;
 
-    if (outcome.ok) {
+    if (assertedNothing) {
+      result.assertedNothing = true;
+      result.message =
+        `This guard checked nothing. Its \`run()\` finished without asking a single question, so it cannot fail ` +
+        `and it is not protecting anything — it would report "still holds" every day for ever. ` +
+        `Give it at least one \`expect(...)\`. ${guard.because ? `What it is meant to protect: ${guard.because}` : ''}`.trim();
+    } else if (outcome.ok) {
       // Passing only on the second go is not passing. The flake register picks
       // this up and condemns the guard, because a guard nobody trusts is worse
       // than no guard: people learn to re-run it until it goes green.
