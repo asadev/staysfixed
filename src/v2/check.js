@@ -95,7 +95,7 @@ const exec = promisify(execFile);
  * quietly checked something else and found nothing", and those two read identically
  * without this. It is only ever set when the run really did reach that surface.
  *
- * @typedef {Verdict & {blocked?: boolean, accounted?: import('./escalate.js').Accounting, target?: {surface: string, at: string|null}}} CheckOutcome
+ * @typedef {Verdict & {blocked?: boolean, comparedNothing?: 'no reference'|'no stored record'|null, accounted?: import('./escalate.js').Accounting, target?: {surface: string, at: string|null}}} CheckOutcome
  */
 
 /**
@@ -432,6 +432,14 @@ async function settle(verdict, store, product, guards) {
     // nothing came back different — and it is the exact sentence that would let a real
     // regression through. It is not a pass. It is no answer at all.
     const nothing = comparedNothing(verdict);
+    // Carried as a FIELD, not only folded into a sentence. Every other surface has to be
+    // able to ask this question without reading English: the MCP server rendered its own
+    // headline from the difference count alone, never looked at `ok`, and answered a
+    // machine "NOTHING UNACCOUNTED FOR. Everything that worked before still works" with
+    // `ok: true` and `isError: false` on a project that had nothing on record at all —
+    // while the terminal, on the same run, correctly said it was no answer. The agent is
+    // the reader that matters most here, and it was the one being told the untrue thing.
+    verdict.comparedNothing = nothing;
     if (nothing) {
       verdict.ok = false;
       verdict.summary =

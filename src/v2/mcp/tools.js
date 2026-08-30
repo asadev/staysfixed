@@ -823,7 +823,12 @@ async function toolCheck(ctx, input) {
   );
 
   const page = unaccounted.slice(offset, offset + limit);
-  const clean = unaccounted.length === 0 && newlyUnstable.length === 0 && result?.blocked !== true;
+  // A run that compared NOTHING is not a clean run, and this is the surface where saying so
+  // matters most. The engine had already worked it out and set `ok: false`; this line only
+  // ever counted differences, so a project with nothing on record produced zero differences,
+  // counted as clean, and the agent was told everything still works.
+  const comparedNothing = typeof result?.comparedNothing === 'string' && result.comparedNothing.length > 0;
+  const clean = unaccounted.length === 0 && newlyUnstable.length === 0 && result?.blocked !== true && !comparedNothing;
 
   // What this run did not look at, in the engine's own words. It rides in every reply,
   // clean ones included: a green result on a product with three hundred unopened doors is
@@ -843,7 +848,16 @@ async function toolCheck(ctx, input) {
   if (input.format === 'json') {
     const payload = {
       ok: clean,
-      verdict: result?.blocked ? 'blocked' : clean ? 'nothing unaccounted for' : 'differences found',
+      // "differences found" would be the wrong word for a run that found none because it
+      // compared none. There are three outcomes here, not two, and the third is the one
+      // that must never be mistaken for either.
+      verdict: result?.blocked
+        ? 'blocked'
+        : comparedNothing
+          ? 'nothing was compared'
+          : clean
+            ? 'nothing unaccounted for'
+            : 'differences found',
       mode: result?.mode ?? null,
       note: result?.summary ?? null,
       noiseRemoved: result?.differencesNoise ?? null,
@@ -931,7 +945,7 @@ async function toolCheck(ctx, input) {
  * @param {string|null} a.covers
  * @returns {string}
  */
-function renderCheck({ result, unaccounted, page, offset, limit, waived, expired, waiversLeft, newlyUnstable, intent, clean, missedTheTarget, notChecked, covers }) {
+export function renderCheck({ result, unaccounted, page, offset, limit, waived, expired, waiversLeft, newlyUnstable, intent, clean, missedTheTarget, notChecked, covers }) {
   /** @type {string[]} */
   const out = [];
 
@@ -942,7 +956,14 @@ function renderCheck({ result, unaccounted, page, offset, limit, waived, expired
     return out.join('\n');
   }
 
-  if (clean) {
+  if (result?.comparedNothing) {
+    out.push(
+      result.comparedNothing === 'no reference'
+        ? 'NOTHING WAS ACTUALLY COMPARED. There is no build of this product on record as working, so this run had nothing whatever to hold today\'s behaviour against. This is not a pass and not a failure - it is no answer.'
+        : 'NOTHING WAS ACTUALLY COMPARED. Every journey was walked, and not one of them had anything on record from the build you were happy with. This is not a pass and not a failure - it is no answer.',
+    );
+    out.push('Do not report this as a clean run. Only shipping records what "working" means, and no agent may cut that reference.');
+  } else if (clean) {
     out.push('NOTHING UNACCOUNTED FOR. Everything that worked before still works, as far as this run could see.');
   } else if (unaccounted.length) {
     const sealed = unaccounted.filter((f) => classify(f) !== null).length;

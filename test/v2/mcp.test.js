@@ -28,6 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { cliPath, repoRoot, scratchDir, cleanUp } from '../support.mjs';
+import { renderCheck } from '../../src/v2/mcp/tools.js';
 
 /** The revision an agent asks for. */
 const PROTOCOL = '2025-06-18';
@@ -155,6 +156,47 @@ function jsonFrom(result) {
   }
   return null;
 }
+
+describe('a run that compared nothing is never reported to an agent as clean', () => {
+  /** The shape `check` hands the MCP renderer when there is nothing on record at all. */
+  const nothingOnRecord = {
+    result: {
+      ok: false,
+      comparedNothing: 'no reference',
+      blocked: false,
+      mode: 'stored-record',
+      summary: 'NOTHING WAS ACTUALLY COMPARED.',
+      coverage: { journeys: 3, gaps: [] },
+    },
+    unaccounted: [],
+    page: 1,
+    offset: 0,
+    limit: 50,
+    waived: 0,
+    expired: 0,
+    waiversLeft: 5,
+    newlyUnstable: [],
+    intent: null,
+    // Exactly the mistake: the caller counted differences, found none, and called it clean.
+    clean: true,
+    missedTheTarget: null,
+    notChecked: 'NOT EVERYTHING WAS CHECKED.',
+    covers: null,
+  };
+
+  test('the headline says no answer, not that everything still works', () => {
+    // Measured on 2026-08-30 against a real project with nothing shipped: the terminal said
+    // "NOTHING WAS ACTUALLY COMPARED ... it is no answer" and the MCP server, on the same
+    // run, said "NOTHING UNACCOUNTED FOR. Everything that worked before still works" with
+    // ok: true and isError: false. The agent is the reader this tool was built for, and it
+    // was the one being told the untrue thing.
+    const said = renderCheck(nothingOnRecord);
+    assert.match(said, /NOTHING WAS ACTUALLY COMPARED/);
+    assert.doesNotMatch(said, /Everything that worked before still works/);
+    assert.match(said, /no answer/i);
+    assert.match(said, /Do not report this as a clean run/);
+  });
+});
 
 describe('the version 2 server, on a machine with nothing installed', () => {
   /** @type {Server} */
