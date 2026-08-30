@@ -27,7 +27,7 @@ import assert from 'node:assert/strict';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { readHostProbe, withoutComments, capabilities } from '../../src/v2/doctor.js';
+import { readHostProbe, withoutComments, capabilities, reachableHosts } from '../../src/v2/doctor.js';
 import { POWERSHELL_PATHS } from '../../src/v2/remote.js';
 import { scratchDir, cleanUp } from '../support.mjs';
 
@@ -112,6 +112,41 @@ describe('what is really on the other end of an ssh host name', () => {
         true,
         `${p} is in the list remote.js will drive, so doctor has to recognise it`
       );
+    }
+  });
+});
+
+describe('it does not connect to your machines unasked', () => {
+  test('a plain run names the hosts in the ssh config and dials none of them', async () => {
+    // The first command a stranger runs is `doctor`. On a brand-new scratch project with no
+    // settings and nothing that could need a second machine, this opened ssh connections to
+    // every host in their `~/.ssh/config` and ran a command on each. Measured on 2026-08-30
+    // against the published 0.8.0, from a clean baseline of zero: NINE connections, to
+    // production servers and git hosts alike, within seconds of the first run, with nothing
+    // said before or after. `--offline` existed, but a way out you only learn about
+    // afterwards is not consent.
+    const home = await scratchDir('staysfixed-sshconfig');
+    await fsp.mkdir(path.join(home, '.ssh'), { recursive: true });
+    await fsp.writeFile(
+      path.join(home, '.ssh', 'config'),
+      'Host somebodys-production-box\n  HostName 10.0.0.9\n\nHost *\n  User nobody\n',
+      'utf8',
+    );
+
+    const realHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const hosts = await reachableHosts();
+      // The machine is still NAMED — quietly leaving it out would be the same bug in the
+      // other direction, where the runner somebody has simply is not in the answer.
+      assert.equal(hosts.length, 1);
+      assert.equal(hosts[0].name, 'somebodys-production-box');
+      assert.equal(hosts[0].reachable, false, 'nothing may be called reachable without dialling it');
+      assert.match(hosts[0].how, /NOT dialled/);
+      assert.match(hosts[0].how, /--machines/, 'and it has to say how to ask for it');
+    } finally {
+      if (realHome === undefined) delete process.env.HOME;
+      else process.env.HOME = realHome;
     }
   });
 });

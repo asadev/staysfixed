@@ -196,7 +196,7 @@ export const CHANNELS = [
  * should be able to read it once and know what to call, what it will get back,
  * and what it must not bother asking for here.
  *
- * @param {{cwd?: string, configFile?: string, offline?: boolean}} [opts]
+ * @param {{cwd?: string, configFile?: string, offline?: boolean, machines?: boolean}} [opts]
  * @returns {Promise<Capabilities>}
  */
 export async function capabilities(opts = {}) {
@@ -218,7 +218,12 @@ export async function capabilities(opts = {}) {
 
   const [tools, hosts, repo, reference, drivers, phones, asked] = await Promise.all([
     findTools(cwd, browsers),
-    offline ? Promise.resolve(/** @type {HostReport[]} */ ([])) : reachableHosts(),
+    // Only a product that could actually run somewhere else is a reason to go looking for
+    // somewhere else. A website or a command-line tool never needs a Windows desktop, and
+    // the hosts list feeds exactly one surface: that one.
+    offline
+      ? Promise.resolve(/** @type {HostReport[]} */ ([]))
+      : reachableHosts({ dial: opts.machines === true || desktopApp !== null }),
     isRepo(root).catch(() => false),
     findReference(root),
     whatThisCopyCanDrive(),
@@ -1175,12 +1180,39 @@ function androidSdkTool(folder, name) {
  * answers is a runner the tool already has, and it must never appear in the
  * result as something to go and set up.
  *
+ * @param {{dial?: boolean}} [opts]
  * @returns {Promise<HostReport[]>}
  */
-export async function reachableHosts() {
+export async function reachableHosts(opts = {}) {
   if (!onPath('ssh')) return [];
   const names = await sshConfigHosts();
   if (names.length === 0) return [];
+
+  // READING the ssh config is free and tells nobody anything. DIALLING is neither, and it
+  // is not something this tool may do to somebody who has just installed it.
+  //
+  // The first command a stranger runs is `doctor`. On a brand-new scratch project with no
+  // settings file and nothing that could possibly need a second machine, this opened ssh
+  // connections to every host in their `~/.ssh/config` and ran a command on each — measured
+  // on 2026-08-30: ten hosts configured, connections out within seconds of the first run,
+  // nothing said before or after. Those are production servers in a lot of people's configs,
+  // and in a lot of workplaces that alone is a policy breach. `--offline` existed, but a way
+  // out you only learn about afterwards is not consent.
+  //
+  // So it is asked for now rather than assumed, and the machines are still NAMED either way,
+  // because a machine quietly left out of the answer is the same bug as a folder quietly
+  // skipped while reading source: the list looks complete and the runner somebody needed is
+  // simply not in it.
+  if (opts.dial !== true) {
+    return names.map(
+      (name) =>
+        /** @type {HostReport} */ ({
+          name,
+          reachable: false,
+          how: 'named in your ssh config and deliberately NOT dialled. Nothing here needs a second machine, and this tool does not connect to yours unasked. `staysfixed doctor --machines` checks them.',
+        })
+    );
+  }
 
   const dialled = await Promise.all(names.slice(0, MAX_HOSTS).map((name) => describeHost(name)));
   // Anything past the cap is NAMED rather than dropped. A machine quietly left out of
@@ -2072,7 +2104,7 @@ export function describeCapabilities(caps) {
  * @returns {Promise<number>}
  */
 export async function run(ctx) {
-  const caps = await capabilities({ cwd: ctx.cwd, configFile: ctx.configFile, offline: ctx.bool('offline') });
+  const caps = await capabilities({ cwd: ctx.cwd, configFile: ctx.configFile, offline: ctx.bool('offline'), machines: ctx.bool('machines') });
 
   if (ctx.bool('json')) {
     // Nothing but the object may reach standard output. Doctor is the first call

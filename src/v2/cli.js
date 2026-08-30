@@ -167,16 +167,17 @@ export const V2_COMMANDS = {
 
   doctor: {
     summary: 'What this tool can and cannot check on this machine, and what would unlock more.',
-    usage: 'staysfixed doctor [--json] [--offline] [--fix]',
+    usage: 'staysfixed doctor [--json] [--machines] [--offline] [--fix]',
     describe:
-      'Looks at this machine rather than at your project: what is installed, which other\nmachines it can already reach, what each of those lets it watch, and what exactly\nis in the way of the rest. It never asks you to set up something that already\nworks — everything it lists as missing failed a real check first.\n\n--json is the same answer as an object, and it is the first thing an agent\nshould call. --fix repairs the small things version 1 could repair.',
+      'Looks at this machine rather than at your project: what is installed, which other\nmachines it can already reach, what each of those lets it watch, and what exactly\nis in the way of the rest. It never asks you to set up something that already\nworks — everything it lists as missing failed a real check first.\n\n--json is the same answer as an object, and it is the first thing an agent\nshould call. --fix repairs the small things version 1 could repair.\n\nIt does not connect to the machines in your ssh config unless this project has a\ndesktop app that might need one, or you pass --machines. They are still listed.',
     options: [
       ['--json', 'The whole answer as one JSON object. For agents.'],
+      ['--machines', 'Also dial the machines in your ssh config, to find a runner for a desktop app.'],
       ['--offline', 'Do not dial any other machine. Faster, and reports no runners.'],
       ['--fix', 'Repair the small local things that can be repaired safely.'],
     ],
     examples: ['staysfixed doctor', 'staysfixed doctor --json'],
-    spec: { booleans: ['json', 'offline', 'fix'] },
+    spec: { booleans: ['json', 'offline', 'fix', 'machines'] },
     load: async () => ({ run: doctorRun }),
   },
 };
