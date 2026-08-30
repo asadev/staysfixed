@@ -26,6 +26,9 @@ export const NAME_RULE_EXPLAINER =
 const MAX_LENGTH = 120;
 
 /** Words that start a test name rather than describe the app. */
+/** Words that begin a note to yourself rather than a promise about the product. */
+const PLACEHOLDERS = new Set(['todo', 'fixme', 'wip', 'xxx', 'tbd', 'temp', 'placeholder', 'hack']);
+
 const TEST_SPEAK = new Set([
   'test',
   'tests',
@@ -100,7 +103,7 @@ const VERBS = new Set([
 ]);
 
 /**
- * @typedef {'empty'|'long'|'path'|'id'|'symbols'|'caps'|'identifier'|'testspeak'|'short'} RefusalKind
+ * @typedef {'empty'|'long'|'path'|'id'|'symbols'|'caps'|'identifier'|'testspeak'|'short'|'placeholder'|'not-a-sentence'|'mostly-numbers'|'ticket'} RefusalKind
  */
 
 /**
@@ -191,6 +194,43 @@ function refuse(name) {
     return {
       kind: 'short',
       why: `That is only ${words.length} word${words.length === 1 ? '' : 's'}. Use at least three, so the name says what should still be true and not just which area it touches.`,
+    };
+  }
+
+  // Three words is a shape, not a sentence. `a b c`, `1 2 3`, `TODO fix later` and
+  // `AC-101 regression check` all cleared every rule above, and each of them is a guard
+  // nobody will understand in six months — which is the entire job of this name.
+  if (PLACEHOLDERS.has(first)) {
+    return {
+      kind: 'placeholder',
+      why: `Starting with "${words[0]}" is a note to yourself, not a promise about the product. Say what should still be true, so the failure reads as that sentence.`,
+    };
+  }
+
+  // A ticket reference is not a behaviour, and this file already says so about "#" and "::".
+  // `AC-101 regression check` cleared every other rule and names nothing a person could act on.
+  const ticket = words.find((w) => /^[A-Za-z]{2,}[-_]\d+$/.test(w));
+  if (ticket) {
+    return {
+      kind: 'ticket',
+      why: `"${ticket}" is a ticket reference, not a behaviour. Put it in "link" and say here what should still be true.`,
+    };
+  }
+
+  const realWords = words.filter((w) => /[A-Za-z]{4,}/.test(w));
+  if (realWords.length < 2) {
+    return {
+      kind: 'not-a-sentence',
+      why: 'That does not read as a sentence about the product — there are almost no words in it. Write what should still be true, in the words you would say out loud, like "the sidebar still collapses".',
+    };
+  }
+
+  const letters = (text.match(/[A-Za-z]/g) ?? []).length;
+  const digits = (text.match(/\d/g) ?? []).length;
+  if (digits > letters) {
+    return {
+      kind: 'mostly-numbers',
+      why: 'That is mostly numbers. A guard name is the sentence somebody reads when it fails, so put the ticket number in "link" and say the behaviour here.',
     };
   }
 

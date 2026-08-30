@@ -1916,6 +1916,18 @@ async function gatherJourneys({ root, config, options }) {
 
   const named =
     options.journeys && !['code', 'config', 'suite'].includes(options.journeys) ? options.journeys : null;
+  // `recorded` is a word this tool knows and `check --help` offers it — it is simply not
+  // wired into a run yet. The MCP surface says exactly that; the command line fell through to
+  // the branch above, treated the word as a FILE PATH, and answered that a file called
+  // "recorded" was missing. The same question has to get the same answer on both.
+  if (options.journeys === 'recorded') {
+    throw new StaysFixedError(
+      'Replaying a recorded session is written and not wired into a run yet, so nothing was checked.',
+      {
+        hint: 'Leave --journeys out to use the steps each adapter reads from your source, pass `suite` to walk your own test suite, or pass the path to a journeys file.',
+      },
+    );
+  }
   if (named) journeys.push(...(await readJourneyFile(path.resolve(root, named))));
 
   // The project's own test suite, when somebody asked for it in those words and never

@@ -293,3 +293,16 @@ Nobody who wired that up has to change anything. Everything version 1's picture
 check did is also still reachable from the command line — `staysfixed check
 --pictures`, `staysfixed approve` — and pictures still require a person to
 approve them there, for the same reason they always did.
+
+---
+
+## You do not have to fill the path in yourself
+
+The blocks above show `/absolute/path/to/your/project` because a page cannot know where you
+are. `staysfixed doctor --json` can: its `wiring.mcp` carries the same block with `cwd`
+already set to this project, ready to paste. Ask for that rather than editing by hand — a
+path filled in wrongly fails silently, which is the worst way for this to go wrong.
+
+```sh
+npx staysfixed doctor --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.stringify(JSON.parse(s).wiring.mcp,null,2)))"
+```

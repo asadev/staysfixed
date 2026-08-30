@@ -1661,7 +1661,14 @@ function problem(message) {
 function text(v) {
   if (typeof v !== 'string') return null;
   const s = v.trim();
-  return s === '' ? null : s;
+  if (s === '') return null;
+  // Capped, because every one of these is a string an AGENT chose and several of them are
+  // echoed straight back in the reply and then written into the store for ever. A megabyte
+  // of summary came back as a megabyte of tool result and stayed there. Nothing legitimate
+  // here is long: a reason, a finding id, a surface name. Cutting says so out loud rather
+  // than quietly keeping the first part.
+  const MOST = 4000;
+  return s.length <= MOST ? s : `${s.slice(0, MOST)} … (cut here: this was ${s.length} characters, and nothing this tool asks for is that long)`;
 }
 
 /**

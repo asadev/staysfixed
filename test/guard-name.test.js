@@ -177,3 +177,30 @@ describe('the explainer', () => {
     assert.ok(!/regex|regexp|assertion|token|camelCase/i.test(NAME_RULE_EXPLAINER), NAME_RULE_EXPLAINER);
   });
 });
+
+describe('three words is a shape, not a sentence', () => {
+  // All four of these cleared every rule the file had, and each is a guard nobody will
+  // understand in six months — which is the entire job of this name. Found 2026-08-30.
+  for (const [name, why] of [
+    ['a b c', 'almost no words in it'],
+    ['1 2 3', 'almost no words in it'],
+    ['TODO fix later', 'a note to yourself'],
+    ['AC-101 regression check', 'a ticket reference'],
+  ]) {
+    test(`"${name}" is refused — ${why}`, () => {
+      assert.equal(checkGuardName(name).ok, false);
+    });
+  }
+
+  // And the ones that say something must still pass, or the rule is just an obstacle.
+  for (const name of [
+    'the sidebar still collapses',
+    'the details button still opens the details page',
+    'the checkout total is never charged twice',
+    'a refund of zero is refused',
+  ]) {
+    test(`"${name}" is still accepted`, () => {
+      assert.equal(checkGuardName(name).ok, true, checkGuardName(name).why);
+    });
+  }
+});
