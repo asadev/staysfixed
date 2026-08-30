@@ -226,6 +226,17 @@ export async function runCheck(project, opts = {}) {
     tool: TOOL,
     platform: platformTag(),
     condemned: condemnedNames,
+    // What `--only` left out. A narrowed run that says "everything that worked still works"
+    // is describing a slice and sounding like the whole: measured 2026-08-30 with five of
+    // six guards filtered away and one of the five failing, and the run still exited 0
+    // saying everything works. A pass has to carry the size of what it looked at.
+    leftOut: terms
+      ? {
+          screens: Math.max(0, allScreens.length - screens.length),
+          guards: Math.max(0, allGuards.length - guards.length),
+          terms,
+        }
+      : undefined,
     // Read here rather than at the very end: what follows is writing files, and
     // where the run spent its time is a fact about the run, not about the report.
     timings: timings.get(),

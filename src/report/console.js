@@ -143,6 +143,18 @@ export function verdictFor(run) {
   const parts = [];
   if (t.guardsFailed === 1) parts.push({ n: 1, text: '1 guard failed — a bug that was already fixed is back.' });
   else if (t.guardsFailed > 1) parts.push({ n: t.guardsFailed, text: `${countText(t.guardsFailed)} guards failed — bugs that were already fixed are back.` });
+  // Said even on a green run, because that is the run it changes the meaning of.
+  const left = /** @type {any} */ (run).leftOut;
+  if (left && (left.screens > 0 || left.guards > 0)) {
+    const bits = [];
+    if (left.screens > 0) bits.push(`${left.screens} ${left.screens === 1 ? 'screen' : 'screens'}`);
+    if (left.guards > 0) bits.push(`${left.guards} ${left.guards === 1 ? 'guard' : 'guards'}`);
+    const how_many = (left.screens ?? 0) + (left.guards ?? 0);
+    parts.push({
+      n: 0,
+      text: `${bits.join(' and ')} ${how_many === 1 ? 'was' : 'were'} left out by --only, so this covers a slice and not the whole.`,
+    });
+  }
   if (t.guardsEmpty === 1) parts.push({ n: 1, text: '1 guard checks nothing, so it is not protecting anything.' });
   else if (t.guardsEmpty > 1) parts.push({ n: t.guardsEmpty, text: `${countText(t.guardsEmpty)} guards check nothing, so they are not protecting anything.` });
   if (t.changed === 1) parts.push({ n: 1, text: '1 thing changed. Look at it before you ship.' });

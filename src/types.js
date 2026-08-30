@@ -328,6 +328,9 @@
  * @property {string} tool
  * @property {string} platform
  * @property {string[]} [condemned]           Names of checks that have flaked past the limit.
+ * @property {{screens: number, guards: number, terms: string[]}} [leftOut]
+ *   What `--only` filtered away. A narrowed run that reads as a full pass is describing a
+ *   slice and sounding like the whole.
  */
 
 /**
