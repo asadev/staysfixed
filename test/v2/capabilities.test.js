@@ -82,6 +82,29 @@ describe('what this machine can check', () => {
     }
   });
 
+  test('the way to put a build on record is shipping, and nothing else is offered as it', async () => {
+    // This used to offer `staysfixed check --paired`, and that command cannot do it: run it
+    // twice on a fresh project and both runs answer "there is no build on record as
+    // working", with the reference id still empty. Only `ship` cuts a reference, on purpose
+    // — an agent that can bless its own work is not a safety net — so anybody following the
+    // old line went round in a circle: run it, be told nothing is recorded, run it again.
+    // Built on a project of its own so the need is certainly there and this cannot quietly
+    // assert nothing.
+    const fresh = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-noref-'));
+    const bare = await capabilities({ cwd: fresh, offline: true });
+    const need = bare.nextSteps.find((s) => /record a reference|on record as working/i.test(String(s.what)));
+    assert.ok(need, 'a project with nothing recorded has to be told so');
+    assert.match(String(need.fix), /staysfixed ship/, 'and told that shipping is what records it');
+    assert.doesNotMatch(
+      String(need.fix),
+      /check\s+--paired/,
+      '`check --paired` does not record a reference, so it must never be offered as the way to get one',
+    );
+    // The more dangerous half. `automatic: true` means "the agent can do this" — and cutting
+    // a reference is the one thing an agent must never do.
+    assert.equal(need.automatic, false, 'no agent may cut a reference, so this can never be offered as automatic');
+  });
+
   test('a surface nothing can unlock is never turned into a next step', () => {
     const dead = new Set(caps.surfaces.filter((s) => s.state === 'not possible here').map((s) => s.id));
     for (const surface of caps.surfaces) {

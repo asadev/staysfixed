@@ -824,7 +824,10 @@ function sortNeeds(readiness, project, machine) {
       what: 'one build on record as working',
       why: 'Until one build has been recorded there is nothing to compare a new one against, and a clean result would mean nothing at all.',
       unlocks: 'every check from then on',
-      fix: 'staysfixed check --paired    (or ship once with `staysfixed ship` at the end of your release)',
+      // `check --paired` was named here first, and it does not do this: run it twice on a
+      // fresh project and both runs answer "there is no build on record as working". Only
+      // shipping cuts a reference, on purpose — no agent may bless its own work.
+      fix: 'staysfixed ship    (only shipping records what "working" means — run it once at the end of your release)',
       who: 'the agent',
     });
   }
@@ -1600,9 +1603,14 @@ function nextCommands(readiness, project) {
   if (reachable.length > 0) {
     next.push({
       command: 'staysfixed check --paired',
+      // It does NOT record what "working" means, and saying so here sent everybody round a
+      // loop: run it, be told there is no build on record, run it again, be told the same
+      // thing. Only `ship` cuts a reference — that is the rule the whole product rests on,
+      // because an agent that can bless its own work is not a safety net. So this says what
+      // the run actually does, and `ship` below says what only it can do.
       what: reachable.some((r) => r.state === 'ready')
-        ? 'The first real run. It records what working looks like, so later runs have something to compare against.'
-        : 'The first real run. Nothing here is fully set up yet, so it records what it can reach and says plainly what it left out — which is more useful than waiting.',
+        ? 'The first real run. It walks everything and shows you what it sees. It cannot record what "working" means — only shipping does that.'
+        : 'The first real run. Nothing here is fully set up yet, so it walks what it can reach and says plainly what it left out — which is more useful than waiting.',
     });
   }
   if (project.tests.files > 0) {

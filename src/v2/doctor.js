@@ -1920,8 +1920,15 @@ function nextSteps(surfaces, reference, repo) {
     steps.push({
       what: 'record a reference',
       why: 'Until one build has been recorded there is nothing to compare a new one against, and a clean result would mean nothing.',
-      fix: 'staysfixed check --paired',
-      automatic: true,
+      // Both halves of this were wrong, and they were wrong in the direction that matters.
+      // `check --paired` cannot record a reference — run it twice on a fresh project and
+      // both runs answer that there is no build on record, with the reference id still
+      // empty — so anybody following this went round in a circle. And `automatic: true` told
+      // the agent this was its to do, when the one rule underneath this whole product is
+      // that only shipping cuts a reference and no agent may bless its own work. Saying an
+      // agent can do the single thing it must never do is worse than saying nothing.
+      fix: 'staysfixed ship    (only shipping records what "working" means — no agent may cut that reference)',
+      automatic: false,
       unlocks: 'Every check after this one has something to compare against, so "nothing changed" starts meaning something.',
     });
   }
