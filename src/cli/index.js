@@ -12,6 +12,7 @@ import { setLogLevel } from '../core/log.js';
 import { V2_COMMANDS } from '../v2/cli.js';
 import { SHIP_COMMANDS } from '../v2/ship.js';
 import { INIT_COMMANDS } from '../v2/init.js';
+export { watchFlags } from './watch-flags.js';
 
 /** @type {{version?: string}} */
 const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -352,45 +353,8 @@ function contextFor(parsed, cwd, configFile) {
  * @property {boolean} [foreground]
  */
 
-/**
- * Read the panel flags. Shared by `check` and `walk` so the two behave the same.
- * @param {CliContext} ctx
- * @returns {WatchFlags}
- */
-export function watchFlags(ctx) {
-  /** @type {WatchFlags} */
-  const flags = { enabled: ctx.bool('watch') };
+// `watchFlags` moved to ./watch-flags.js — see the note there about the import cycle.
 
-  const side = ctx.str('watch-side');
-  if (side !== undefined) {
-    if (side !== 'left' && side !== 'right') {
-      throw new StaysFixedError(`--watch-side has to be left or right, not "${side}".`, {
-        hint: 'Write it as `--watch-side left` or `--watch-side right`.',
-      });
-    }
-    flags.side = side;
-  }
-
-  const width = ctx.str('watch-width');
-  if (width !== undefined) {
-    const n = Number(width);
-    // A panel narrower than this cannot show the before-and-after pictures side
-    // by side, which is the only reason to open it.
-    if (!Number.isFinite(n) || n < 240) {
-      throw new StaysFixedError(`--watch-width has to be a number of pixels, 240 or more — I got "${width}".`, {
-        hint: 'Write it as `--watch-width 520`.',
-      });
-    }
-    flags.width = Math.round(n);
-  }
-
-  // Only mention these when they were actually typed, so --no-keep-open turns the
-  // panel off at the end without a bare --watch turning it on against the settings.
-  if (ctx.flags['keep-open'] !== undefined) flags.keepOpen = ctx.flags['keep-open'] === true;
-  if (ctx.bool('watch-front')) flags.foreground = true;
-
-  return flags;
-}
 
 /**
  * The panel settings a project's settings file carries, if it carries any.

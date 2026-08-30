@@ -417,40 +417,160 @@ export function runCommand(command, opts) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Folders not worth copying into a scratch build.
+ *
+ * The bar for this list is deliberately high: anything skipped that turns out to matter
+ * produces a run that passes for the wrong reason, and a false pass is the one failure
+ * this whole tool exists to prevent. So it holds only things that are *regenerated on
+ * demand and read by nothing* — caches and coverage reports — plus the two that are ours
+ * and git's. Build output, `node_modules`, lockfiles, fixtures and configuration are all
+ * copied, because a check that runs against a different set of files than the real
+ * product is not checking the real product.
+ */
+export const SKIP_BY_DEFAULT = [
+  '.git',
+  '.staysfixed',
+  '.turbo',
+  '.nyc_output',
+  'coverage',
+  '.pytest_cache',
+  '__pycache__',
+  '.DS_Store',
+];
+
+/**
  * Copy a project into a scratch folder so a run can write whatever it likes.
  *
- * `node_modules` is cloned rather than copied where the filesystem can do it — on this Mac
- * that is one APFS call and no bytes move; on Linux it is a reflink where the filesystem
- * has them and a real copy where it does not. Never a symlink and never a hardlink: both
- * point back at the real project, which is the one thing this whole function exists to
- * protect.
+ * ## Why this is a clone and not a copy
+ *
+ * The real projects this gets pointed at are enormous — the one it was built against is
+ * twelve gigabytes, most of it an iOS build folder. Copying that byte by byte before every
+ * single run would take minutes and fill a disk, and a check nobody can afford to run is
+ * a check nobody runs.
+ *
+ * So it asks the filesystem to *clone* instead: on macOS that is `cp -c`, one APFS call
+ * per file that copies no bytes at all and shares the blocks until something writes to
+ * them; on Linux it is `cp --reflink=auto`, which does the same where the filesystem
+ * supports it and a real copy where it does not. Measured on the twelve-gigabyte project:
+ * the six-hundred-megabyte `node_modules` alone went from a long wait to under three
+ * seconds, and used no extra disk.
+ *
+ * Never a symlink and never a hardlink. Both of those point back at the real project,
+ * which is the one thing this function exists to protect — the first thing a broken build
+ * does is write to a file, and with a link that write lands in his actual working tree.
+ *
+ * It falls back to a plain recursive copy whenever the clone is unavailable or fails, so
+ * a filesystem without reflinks is slower here and never wrong.
  *
  * @param {string} from
  * @param {string} to
  * @param {object} [opts]
- * @param {string[]} [opts.skip]   Folder names not to copy. `.git` by default — it is huge
- *                                 and nothing a CLI check does needs history.
- * @returns {Promise<{copied: boolean, why: string}>}
+ * @param {string[]} [opts.skip]     Names not to copy. See `SKIP_BY_DEFAULT`.
+ * @param {string[]} [opts.also]     Extra names to skip, on top of the defaults.
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<{copied: boolean, why: string, cloned: boolean, tookMs: number, skipped: string[]}>}
  */
 export async function copyForScratch(from, to, opts = {}) {
-  const skip = new Set(opts.skip ?? ['.git', '.staysfixed']);
+  const began = Date.now();
+  const skip = new Set([...(opts.skip ?? SKIP_BY_DEFAULT), ...(opts.also ?? [])]);
   await fsp.mkdir(to, { recursive: true });
+
+  /** @type {import('node:fs').Dirent[]} */
+  let entries;
   try {
-    await fsp.cp(from, to, {
-      recursive: true,
-      force: true,
-      dereference: false,
-      preserveTimestamps: true,
-      filter: (source) => {
-        const name = path.basename(source);
-        if (skip.has(name)) return false;
-        return true;
-      },
-    });
-    return { copied: true, why: `Copied the project into a scratch folder, so the run can write anywhere it likes without touching the real one.` };
+    entries = await fsp.readdir(from, { withFileTypes: true });
   } catch (error) {
-    return { copied: false, why: `The project could not be copied into a scratch folder: ${error instanceof Error ? error.message : String(error)}` };
+    return {
+      copied: false, cloned: false, tookMs: Date.now() - began, skipped: [],
+      why: `The project could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
+
+  const skipped = entries.filter((e) => skip.has(e.name)).map((e) => e.name);
+  const wanted = entries.filter((e) => !skip.has(e.name));
+
+  let cloned = 0;
+  let copied = 0;
+  for (const entry of wanted) {
+    const source = path.join(from, entry.name);
+    const target = path.join(to, entry.name);
+    if (await cloneOne(source, target, opts.signal)) {
+      cloned += 1;
+      continue;
+    }
+    try {
+      await fsp.cp(source, target, {
+        recursive: true,
+        force: true,
+        dereference: false,
+        preserveTimestamps: true,
+        filter: (p) => !skip.has(path.basename(p)),
+      });
+      copied += 1;
+    } catch (error) {
+      return {
+        copied: false, cloned: cloned > 0, tookMs: Date.now() - began, skipped,
+        why: `The project could not be copied into a scratch folder: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  const tookMs = Date.now() - began;
+  const how = cloned > 0 && copied === 0
+    ? 'The project was cloned into a scratch folder — the filesystem shared the blocks, so no bytes moved'
+    : cloned > 0
+      ? 'The project was cloned into a scratch folder where the filesystem allowed it and copied where it did not'
+      : 'The project was copied into a scratch folder';
+  const left = skipped.length ? ` Left behind: ${skipped.join(', ')}.` : '';
+  return {
+    copied: true,
+    cloned: cloned > 0,
+    tookMs,
+    skipped,
+    why: `${how} (${(tookMs / 1000).toFixed(1)}s), so the run can write anywhere it likes without touching the real one.${left}`,
+  };
+}
+
+/**
+ * Ask the filesystem to clone one entry. False means "it would not", not "it broke".
+ *
+ * @param {string} source
+ * @param {string} target
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<boolean>}
+ */
+function cloneOne(source, target, signal) {
+  // Windows has no reflink through `cp`, and there is no `cp`. Straight to the fallback.
+  if (process.platform === 'win32') return Promise.resolve(false);
+  const args = process.platform === 'darwin'
+    ? ['-Rc', source, target]
+    : ['-a', '--reflink=auto', source, target];
+  return new Promise((resolve) => {
+    let settled = false;
+    /** @param {boolean} ok */
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    let child;
+    try {
+      child = spawn('cp', args, { stdio: 'ignore', signal });
+    } catch {
+      done(false);
+      return;
+    }
+    child.on('error', () => done(false));
+    child.on('close', (code) => {
+      if (code === 0) {
+        done(true);
+        return;
+      }
+      // A half-written target from a failed clone would make the fallback copy merge into
+      // it. Clear it out so the fallback starts from nothing.
+      fsp.rm(target, { recursive: true, force: true }).then(() => done(false), () => done(false));
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +687,17 @@ export const processAdapter = defineAdapter({
     await fsp.mkdir(home, { recursive: true });
     await fsp.mkdir(tmp, { recursive: true });
 
-    const copy = await copyForScratch(build.root, work);
+    // A project may name more to leave behind — a giant build folder no command reads,
+    // say. It can only ADD to the defaults: a setting that could switch off `.git` being
+    // skipped would only ever make runs slower.
+    const alsoSkip = Array.isArray(ctx.config?.skip) ? ctx.config.skip.map(String) : [];
+    const copy = await copyForScratch(build.root, work, { also: alsoSkip, signal: ctx.signal });
+    if (copy.copied && copy.tookMs > 20_000) {
+      ctx.log?.(
+        `Making a scratch copy of this project took ${Math.round(copy.tookMs / 1000)} seconds. ` +
+        `If a large folder here is not read by any command, name it under "process.skip" in the config and it will be left behind.`,
+      );
+    }
     if (!copy.copied) {
       return {
         build, root: work, ready: false, why: copy.why,

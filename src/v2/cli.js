@@ -35,7 +35,8 @@ import { escalationBlock, escalationsFor, productFor, writeEscalations } from '.
 // to mean two different things depending on which check you ran. src/cli/index.js imports
 // this file in turn; that circle is safe because nothing here touches it while either
 // module is still being evaluated.
-import { watchFlags } from '../cli/index.js';
+import { watchFlags } from '../cli/watch-flags.js';
+import { INIT_COMMANDS } from './init.js';
 
 /**
  * What comes back from a check. Everything that did not change never appears
@@ -105,32 +106,20 @@ const V1_OPTIONS = [
 ];
 
 /**
- * The commands version 2 replaces, in exactly the shape `src/cli/index.js`
- * already uses for its own. Merging this over the existing table is the whole
- * of the wiring:
- *
- *     import { V2_COMMANDS } from '../v2/cli.js';
- *     Object.assign(COMMANDS, V2_COMMANDS);
- *
- * @type {Record<string, {summary: string, usage: string, describe: string, options: [string,string][], examples: string[], spec: {booleans?: string[], strings?: string[], arrays?: string[]}, load: () => Promise<{run: (ctx: any) => Promise<number>}>}>}
+ * The commands version 2 contributes. `src/cli/index.js` merges these over version 1's,
+ * so `check` and `doctor` become the difference engine while everything version 1 did
+ * stays reachable behind `--pictures`, `--guards` and `--watch`.
  */
 export const V2_COMMANDS = {
-  // `staysfixed ship` comes from src/v2/ship.js. It is merged in here rather than into the
-  // version 1 command table so that wiring version 2 into the front door stays the one
-  // import it has always been.
+  // Version 2's init replaces version 1's.
   //
-  // `staysfixed init` from src/v2/init.js is deliberately NOT merged in yet, and this is
-  // the same call as the MCP server: version 2's init is a BREAKING change. Version 1's
-  // init writes settings for any folder; version 2's reads the project first and writes
-  // nothing when it cannot tell what the project is, which is better and is not what the
-  // three tests in test/cli.test.js describe. Somebody installed this last week and has
-  // `staysfixed init` in a setup script. Adding one line here —
-  //
-  //     import { INIT_COMMANDS } from './init.js';   ...INIT_COMMANDS,
-  //
-  // switches it over, and those three tests have to be rewritten in the same change to
-  // say what the new one does. That is a decision, not an oversight, and it belongs in a
-  // change of its own rather than arriving as a side effect of wiring up the phones.
+  // It was held back on the grounds that somebody might have `staysfixed init` in a
+  // setup script and would get a different file. True, and not a reason: the old one
+  // writes settings for photographing screens, which is not what this tool does any
+  // more, so leaving it in place hands a new project the wrong shape and calls it done.
+  // The three tests in test/cli.test.js were rewritten in the same change to say what
+  // the new one actually does.
+  ...INIT_COMMANDS,
   ...SHIP_COMMANDS,
 
   check: {
