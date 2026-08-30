@@ -36,13 +36,13 @@ import { warn, detail } from '../core/log.js';
 import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { sha256 } from '../core/hash.js';
 
-import { openStore, ensureStore, saveBuild, newCaptureId, storeExists } from './store.js';
+import { openStore, ensureStore, saveBuild, newCaptureId, storeExists, referenceFor, listBuilds, pruneBuild, removeBuild, sweepIncomplete } from './store.js';
 import { decide, noDecisions, readDecisions, rememberCheck, readCheckRecord } from './escalate.js';
 import { sortObservations } from './observation.js';
 import { DEFAULT_RULES, machineRules, mergeRules, normaliseCapture, loadRules } from './normalise.js';
 import { runCheck, makeCheckEvents } from './run.js';
 import { proveCause } from './cause.js';
-import { whatChanged } from './rank.js';
+import { whatChanged, NOT_THE_TOOLS_OWN_FOLDER } from './rank.js';
 
 import { attachWatcher, watchOptionsFrom } from './watch/index.js';
 import { guardTheScreen, describeGuard } from './watch/focus.js';
@@ -109,7 +109,8 @@ const exec = promisify(execFile);
  * @property {string} [against]     A commit, tag or stored build to compare against.
  * @property {boolean} [paired]     Boot the old build live from the start.
  * @property {boolean} [storedOnly] Never boot the old build, not even to prove a suspicion.
- * @property {string} [journeys]    A path to a journeys file, or 'code' / 'config'.
+ * @property {string} [journeys]    A path to a journeys file, or 'code' / 'config' / 'suite'.
+ *                                  'suite' RUNS the project's own tests — see gatherJourneys.
  * @property {Surface|'auto'} [surface]  Aim the whole run at one kind of product.
  * @property {string} [at]          Where that product is: a URL for the web, the built app
  *                                  for a desktop, an APK or an .app bundle for a phone.
@@ -326,6 +327,12 @@ export async function check(options = {}) {
     // the coverage sentence went on the end. Left there, a window would show a greener,
     // shorter answer than the terminal beside it, and the two would disagree about the same
     // run. So it is told again, with the settled one, and only then put away.
+    // Housekeeping, after the answer is settled and never before it. It can only ever remove
+    // recordings of builds nothing is comparing against, and if it says anything at all it
+    // says it on the same summary as everything else.
+    const tidied = await tidyTheStore(project, outcome);
+    if (tidied) outcome.summary = `${outcome.summary} ${tidied}`;
+
     events.emit({ type: 'check:done', at: events.elapsed(), message: outcome.summary, verdict: outcome });
     if (screen) {
       await screen.finish();
@@ -333,7 +340,11 @@ export async function check(options = {}) {
     }
     return outcome;
   } catch (e) {
-    const outcome = blocked(options, e);
+    // A store that would not take this run's records is very often the whole reason the
+    // run then failed — a reference named by a commit cannot be resolved if nothing could
+    // register it — and without this the person is handed a bare permission error from a
+    // folder they have never heard of, with nothing joining the two facts up.
+    const outcome = blocked(options, e, project?.storeTrouble);
     // A run that never happened still has to reach a person, because "no answer" looks
     // exactly like "nothing changed" from the outside. It is only written down where a
     // store already exists: a check aimed at a folder that was never set up must not leave
@@ -391,12 +402,18 @@ export async function check(options = {}) {
 async function settle(verdict, store, product, guards) {
   /** @type {import('./escalate.js').Decisions} */
   let decisions;
+  /** @type {string} */
+  let bookkeepingTrouble = '';
   try {
     decisions = await readDecisions(store, product);
-  } catch {
+  } catch (e) {
     // Unreadable bookkeeping means nothing is accounted for, which reports MORE than it
-    // should rather than less. That is the only safe direction for this to fail in.
+    // should rather than less. That is the only safe direction for this to fail in — and it
+    // is still a fact the reader needs. Without it the accounting says nothing was waived,
+    // which reads as "there were no waivers" rather than "nobody could read them", and an
+    // agent looking at a wall of findings it waived last week has no idea why they are back.
     decisions = noDecisions(product);
+    bookkeepingTrouble = `The record of what was already accounted for could not be read (${messageOf(e)}), so nothing was treated as accounted for. Anything you waived before is in this list again.`;
   }
 
   const decided = decide(verdict.findings ?? [], decisions, { guards: guards ?? [] });
@@ -414,9 +431,13 @@ async function settle(verdict, store, product, guards) {
     // that worked has changed". It is arithmetically true — nothing was compared, so
     // nothing came back different — and it is the exact sentence that would let a real
     // regression through. It is not a pass. It is no answer at all.
-    if (comparedNothing(verdict.coverage)) {
+    const nothing = comparedNothing(verdict);
+    if (nothing) {
       verdict.ok = false;
-      verdict.summary = `NOTHING WAS ACTUALLY COMPARED. Every journey was walked on the build you have, and not one of them had anything on record from the build you were happy with, so there was nothing to hold them against. This is not a pass and not a failure — it is no answer. ${verdict.summary}`;
+      verdict.summary =
+        nothing === 'no reference'
+          ? `NOTHING WAS ACTUALLY COMPARED. There is no build of this product on record as working, so this run had nothing whatever to hold today's behaviour against. This is not a pass and not a failure — it is no answer. ${verdict.summary}`
+          : `NOTHING WAS ACTUALLY COMPARED. Every journey was walked on the build you have, and not one of them had anything on record from the build you were happy with, so there was nothing to hold them against. This is not a pass and not a failure — it is no answer. ${verdict.summary}`;
     }
 
     // And what was NOT looked at, in the same breath as the good news, on every run
@@ -426,11 +447,18 @@ async function settle(verdict, store, product, guards) {
     // already reads. It goes last so it is the thing left in the reader's head.
     verdict.summary = `${verdict.summary} ${whatWasNotChecked(verdict.coverage)}`;
   }
+  if (bookkeepingTrouble) verdict.summary = `${verdict.summary} ${bookkeepingTrouble}`;
 
   try {
     await rememberCheck(store, { product, verdict, decided });
-  } catch {
-    // Nothing here is worth failing a finished check over.
+  } catch (e) {
+    // Nothing here is worth failing a finished check over — but it is worth a sentence.
+    // This record is the only thing that knows what the finding ids in this reply mean, so
+    // when it is not written the agent's very next move, `staysfixed_explain <id>` or
+    // `staysfixed_prove <id>`, answers "the last check has no finding called that". Which
+    // is a flat denial of something it was handed thirty seconds earlier, and it used to
+    // arrive with nothing anywhere explaining why.
+    verdict.summary = `${verdict.summary} This run could not be written down (${messageOf(e)}), so asking to explain or to prove one of the ids above will say it has never heard of it.`;
   }
   return verdict;
 }
@@ -567,25 +595,37 @@ export function whatWasNotChecked(coverage) {
 /**
  * Was there anything on the other side to compare against at all?
  *
- * The engine records one gap per journey it had no stored record for. When that count
- * reaches every journey that was walked, the run compared nothing whatever — and a run
- * that compared nothing produces zero differences, which is indistinguishable from a
- * product that did not change.
+ * TWO WAYS TO COMPARE NOTHING, and only one of them was caught here.
  *
- * The gaps are recognised by the words the engine writes into them. A test walks a real
- * project into exactly this state and requires the verdict not to read as a pass, so if
- * those words are ever reworded the guard fails loudly instead of quietly switching off.
+ * The first is per journey: the engine records one gap for each journey it had no stored
+ * record for, and when that count reaches every journey walked, the run held nothing against
+ * anything. The gaps are recognised by the words the engine writes into them, and a test
+ * walks a real project into exactly this state, so a rewording fails loudly rather than
+ * quietly switching the guard off.
  *
- * @param {Coverage|undefined} coverage
- * @returns {boolean}
+ * The second is the COLD START, and it never records a per-journey gap at all, so this used
+ * to miss it completely. A product nobody has ever shipped with the hook in place has no
+ * reference: there is no old build, so there is no journey to be missing a record FOR. The
+ * run walked everything, compared none of it, found no differences, and set `ok: true`.
+ *
+ * The command line has always caught that one on its own and exits 2. `--json` and the MCP
+ * surface do not read the command line's arithmetic — they read this verdict — so the two
+ * interfaces an agent actually uses answered `ok: true` to "did I break anything" on a
+ * project where nothing had been compared. That is the exact failure this whole tool exists
+ * to prevent, produced by the tool, to a reader with no way of noticing.
+ *
+ * @param {CheckOutcome} verdict
+ * @returns {'no reference'|'no stored record'|null}
  */
-function comparedNothing(coverage) {
+function comparedNothing(verdict) {
+  if (!verdict.reference || verdict.reference.id === '') return 'no reference';
+  const coverage = verdict.coverage;
   const walked = coverage?.journeys ?? 0;
-  if (walked === 0) return false;
+  if (walked === 0) return null;
   const nothingToCompare = (coverage?.gaps ?? []).filter((gap) =>
     /never been walked against|no stored record of the old build/i.test(`${gap.what} ${gap.why}`),
   ).length;
-  return nothingToCompare >= walked;
+  return nothingToCompare >= walked ? 'no stored record' : null;
 }
 
 /**
@@ -603,9 +643,12 @@ function plainly(what) {
  *
  * @param {CheckOptions} options
  * @param {unknown} e
+ * @param {string} [storeTrouble]  What the store would not do earlier in this same run,
+ *   when there was any. It goes in front of the error, because it usually IS the error's
+ *   cause and the error on its own reads as something else entirely.
  * @returns {CheckOutcome}
  */
-function blocked(options, e) {
+function blocked(options, e, storeTrouble) {
   const product = options.product ?? path.basename(path.resolve(options.cwd ?? options.root ?? process.cwd()));
   const empty = { id: '', product };
   return {
@@ -621,11 +664,16 @@ function blocked(options, e) {
     differencesReal: 0,
     differencesNoise: 0,
     newlyUnstable: [],
-    coverage: { paths: 0, journeys: 0, byChannel: {}, gaps: [{ what: 'Everything.', why: messageOf(e) }] },
+    coverage: {
+      paths: 0,
+      journeys: 0,
+      byChannel: {},
+      gaps: [{ what: 'Everything.', why: storeTrouble ? `${storeTrouble} ${messageOf(e)}` : messageOf(e) }],
+    },
     // The hint is the half that tells a person what to DO about it, and dropping it
     // turns a helpful error into a dead end. Anything that blocks a run has to carry
     // both halves all the way out to whoever reads the summary.
-    summary: `The check could not be run, so this is not a pass and not a failure. ${messageOf(e)}${
+    summary: `The check could not be run, so this is not a pass and not a failure. ${storeTrouble ? `${storeTrouble} ` : ''}${messageOf(e)}${
       e instanceof Error && /** @type {any} */ (e).hint ? ` ${/** @type {any} */ (e).hint}` : ''
     }`,
     durationMs: 0,
@@ -662,7 +710,10 @@ export async function prove(options = {}) {
 
   const project = await openProject(options);
   try {
-    const changed = await whatChanged(project.root);
+    // From the commit the old build is at, not from the working tree. Without this, an agent
+    // that committed its work before asking to prove a cause was told there was no change to
+    // undo — about a change sitting one commit back, which git can hand over exactly.
+    const changed = await whatChanged(project.root, { since: project.referenceSha });
     const wanted = (options.revert ?? []).map((f) => f.replace(/^\.\//, ''));
     const narrowed = wanted.length
       ? { ...changed, hunks: changed.hunks.filter((h) => wanted.some((w) => h.file === w || h.file.startsWith(`${w}/`))) }
@@ -720,7 +771,14 @@ export async function explain(options = {}) {
     else out.push(`  ${d.path} — was ${short(d.reference)}, now ${short(d.candidate)}`);
   }
   if (differences.length > 40) out.push(`  and ${differences.length - 40} more.`);
-  if (f.nearFiles?.length) out.push('', `Nearest code: ${f.nearFiles.slice(0, 6).join(', ')}.`);
+  // The count goes on the end when the list was cut. Six file names with nothing after them
+  // read as the whole list, so an agent that opened all six believed it had seen everywhere
+  // this finding lives — and the file it needed was the seventh.
+  if (f.nearFiles?.length) {
+    const shown = f.nearFiles.slice(0, 6);
+    const more = f.nearFiles.length - shown.length;
+    out.push('', `Nearest code: ${shown.join(', ')}${more > 0 ? `, and ${more} more ${more === 1 ? 'file' : 'files'} this finding also comes from` : ''}.`);
+  }
   // No full stop of our own: the reason is already a whole sentence and adding one gave the
   // agent "...costs a real person real money.." on the reply it reads when it is trying to
   // understand something it is not allowed to waive.
@@ -1009,11 +1067,20 @@ async function waitForItsWindow(pid, stopped) {
  * @property {import('./types.js').Store} store
  * @property {BuildFingerprint} candidate
  * @property {string} [against]   The reference build's own id, once a name has been resolved.
+ * @property {number} keepBuilds  How many builds of this product other than the reference keep
+ *   their full record. Everything older is thinned out at the end of a run.
+ * @property {string} [referenceSha]  The commit the build you were happy with is at. It is
+ *   what makes a COMMITTED change measurable: the change from that commit to the working
+ *   tree is the change, and reading the working tree alone goes blind the moment an agent
+ *   commits its work — which is what an agent does at the end of a task.
  * @property {Journey[]} journeys
  * @property {CoverageGap[]} gaps   Holes found while working out WHAT to walk, before a
  *   single journey ran. An adapter that fell over listing its journeys belongs here, and it
  *   has to reach the verdict: a channel that silently dropped out is the worst thing this
  *   tool can do.
+ * @property {string} storeTrouble  Empty on a normal run. A plain sentence when the store
+ *   would not take this run's records — the run went ahead anyway, and every answer it
+ *   produces has to carry the admission that nothing about it was kept.
  * @property {import('./run.js').Walker} walk
  * @property {(reference: BuildFingerprint, ctx: {events?: CheckEvents, signal?: AbortSignal}) => Promise<LiveBuild|null>} bootReference
  * @property {(capture: Capture) => Capture} normalise
@@ -1036,6 +1103,254 @@ function projectRootFor(options) {
 }
 
 /**
+ * How many builds keep their whole record before the old ones are thinned out.
+ *
+ * A setting rather than a constant, because a project running fifty checks a day and one
+ * running three a week want different answers and neither of them is wrong. Five is the
+ * default: enough that `--against` and `staysfixed_prove` can still reach back over a few
+ * commits, small enough that a record committed into somebody's repository stops growing.
+ */
+const KEEP_BUILDS = 5;
+
+/**
+ * The fewest captures any build keeps. One is still a stored record a later check can be
+ * compared against; nought would delete the evidence that the build ever ran.
+ */
+const KEEP_CAPTURES_PER_JOURNEY = 1;
+
+/**
+ * THE RETENTION POLICY, and why it is a count rather than an age.
+ *
+ * Thinning was never enough on its own. `pruneBuild` throws away captures INSIDE a build and
+ * can never remove the folder, so the thing that actually grows — one build folder per check,
+ * in a directory this tool asks people to commit — grew anyway. Nine folders in one afternoon
+ * on a throwaway project, and nothing in the tool could ever have removed one.
+ *
+ * So there are three tiers, and this is the third:
+ *
+ *   1. The newest `keepBuilds` keep every recording they took. This is the working set —
+ *      `--against` and `staysfixed_prove` reach back over these.
+ *   2. Everything behind them is thinned to one recording per journey. The build is still
+ *      there and can still be compared against; it just stops holding every take.
+ *   3. Past `keepBuilds` times this number, the folder goes altogether — oldest first.
+ *
+ * WHY NOT AN AGE. An age bounds nothing. A project checked on every commit writes fifty
+ * folders a day, so thirty days of them is fifteen hundred folders in somebody's git history
+ * — and the same rule on a project checked twice a week deletes a two-month-old build that is
+ * the only other thing in the store. The count is what grows, so the count is what is capped.
+ *
+ * WHY A SECOND TIER AT ALL, rather than removing everything past `keepBuilds`. The thinned
+ * tier IS the grace period, and it is a cheap one: a thinned build holds one recording per
+ * journey, so fifteen of them cost about what one untouched build costs. It buys back the
+ * case this policy would otherwise get wrong — somebody who ran thirty checks in an afternoon
+ * and then wants `--against` on the build from before lunch.
+ *
+ * Four, so a `keepBuilds` of five means at most twenty folders of this product, and the
+ * sentence a person reads has one number in it rather than two.
+ */
+const KEEP_THINNED_MULTIPLE = 4;
+
+/**
+ * @param {Record<string, any>} config
+ * @returns {number}
+ */
+function keepBuildsFrom(config) {
+  const asked = Number(config?.keepBuilds);
+  return Number.isFinite(asked) && asked >= 1 ? Math.floor(asked) : KEEP_BUILDS;
+}
+
+/**
+ * How long the test-suite harvest gets, out of the settings file: `suite: {budgetMs}`.
+ *
+ * Ninety seconds is the right DEFAULT — it is a statement about how long anybody waits inside
+ * an edit-and-check loop before switching the tool off — but it was also the only answer
+ * available. A project whose suite takes four minutes got ninety seconds and the rest of its
+ * files named as gaps, with no way anywhere in the tool to say "I am willing to wait". A
+ * limit that decides something has to be visible and, where it safely can be, adjustable.
+ *
+ * Zero means no budget: harvest every file however long it takes. That is a thing to ask for
+ * on purpose and it is never a default.
+ *
+ * Nothing said comes back as null rather than as the default, so the number lives in one
+ * place — `DEFAULT_HARVEST_BUDGET_MS`, in the file that applies it — instead of being copied
+ * here where the two could drift.
+ *
+ * Exported so the reading of the setting can be tested on its own. Everything downstream of
+ * it costs a real test suite being run twice, and a setting nobody can check the reading of
+ * is a setting that will one day quietly stop being read.
+ *
+ * @param {Record<string, any>} config
+ * @returns {number|null}  Null when the settings say nothing, or say something that is not a
+ *   number of milliseconds.
+ */
+export function suiteBudgetFrom(config) {
+  const asked = Number(config?.suite?.budgetMs);
+  return Number.isFinite(asked) && asked >= 0 ? Math.floor(asked) : null;
+}
+
+/**
+ * Thin out the record of builds nobody is going to ask about again.
+ *
+ * WHY THIS EXISTS AT ALL. `.staysfixed/` is deliberately kept in git — the record of what
+ * working means is the promise, and a fresh checkout with no record has nothing to compare
+ * against. That decision is right and it has a bill attached: one build folder per check,
+ * for ever, inside somebody's repository history. Measured on a throwaway Express project
+ * after about ten checks: 492KB across 118 files and nine build folders in one afternoon.
+ *
+ * WHAT IS NEVER TOUCHED. The build this product calls working — `pruneBuild` and `removeBuild`
+ * both refuse it outright and this refuses it again before asking. The build just walked. The
+ * build named by `--against`, because somebody is plainly still using it. And the newest few
+ * after that. See `KEEP_THINNED_MULTIPLE` for what happens to everything else, and why.
+ *
+ * WHEN IT DOES NOT RUN. On a blocked run there is no answer to trust and nothing is touched.
+ * And, most importantly, when the list of builds came back with anything missing from it: a
+ * damaged record is now reported rather than silently omitted, and deciding what is old on a
+ * list that is short is how the evidence for "this used to work" gets deleted. That holds for
+ * the removal tier above all — a folder that is thinned can be walked again, a folder that is
+ * gone cannot. It is said out loud rather than skipped quietly, because a housekeeping step
+ * that stops running is exactly the sort of thing nobody notices for a year.
+ *
+ * @param {Project} project
+ * @param {CheckOutcome} outcome
+ * @returns {Promise<string>}  One plain sentence when something was removed or when it was
+ *   deliberately not attempted. Empty when there was simply nothing to do.
+ */
+async function tidyTheStore(project, outcome) {
+  /** @type {string[]} */
+  const said = [];
+
+  // A run clears up after itself first, and before the `blocked` gate, because a run that was
+  // blocked is exactly the kind that died holding a half-written file. Scoped to the build
+  // this run just wrote: clearing up after itself must never reach into another product's
+  // folder in the same store. They are invisible — nothing reads a `.part` file — and an
+  // invisible pile of half-written megabytes is how a tool gets blamed for a full disk.
+  try {
+    const swept = await sweepIncomplete(project.store, { buildId: project.candidate.id, olderThanMs: 0 });
+    if (swept.removed > 0) {
+      said.push(`${swept.removed} half-written ${swept.removed === 1 ? 'file' : 'files'} left behind by an earlier run that died were cleared away.`);
+    }
+  } catch (e) {
+    // Never fatal. A folder that will not be swept costs disk; losing the verdict over it
+    // would cost the whole run.
+    said.push(`Half-written files from earlier runs could not be cleared away: ${messageOf(e)}`);
+  }
+
+  if (outcome.blocked === true) return said.join(' ');
+
+  /** @type {string[]} */
+  const problems = [];
+  /** @type {import('./types.js').BuildRecord[]} */
+  let builds;
+  try {
+    builds = await listBuilds(project.store, { product: project.product, onProblem: (m) => problems.push(m) });
+  } catch (e) {
+    said.push(`The stored record could not be listed, so nothing old was cleared out of it: ${messageOf(e)}`);
+    return said.join(' ');
+  }
+  if (problems.length > 0) {
+    said.push(`Nothing old was cleared out of the stored record this time. ${problems.join(' ')} Deciding what is old from a list that is missing something is how the evidence for "this used to work" gets deleted, so it was not attempted.`);
+    return said.join(' ');
+  }
+
+  const spared = new Set([project.candidate.id]);
+  if (project.against) spared.add(project.against);
+  for (const record of builds) if (record.isReference) spared.add(record.fingerprint.id);
+
+  // `listBuilds` hands them back newest first, so the newest few survive the slice.
+  const unspared = builds.filter((b) => !spared.has(b.fingerprint.id));
+  const cap = project.keepBuilds * KEEP_THINNED_MULTIPLE;
+  const thinning = unspared.slice(project.keepBuilds, cap);
+  const doomed = unspared.slice(cap);
+  if (thinning.length === 0 && doomed.length === 0) return said.join(' ');
+
+  let removed = 0;
+  let thinned = 0;
+  let folders = 0;
+  let evidence = 0;
+  /** @type {string[]} */
+  const refused = [];
+  for (const record of thinning) {
+    try {
+      const done = await pruneBuild(project.store, record.fingerprint.id, { keepPerJourney: KEEP_CAPTURES_PER_JOURNEY });
+      if (done.removed > 0) {
+        removed += done.removed;
+        thinned += 1;
+      }
+    } catch (e) {
+      // A build that will not be pruned is kept, which is the safe direction — and it is
+      // still worth naming, because a store that quietly stops being tidied grows for ever.
+      refused.push(`${record.fingerprint.id} (${messageOf(e)})`);
+    }
+  }
+  // Oldest first, which is what `unspared` already is once the newest have been sliced off
+  // the front. A removal that stops half way therefore leaves the NEWER of the old builds
+  // standing, which is the direction anybody would choose if asked.
+  for (const record of doomed.slice().reverse()) {
+    try {
+      const done = await removeBuild(project.store, record.fingerprint.id);
+      folders += 1;
+      evidence += done.captures;
+    } catch (e) {
+      refused.push(`${record.fingerprint.id} (${messageOf(e)})`);
+    }
+  }
+
+  if (removed > 0) {
+    said.push(
+      `${removed} old ${removed === 1 ? 'recording was' : 'recordings were'} cleared out of ${thinned} ${thinned === 1 ? 'build' : 'builds'} nobody is comparing against any more.`,
+    );
+  }
+  if (folders > 0) {
+    said.push(
+      // "at most `cap`" counts only the ones this is allowed to touch. The build you called
+      // working, the one just walked and anything named by --against are outside the count
+      // entirely, so the sentence says so rather than quoting a number that is not the number
+      // of folders on the disk.
+      `${folders} ${folders === 1 ? 'build older than that was' : 'builds older than that were'} removed from the stored record altogether, taking ${evidence} ${evidence === 1 ? 'recording' : 'recordings'} with ${evidence === 1 ? 'it' : 'them'}: besides the ones never touched, this product keeps at most ${cap} builds, and ${folders === 1 ? 'that one had' : 'those had'} fallen off the end.`,
+    );
+  }
+  if (removed > 0 || folders > 0) {
+    said.push(`The build you were happy with, the one just walked and the newest ${project.keepBuilds} were left alone.`);
+  }
+  if (refused.length > 0) {
+    said.push(`${refused.length} older ${refused.length === 1 ? 'build was' : 'builds were'} left as ${refused.length === 1 ? 'it is' : 'they are'} because ${refused.length === 1 ? 'it' : 'they'} could not be tidied: ${refused.join('; ')}`);
+  }
+  return said.join(' ');
+}
+
+/**
+ * The rules that rewrite the two folders this run happens to be using.
+ *
+ * TWO ROOTS, TWO IDS, and that is the whole of this function. `mergeRules` keys by rule id
+ * and the later one wins, so calling `machineRules` twice for two different folders handed
+ * the same id — `path.project-root` — to both, and the second one, the scratch copy, deleted
+ * the first. The rule that was supposed to rewrite somebody's real checkout to `<project>`
+ * was therefore not in the rule set on any run this tool has ever done, and an absolute path
+ * under their actual project was compared literally.
+ *
+ * Both are wanted. A product's output carries paths under the real checkout AND under the
+ * throwaway copy it is walked in, and neither of those is a fact about the product.
+ *
+ * Exported so the collision can be tested for directly. It came back the moment two folders
+ * were normalised in one run, and it will come back again the moment there are three.
+ *
+ * @param {{root: string, scratch: string}} where
+ * @returns {NormaliseRule[]}
+ */
+export function pathRules(where) {
+  return [
+    ...machineRules({ root: where.root, home: os.homedir(), tmp: os.tmpdir() }),
+    ...machineRules({ root: where.scratch }).map((rule) => ({
+      ...rule,
+      id: 'path.scratch-copy',
+      what: 'The throwaway folder this run copied the build into to walk it.',
+      why: 'It is a fresh temporary folder every run, so any path under it differs between two runs of the same build.',
+      wouldHide: 'Nothing about the product. It only ever replaces a prefix this tool chose a moment ago.',
+    })),
+  ];
+}
+
+/**
  * @param {CheckOptions} options
  * @returns {Promise<Project>}
  */
@@ -1045,10 +1360,27 @@ async function openProject(options) {
   const configFile = options.configFile ?? findConfigFile(root) ?? null;
   const aim = aimOf(options);
   const config = aimAt(await readConfig(configFile), aim);
-  const product = options.product ?? String(config.product ?? (await packageName(root)) ?? path.basename(root));
+  const fromPackage = await packageName(root);
+  const product = options.product ?? String(config.product ?? fromPackage.name ?? path.basename(root));
 
   const store = openStore({ root });
-  await ensureStore(store);
+  /** Everything about the store that would not work, in the words the reader gets. */
+  /** @type {string[]} */
+  const storeTrouble = [];
+  // A damaged package.json only matters when it was going to be what named this product —
+  // and then it matters a great deal, because the name is the key everything is stored
+  // under. Said out loud rather than fixed silently: guessing the old name would be worse.
+  // It is NOT store trouble: the run is written down perfectly well, just under a name
+  // nothing else in this project's history uses.
+  const namingTrouble =
+    fromPackage.damaged !== '' && options.product === undefined && config.product === undefined
+      ? fromPackage.damaged
+      : '';
+  try {
+    await ensureStore(store);
+  } catch (e) {
+    storeTrouble.push(`The folder Stays Fixed keeps its records in could not be made: ${messageOf(e)}`);
+  }
 
   const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-check-'));
   const evidenceDir = path.join(scratch, 'evidence');
@@ -1079,18 +1411,76 @@ async function openProject(options) {
   }
 
   const candidate = await fingerprintWorkingTree(root, product);
-  await saveBuild(store, candidate);
+  // BOOKKEEPING MAY NOT COST THE ANSWER. Until 2026-08-30 these two writes were unguarded,
+  // so a store that would not take them — a full disk, a permission taken away, a read-only
+  // checkout — stopped the check dead before it had walked a single thing. What that threw
+  // away is much larger than what it protected: the run could have opened the product,
+  // walked it twice, compared it against the old build and handed back a real answer, and
+  // all that was really lost was the note saying it had happened.
+  //
+  // So a failure here is remembered and said out loud, and the run carries on. Where the
+  // record turns out to have been load-bearing after all — a reference named by a commit
+  // that nothing can now register — the run still ends blocked, but it ends blocked SAYING
+  // the store is the reason, instead of handing somebody a bare permission error from a
+  // folder they have never heard of.
+  try {
+    await saveBuild(store, candidate);
+  } catch (e) {
+    storeTrouble.push(`The record of the build you have could not be written: ${messageOf(e)}`);
+  }
 
   // A name like "HEAD", "v0.13.0" or a branch is what a person types; the store only knows
   // builds. Turning the name into a commit here, and putting that commit in the store, is
   // what lets a check be aimed at any point in history without every commit having been
   // walked before. Without it "HEAD" matches nothing and the check reports itself blocked.
   const reference = options.against ? await fingerprintCommit(root, product, options.against) : null;
-  if (reference) await saveBuild(store, reference);
+  if (reference) {
+    try {
+      await saveBuild(store, reference);
+    } catch (e) {
+      storeTrouble.push(`The record of ${nameOfReference(reference, options.against)} could not be written, so a check aimed at it by name may find nothing on record to match: ${messageOf(e)}`);
+    }
+  }
+
+  // Which commit the build you were happy with is at. With `--against` it is the commit that
+  // was just named; without it, it is whatever the store's own reference pointer holds, which
+  // is the usual case because a reference is cut by a person shipping. Either way it is the
+  // thing that makes a committed change measurable, and nothing here had ever asked for it.
+  /** @type {string|undefined} */
+  let referenceSha = reference?.gitSha ?? undefined;
+  if (!referenceSha) {
+    try {
+      const record = await referenceFor(store, product);
+      referenceSha = record?.fingerprint?.gitSha ?? undefined;
+    } catch (e) {
+      // A damaged reference pointer is loud elsewhere. Here it costs the ordering, not the run.
+      storeTrouble.push(`Which build counts as working could not be read, so a change you have already committed cannot be measured: ${messageOf(e)}`);
+    }
+  }
+
+  // It goes in the coverage list because that is the one list every reader already meets —
+  // the command line prints it, the build server's table prints it, and the closing sentence
+  // counts it. A fact that only exists on a field somebody has to know to look for is a fact
+  // most readers never meet.
+  /** @type {CoverageGap[]} */
+  const gaps = [...gathered.gaps];
+  if (namingTrouble !== '') {
+    gaps.push({
+      what: `This run was recorded against a product called "${product}", which is the name of the folder rather than the name of the project.`,
+      why: `${namingTrouble} Nothing else names this product either, so the folder name was used. Anything recorded under the name inside that file is a different product as far as this run is concerned, including the build you called working.`,
+      unlockedBy: `Fix package.json, or put the name you want in your settings file as product: '<name>'. Until then every comparison starts from nothing.`,
+    });
+  }
+  if (storeTrouble.length > 0) {
+    gaps.push({
+      what: 'This run was NOT written down, so the next check has nothing from today to compare against.',
+      why: `${storeTrouble.join(' ')} Whatever this run reports below still stands — the product was walked and compared exactly as usual — but none of it reached the disk.`,
+      unlockedBy: 'Free some disk space, or fix the permissions on the .staysfixed folder, and run the check again.',
+    });
+  }
 
   const rules = mergeRules(DEFAULT_RULES, [
-    ...machineRules({ root, home: os.homedir(), tmp: os.tmpdir() }),
-    ...machineRules({ root: scratch }),
+    ...pathRules({ root, scratch }),
     ...(await loadRules(path.join(root, '.staysfixed', 'rules.json'))),
   ]);
 
@@ -1117,9 +1507,12 @@ async function openProject(options) {
     product,
     store,
     candidate,
+    keepBuilds: keepBuildsFrom(config),
+    referenceSha,
     against: reference ? reference.id : options.against,
     journeys,
-    gaps: gathered.gaps,
+    gaps,
+    storeTrouble: storeTrouble.join(' '),
     walk,
     bootReference,
     normalise,
@@ -1401,8 +1794,62 @@ async function gatherJourneys({ root, config, options }) {
   /** @type {CoverageGap[]} */
   const gaps = [];
 
-  const named = options.journeys && options.journeys !== 'code' && options.journeys !== 'config' ? options.journeys : null;
+  const named =
+    options.journeys && !['code', 'config', 'suite'].includes(options.journeys) ? options.journeys : null;
   if (named) journeys.push(...(await readJourneyFile(path.resolve(root, named))));
+
+  // The project's own test suite, when somebody asked for it in those words and never
+  // otherwise. This RUNS their tests — twice each, inside the same scratch clone everything
+  // else uses, under a time budget — and that is a cost nobody gets charged by accident, so
+  // it is off unless `--journeys suite` says so.
+  //
+  // It is worth switching on because it sees what walking a product cannot. On the fixture
+  // where a total quietly stops rounding pennies, and the command line only ever adds whole
+  // pounds, the discovered journeys produce nothing at all — the output does not move by one
+  // character — and the harvested ones produce five findings.
+  //
+  // Loaded here rather than at the top of the file: a copy of this tool without the harvest
+  // in it still runs every other kind of check, and saying so is better than failing to start.
+  if (options.journeys === 'suite') {
+    try {
+      const { journeysFromSuite, DEFAULT_HARVEST_BUDGET_MS } = await import('./journeys/index.js');
+      // The settings file gets a say in how long this is allowed to take. Left out, the
+      // harvest applies its own default, which is why nothing is passed rather than the
+      // default being copied to here — see `suiteBudgetFrom`.
+      const budgetMs = suiteBudgetFrom(config);
+      const suite = await journeysFromSuite({
+        root,
+        surface: options.surface === 'auto' ? undefined : options.surface,
+        ...(budgetMs === null ? {} : { suite: { budgetMs } }),
+        // The harvest talks while it works, and it can take most of a minute. Its sentences
+        // go into the same stream as everything else rather than nowhere.
+        log: (message) => options.events?.emit({ type: 'note', at: options.events.elapsed(), message }),
+        signal: options.signal,
+      });
+      // Said out loud, always, and before the harvest's own findings. A run held to ninety
+      // seconds and a run allowed four minutes produce different amounts of coverage, and if
+      // the number that decided it is invisible the two runs read as the same run.
+      const applied = budgetMs ?? DEFAULT_HARVEST_BUDGET_MS;
+      options.events?.emit({
+        type: 'note',
+        at: options.events.elapsed(),
+        message:
+          applied === 0
+            ? 'The test-suite harvest was given no time budget at all, so every test file was run however long it took. Your settings asked for that with suite.budgetMs: 0.'
+            : `The test-suite harvest was held to ${Math.round(applied / 1000)} seconds${budgetMs === null ? ', which is the default' : ', which your settings asked for'}. Anything it did not reach in that time is named below rather than skipped quietly; change it with suite.budgetMs.`,
+      });
+      journeys.push(...suite.journeys);
+      gaps.push(...suite.gaps);
+    } catch (e) {
+      // A harvest that fell over is a hole, never a pass. Everything else this project has is
+      // still walked, and the verdict carries the fact that its tests were not among it.
+      gaps.push({
+        what: 'Nothing was checked through this project\'s own test suite, because it could not be harvested.',
+        why: messageOf(e),
+        unlockedBy: 'Run the suite yourself to see what it does, or point the check at a journeys file instead. Nothing your tests can see is being watched until this works.',
+      });
+    }
+  }
 
   for (const adapter of ADAPTERS) {
     if (adapter === sourceAdapter && named && options.journeys !== 'code') {
@@ -1448,7 +1895,10 @@ async function gatherJourneys({ root, config, options }) {
       gaps.push({
         what: `You asked for the journey "${wanted}" and there is no journey by that name, so it was not walked.`,
         why: 'A name that matches nothing narrows the run to nothing rather than to what you meant.',
-        unlockedBy: `The journeys this project has are: ${journeys.map((j) => j.name).slice(0, 12).join(', ') || 'none'}.`,
+        // The count goes on the end when the list was cut. Twelve names with nothing after
+        // them read as the whole list, and somebody hunting for a name they mistyped would
+        // conclude it is not there — when it is, at number thirteen.
+        unlockedBy: `The journeys this project has are: ${journeys.map((j) => j.name).slice(0, 12).join(', ') || 'none'}${journeys.length > 12 ? `, and ${journeys.length - 12} more` : ''}.`,
       });
     }
   }
@@ -1530,28 +1980,10 @@ async function readConfig(configFile) {
 // Which build is which
 // ---------------------------------------------------------------------------
 
-/**
- * Everything this tool writes about your project, kept out of what your project IS.
- *
- * This one line is load-bearing and it was missing, and the bug it caused reached all the
- * way to the front door. A build is told from another build by what git says is in the
- * working tree — the diff, plus the list of files git does not know about. Stays Fixed's own
- * folder is a file git does not know about, and it gains files every single time the tool
- * runs. So the untracked list changed on every run, the digest changed with it, and every
- * run of an UNCHANGED project produced a brand new build id.
- *
- * The consequences were all silent. Two runs on identical source were two different builds,
- * so the second could never find the first one's record. A clean checkout was never clean, so
- * it never got its commit's id, so `--against HEAD` matched nothing and the stored-record
- * comparison — the fast path the whole design rests on — could not work at all. Measured on
- * a scratch product: five runs, one unchanged source file, five different build ids and five
- * runs reporting NOTHING WAS ACTUALLY COMPARED.
- *
- * Excluded rather than gitignored, and that difference matters: gitignoring it would fix the
- * fingerprint and would also throw away the observation files the design says to keep
- * forever. What a project's own tooling wrote about a project is never part of the project.
- */
-const NOT_THE_TOOLS_OWN_FOLDER = ':(exclude).staysfixed';
+// The pathspec that keeps Stays Fixed's own folder out of "what has changed here" lives in
+// rank.js, next to the other reader of the same two git calls. One name, so the fingerprint
+// and the distance measure can never disagree about what counts as the agent's edit — they
+// did for a fortnight, and only the fingerprint half had been fixed.
 
 /**
  * The build you have, named by what is actually in it.
@@ -1634,6 +2066,17 @@ async function fingerprintCommit(root, product, name) {
   const described = await git(root, ['describe', '--tags', '--exact-match', sha]);
   if (described) build.version = described;
   return build;
+}
+
+/**
+ * What to call a reference build in a sentence: the name a person typed, or its id.
+ *
+ * @param {BuildFingerprint} reference
+ * @param {string} [asked]
+ * @returns {string}
+ */
+function nameOfReference(reference, asked) {
+  return asked && asked.trim() !== '' ? `${asked} (${reference.id})` : reference.id;
 }
 
 /**
@@ -1731,24 +2174,45 @@ async function git(cwd, args) {
 }
 
 /**
+ * The project's package.json, and — separately — whether there is one that could not be read.
+ *
+ * NO PACKAGE.JSON AND A DAMAGED ONE USED TO BE THE SAME NULL, and the difference decides what
+ * a product is CALLED. With nothing else naming it, the name falls back to the folder name, so
+ * a package.json with a stray comma in it silently renames the product: the store keys every
+ * record under the new name, and every record kept under the real one — including the build
+ * somebody called working — is orphaned. The run then says, perfectly calmly, that nothing has
+ * ever been recorded here.
+ *
  * @param {string} root
- * @returns {Promise<Record<string, any>|null>}
+ * @returns {Promise<{pkg: Record<string, any>|null, damaged: string}>}
+ *   `damaged` is empty except when the file is there and unreadable, when it is the sentence
+ *   a person gets.
  */
 async function packageJson(root) {
+  const file = path.join(root, 'package.json');
+  /** @type {string} */
+  let raw;
   try {
-    return JSON.parse(await fsp.readFile(path.join(root, 'package.json'), 'utf8'));
-  } catch {
-    return null;
+    raw = await fsp.readFile(file, 'utf8');
+  } catch (e) {
+    const code = /** @type {{code?: string}} */ (e)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { pkg: null, damaged: '' };
+    return { pkg: null, damaged: `${file} is there and could not be read: ${messageOf(e)}` };
+  }
+  try {
+    return { pkg: JSON.parse(raw), damaged: '' };
+  } catch (e) {
+    return { pkg: null, damaged: `${file} is not readable as JSON: ${messageOf(e)}` };
   }
 }
 
 /**
  * @param {string} root
- * @returns {Promise<string|null>}
+ * @returns {Promise<{name: string|null, damaged: string}>}
  */
 async function packageName(root) {
-  const pkg = await packageJson(root);
-  return typeof pkg?.name === 'string' ? pkg.name : null;
+  const { pkg, damaged } = await packageJson(root);
+  return { name: typeof pkg?.name === 'string' ? pkg.name : null, damaged };
 }
 
 /**
@@ -1756,7 +2220,7 @@ async function packageName(root) {
  * @returns {Promise<string|null>}
  */
 async function packageVersion(root) {
-  const pkg = await packageJson(root);
+  const { pkg } = await packageJson(root);
   return typeof pkg?.version === 'string' ? pkg.version : null;
 }
 

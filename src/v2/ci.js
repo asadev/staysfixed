@@ -415,7 +415,12 @@ export async function referenceForCI(opts = {}) {
   }
 
   // ---- released ----------------------------------------------------------
-  const released = await releasedCommit(cwd, opts.product);
+  // Anything the store could not read travels with the answer and is said out loud, whether
+  // the answer was found or not. A run that says "this project has nothing on record as
+  // working" while a build folder sat there unreadable is stating a fact it does not have.
+  const releasedLook = await releasedCommit(cwd, opts.product);
+  const released = releasedLook.found;
+  const storeTrouble = releasedLook.trouble;
   if (released) {
     const found = await resolveCommit(cwd, released.sha);
     const sha = notThisBuild(found);
@@ -443,11 +448,12 @@ export async function referenceForCI(opts = {}) {
           'The fork point of this branch could not be worked out, so this was compared against the last shipped build instead. Anything else that was merged since that release will show up here as well, even though this branch did not do it.';
         result.unlockedBy = deepen;
       }
+      if (storeTrouble) result.caveat = result.caveat ? `${result.caveat} ${storeTrouble}` : storeTrouble;
       return result;
     }
-    else missed('released', `The project's reference points at ${short(released.sha)}, and that commit is not in this checkout.`, shallow ? deepen : 'Make sure the commit that was shipped is still in this repository.');
+    else missed('released', withTrouble(`The project's reference points at ${short(released.sha)}, and that commit is not in this checkout.`, storeTrouble), shallow ? deepen : 'Make sure the commit that was shipped is still in this repository.');
   } else {
-    missed('released', 'This project has no build on record as working. Only its owner can set one, by shipping.');
+    missed('released', withTrouble('This project has no build on record as working. Only its owner can set one, by shipping.', storeTrouble));
   }
 
   // ---- last tag ----------------------------------------------------------
@@ -491,7 +497,8 @@ export async function referenceForCI(opts = {}) {
   missed('previous-commit', 'There is no earlier commit in this checkout.', shallow ? deepen : undefined);
 
   // ---- stored record -----------------------------------------------------
-  const stored = await storedRecord(cwd, opts.product);
+  const storedLook = await storedRecord(cwd, opts.product);
+  const stored = storedLook.found;
   if (stored) {
     considered.push({ mode: 'stored-record', available: true, why: `There are stored observations for ${stored.buildId}.` });
     const same = stored.machine === 'same';
@@ -513,9 +520,14 @@ export async function referenceForCI(opts = {}) {
       machine: stored.machine,
     };
   }
-  missed('stored-record', 'There are no stored observations in this checkout either.', 'Commit the .staysfixed folder, or restore it from a cache written by a job on your main branch.');
+  missed('stored-record', withTrouble('There are no stored observations in this checkout either.', storedLook.trouble), 'Commit the .staysfixed folder, or restore it from a cache written by a job on your main branch.');
 
   // ---- nothing -----------------------------------------------------------
+  // The last line of this file is the one that says a whole checkout holds nothing to
+  // compare against, and it is read as final. It must not be said over the top of a store
+  // that was sitting right there with records nobody could open, so whatever the two looks
+  // in the store could not see is repeated here where a person will actually meet it.
+  const blindSpots = [storeTrouble, storedLook.trouble].filter((t) => t !== '');
   return {
     mode: 'none',
     against: null,
@@ -523,11 +535,25 @@ export async function referenceForCI(opts = {}) {
     strength: 'none',
     how: 'Nothing was found to compare against.',
     why: 'No named commit, no pull request base, no reference, no tag, no earlier commit and no stored record. There is nothing in this checkout that says what this product used to do.',
-    caveat: 'This run proves nothing about your product either way. It is not a pass.',
-    unlockedBy: deepen,
+    caveat:
+      blindSpots.length === 0
+        ? 'This run proves nothing about your product either way. It is not a pass.'
+        : `This run proves nothing about your product either way. It is not a pass. AND IT COULD NOT SEE EVERYTHING THERE IS: ${[...new Set(blindSpots)].join(' ')}`,
+    unlockedBy: blindSpots.length === 0 ? deepen : `${deepen} And repair or delete the build records named above, so the next run can read them.`,
     considered,
     shallow,
   };
+}
+
+/**
+ * Add what could not be seen to a sentence about what was not found.
+ *
+ * @param {string} said
+ * @param {string} trouble
+ * @returns {string}
+ */
+function withTrouble(said, trouble) {
+  return trouble ? `${said} ${trouble}` : said;
 }
 
 /**
@@ -586,29 +612,54 @@ async function findMergeBase(cwd, ci) {
 }
 
 /**
+ * What a look in the store found, and what it could not see while looking.
+ *
+ * `trouble` is empty almost always. It carries a sentence when a build folder had to be
+ * skipped, or when the store would not open at all — and that sentence has to travel,
+ * because both of those turn "this project has nothing on record as working" into a claim
+ * the code is in no position to make. The build being asked for may well be one of the ones
+ * that could not be read.
+ *
+ * @template T
+ * @typedef {{found: T|null, trouble: string}} LookedInTheStore
+ */
+
+/**
  * The commit this project's own reference points at — the build somebody shipped.
  *
  * Read only. Nothing in this file may move that pointer.
  *
  * @param {string} cwd
  * @param {string} [product]
- * @returns {Promise<{sha: string, note: string}|null>}
+ * @returns {Promise<LookedInTheStore<{sha: string, note: string}>>}
  */
 async function releasedCommit(cwd, product) {
+  /** @type {string[]} */
+  const skipped = [];
   try {
     const store = openStore({ root: cwd });
     const name = product ?? (await productName(cwd));
-    if (!name) return null;
+    if (!name) return { found: null, trouble: '' };
     const pointer = await referencePointer(store, name);
-    if (!pointer) return null;
-    const builds = await listBuilds(store, { product: name });
+    if (!pointer) return { found: null, trouble: '' };
+    // Until 2026-08-30 nothing was passed here, so a build folder that could not be read was
+    // simply not in the list — and "not in the list" is how this file spells "never existed".
+    // The build the reference pointer names is exactly the one most likely to have been
+    // written to most recently, and so exactly the one most likely to be the damaged folder.
+    const builds = await listBuilds(store, { product: name, onProblem: (m) => skipped.push(m) });
     const hit = builds.find((b) => b.fingerprint.id === pointer.buildId);
     const sha = hit?.fingerprint.gitSha ?? shaFromBuildId(pointer.buildId);
-    if (!sha) return null;
-    return { sha, note: hit?.fingerprint.version ? `version ${hit.fingerprint.version}` : '' };
-  } catch {
-    // A store that will not open is a reason to try the next mode, never a reason to fail.
-    return null;
+    if (!sha) return { found: null, trouble: troubleFrom(skipped, '') };
+    return {
+      found: { sha, note: hit?.fingerprint.version ? `version ${hit.fingerprint.version}` : '' },
+      // Named even on the way to a good answer. A reference found without the record that
+      // was supposed to describe it is a weaker answer than one found with it.
+      trouble: hit ? troubleFrom(skipped, '') : troubleFrom(skipped, `The record of build ${pointer.buildId} itself was not among them.`),
+    };
+  } catch (e) {
+    // A store that will not open is a reason to try the next mode, never a reason to fail —
+    // but it is never a reason to then say this project has nothing on record either.
+    return { found: null, trouble: troubleFrom(skipped, `The store here could not be read at all: ${messageOf(e)}`) };
   }
 }
 
@@ -617,24 +668,45 @@ async function releasedCommit(cwd, product) {
  *
  * @param {string} cwd
  * @param {string} [product]
- * @returns {Promise<{buildId: string, machine: 'same'|'different'|'unknown'}|null>}
+ * @returns {Promise<LookedInTheStore<{buildId: string, machine: 'same'|'different'|'unknown'}>>}
  */
 async function storedRecord(cwd, product) {
+  /** @type {string[]} */
+  const skipped = [];
   try {
     const store = openStore({ root: cwd });
     const name = product ?? (await productName(cwd));
-    if (!name) return null;
+    if (!name) return { found: null, trouble: '' };
     const pointer = await referencePointer(store, name);
-    const builds = await listBuilds(store, { product: name });
-    if (builds.length === 0) return null;
+    const builds = await listBuilds(store, { product: name, onProblem: (m) => skipped.push(m) });
+    if (builds.length === 0) return { found: null, trouble: troubleFrom(skipped, '') };
     const hit = (pointer && builds.find((b) => b.fingerprint.id === pointer.buildId)) || builds[0];
     const here = `${process.platform}-${process.arch}`;
     /** @type {'same'|'different'|'unknown'} */
     const machine = !hit.fingerprint.platform ? 'unknown' : hit.fingerprint.platform === here ? 'same' : 'different';
-    return { buildId: hit.fingerprint.id, machine };
-  } catch {
-    return null;
+    return { found: { buildId: hit.fingerprint.id, machine }, trouble: troubleFrom(skipped, '') };
+  } catch (e) {
+    return { found: null, trouble: troubleFrom(skipped, `The store here could not be read at all: ${messageOf(e)}`) };
   }
+}
+
+/**
+ * One sentence about what could not be seen, or nothing at all when everything could.
+ *
+ * @param {string[]} skipped
+ * @param {string} extra
+ * @returns {string}
+ */
+function troubleFrom(skipped, extra) {
+  /** @type {string[]} */
+  const parts = [];
+  if (skipped.length > 0) {
+    parts.push(
+      `${skipped.length} stored build ${skipped.length === 1 ? 'record was' : 'records were'} skipped because ${skipped.length === 1 ? 'it' : 'they'} could not be read, so what is on record here may be more than this run could see: ${skipped.join(' ')}`,
+    );
+  }
+  if (extra) parts.push(extra);
+  return parts.join(' ');
 }
 
 // ---------------------------------------------------------------------------
@@ -816,23 +888,31 @@ function findingLines(f) {
 /**
  * Append the report to the job summary, when the build server has one.
  *
- * Returns the file it wrote to, or null when there is nowhere to write. Null is a normal
- * answer on GitLab and CircleCI, neither of which has a summary page.
+ * TWO ANSWERS THAT USED TO BE ONE NULL. "This server has no summary page" is the normal
+ * state on GitLab and CircleCI and needs saying to nobody. "This server HAS one and the
+ * report did not reach it" is a report that has vanished — the person opens the job, sees
+ * the tab they expect, finds nothing under it, and concludes the check did not run. Both
+ * came back as null, so nothing anywhere could tell them apart or mention the second.
+ *
+ * The exit code is untouched either way. Losing the page must never cost the half that
+ * actually stops the merge.
  *
  * @param {CIReport} report
  * @param {CIEnvironment} [env]
- * @returns {Promise<string|null>}
+ * @returns {Promise<{file: string|null, why: string}>}  `why` is empty unless there was a
+ *   page to write to and writing failed.
  */
 export async function writeJobSummary(report, env) {
   const where = (env ?? detectCI()).summaryFile;
-  if (!where) return null;
+  if (!where) return { file: null, why: '' };
   try {
     await fsp.appendFile(where, `${report.markdown}\n`);
-    return where;
-  } catch {
-    // A summary page is a nicety. Losing it must never cost the exit code, which is the
-    // half that actually stops the merge.
-    return null;
+    return { file: where, why: '' };
+  } catch (e) {
+    return {
+      file: null,
+      why: `The report could not be written to this job's summary page (${where}): ${messageOf(e)}. The answer below is the whole of it.`,
+    };
   }
 }
 
@@ -931,12 +1011,27 @@ export async function runCI(opts = {}) {
 
   /** @type {string|null} */
   let evidence = null;
+  /** @type {string[]} */
+  const lost = [];
   try {
     evidence = await saveEvidence({ cwd, dir: opts.evidenceDir, verdict, reference, report, env: where });
-  } catch {
-    // Losing the attachment must never change the answer.
+  } catch (e) {
+    // Losing the attachment must never change the answer — and it must never be lost in
+    // silence either, because the report above says in so many words that the rest of the
+    // gaps are "in the evidence attached to this run". A run that swallowed this printed
+    // that sentence pointing at a folder that was never written.
+    lost.push(`THE EVIDENCE FOR THIS RUN WAS NOT SAVED: ${messageOf(e)} Anything the report says is in the attached evidence is not there, so what you can read above is all there is.`);
   }
-  await writeJobSummary(report, where);
+  const summaryPage = await writeJobSummary(report, where);
+  if (summaryPage.why) lost.push(summaryPage.why);
+
+  // Onto the report itself, both shapes of it, rather than only into a log line. The
+  // markdown is what a person opens later and the text is what the job log keeps.
+  if (lost.length > 0) {
+    const said = lost.join(' ');
+    report.markdown = `${report.markdown}\n\n> **${said}**\n`;
+    report.text = `${report.text}\n${said}\n`;
+  }
 
   if (opts.quiet !== true) process.stdout.write(`${report.text}\n`);
   return { exitCode: report.exitCode, report, reference, verdict, evidence };

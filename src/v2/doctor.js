@@ -36,7 +36,9 @@ import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { platformTag } from '../drive/find.js';
 import { isRepo } from '../core/git.js';
 import { surveyBrowsers, INSTALL_COMMAND, PORT_NEVER_USE } from './browsers.js';
-import { POWERSHELL_PATHS } from './remote.js';
+import { POWERSHELL_PATHS, describeRemote } from './remote.js';
+import { deviceToMake } from './adapters/android.js';
+import { describeWindows } from './adapters/windows.js';
 import { messageOf, EXIT } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, mark, shortPath, setLogLevel } from '../core/log.js';
 import { loadPlaywright } from './adapters/web-driver.js';
@@ -91,6 +93,19 @@ export const CHANNELS = [
  * @property {string} [powershell]  The absolute path to powershell.exe that answered, when one did.
  *                                  Kept because it is the evidence: "there is Windows behind this
  *                                  host" is a claim, and this is the file that proves it.
+ * @property {import('./remote.js').RemoteDescription} [detail]
+ *   Everything the remote runner could learn about that machine once it was known to answer:
+ *   what is installed on it, whether anybody is signed in, whether the desktop is locked, and
+ *   a `missing[]` carrying the exact command for each thing that is not there.
+ *
+ *   WHY THE FOUR FIELDS ABOVE ARE NOT READ OUT OF IT. They come from the cheap probe, which
+ *   is a plain `echo` down an ssh connection and needs nothing on the far machine at all.
+ *   `detail` comes from the runner, which needs Node there. Letting the deeper answer
+ *   overwrite the shallower one would report a perfectly reachable machine as unreachable the
+ *   day somebody's Node is a version too old, and offer them the ssh config as the fix.
+ *
+ *   Absent when the host never answered, and when `doctor --offline` skipped dialling
+ *   altogether. Absent is "nobody asked", never "there is nothing there".
  */
 
 /**
@@ -576,7 +591,17 @@ async function findTools(cwd, browsers) {
         where: where ?? undefined,
         version: names[0],
         why: 'The emulator is the program; a virtual device is the phone it runs. Without one there is nothing to install the app onto.',
-        fix: names.length > 0 ? undefined : 'sdkmanager "system-images;android-35;google_apis;arm64-v8a" && avdmanager create avd -n staysfixed -k "system-images;android-35;google_apis;arm64-v8a"',
+        // Asked of the Android adapter, never written out again here.
+        //
+        // There were two copies of this command, one in each file, and they had drifted in
+        // two ways at once. They named different Android versions, so doctor and the adapter
+        // disagreed about which device to make. And both hardcoded `arm64-v8a`, so anybody on
+        // an Intel Mac or an x86 Linux box was handed a command naming an image that does not
+        // exist for their machine — and the failure talks about the image, which sends them
+        // looking for the wrong thing entirely. `deviceToMake` reads this machine's processor
+        // and carries the Play-Store warning in the same string, so neither half can be
+        // separated from the other again.
+        fix: names.length > 0 ? undefined : deviceToMake().both,
         automatic: true,
       });
     })(),
@@ -947,6 +972,54 @@ function blocks(need) {
 }
 
 /**
+ * One adapter's — or one machine's — `Missing` in the shape the rest of this file reads.
+ *
+ * The two shapes exist for good reasons and neither is going away: an adapter says what it
+ * needs and what that unlocks, and doctor has to say additionally whether a person is
+ * required. The translation between them is the only place that decision is made, so both
+ * callers make it the same way and `blocks` above keeps reading the sentence it expects.
+ *
+ * @param {import('./adapters/contract.js').Missing} m
+ * @returns {Need}
+ */
+function needFromMissing(m) {
+  return {
+    what: String(m.what),
+    why: m.blocking === true ? 'Nothing on this platform can be checked at all without it.' : 'It widens what can be watched here.',
+    fix: String(m.howToGet ?? ''),
+    // Whether a person is needed is read out of the words, because the adapter
+    // contract has no field for it. A licence, an account, a pair of hands or a
+    // device is a person; everything else is a command the agent just runs. Being
+    // wrong in this direction only ever means telling somebody about a step they
+    // did not have to take, which is far cheaper than the other way round.
+    automatic: !/licen[cs]e|apple id|app store|plug|pair of hands|somebody has to|a person|sign in|log in|only a person/i.test(String(m.howToGet ?? '')),
+    unlocks: String(m.unlocks ?? ''),
+  };
+}
+
+/**
+ * What one platform reports when the adapter that answers for it did not answer.
+ *
+ * Written as blocking on purpose. It is not a claim that the platform cannot be checked — it
+ * is the honest opposite, that nobody here knows — and between the two ways of being wrong,
+ * saying less is covered than really is costs somebody a second look, while saying more is
+ * covered than really is costs them a green run that means nothing.
+ *
+ * @param {string} name
+ * @param {string} why
+ * @returns {Need}
+ */
+function couldNotAsk(name, why) {
+  return {
+    what: `an answer from the ${name} adapter about what it needs`,
+    why: 'Nothing on this platform can be checked at all without it.',
+    fix: `The ${name} adapter was asked what it needs here and ${why}, so nothing on this page says whether it would work. Run \`staysfixed doctor\` again; if it keeps happening, run a check aimed at ${name} and read what that says.`,
+    automatic: true,
+    unlocks: `an honest answer about whether your ${name} product can be checked on this machine — right now there is none, in either direction`,
+  };
+}
+
+/**
  * The platforms that arrive as an adapter of their own, and know their own requirements.
  * The built-in five are described by hand above, because they are older than this
  * mechanism and their wording is tested; these three answer for themselves.
@@ -996,29 +1069,26 @@ async function askTheAdapters(root) {
       const adapter = engine.adapters.find((a) => a.name === name);
       if (!adapter) return;
       try {
-        /** @type {{missing?: {what?: string, unlocks?: string, howToGet?: string, blocking?: boolean}[]}} */
+        /** @type {{missing?: {what?: string, unlocks?: string, howToGet?: string, blocking?: boolean}[]}|null} */
         const detection = await Promise.race([
           adapter.detect({ root, config: config[name] ?? {} }),
-          new Promise((resolve) => setTimeout(() => resolve({ missing: [] }), REACH_MS * 2)),
+          // Null, not an empty answer. "The adapter says it needs nothing" and "the adapter
+          // never answered" reached this line as the same empty list, and an empty list is
+          // what makes a surface READY: an Android adapter that hung for sixteen seconds
+          // produced "Covered against the stored record" on a machine where nothing had been
+          // asked at all. A silence that turns into an all-clear is the exact failure this
+          // whole tool exists to prevent, so silence now has a value of its own.
+          new Promise((resolve) => setTimeout(() => resolve(null), REACH_MS * 2)),
         ]);
-        const needs = (detection?.missing ?? [])
+        out.set(name, detection === null ? [couldNotAsk(name, `it did not answer within ${Math.round((REACH_MS * 2) / 1000)} seconds`)] : (detection.missing ?? [])
           .filter((m) => typeof m.what === 'string' && m.what !== '')
-          .map((m) => /** @type {Need} */ ({
-            what: String(m.what),
-            why: m.blocking === true ? 'Nothing on this platform can be checked at all without it.' : 'It widens what can be watched here.',
-            fix: String(m.howToGet ?? ''),
-            // Whether a person is needed is read out of the words, because the adapter
-            // contract has no field for it. A licence, an account, a pair of hands or a
-            // device is a person; everything else is a command the agent just runs. Being
-            // wrong in this direction only ever means telling somebody about a step they
-            // did not have to take, which is far cheaper than the other way round.
-            automatic: !/licen[cs]e|apple id|app store|plug|pair of hands|somebody has to|a person|sign in|log in/i.test(String(m.howToGet ?? '')),
-            unlocks: String(m.unlocks ?? ''),
-          }))
-          .filter((need) => need.fix !== '');
-        out.set(name, needs);
-      } catch {
-        // An adapter that cannot answer contributes nothing, and the machine survey stands.
+          .map((m) => needFromMissing(/** @type {import('./adapters/contract.js').Missing} */ (m)))
+          .filter((need) => need.fix !== ''));
+      } catch (e) {
+        // Same again for an adapter that fell over. It contributes a hole, never a silence:
+        // the machine survey stands, and this platform says plainly that nothing here knows
+        // whether it would work.
+        out.set(name, [couldNotAsk(name, messageOf(e))]);
       }
     }),
   );
@@ -1162,6 +1232,9 @@ async function describeHost(name) {
   const ssh = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5'];
   const alive = await ask('ssh', [...ssh, name, `echo ${ALIVE}`], REACH_MS);
   if (!answered(alive)) return readHostProbe(name, alive, null);
+  // Nothing more is asked of a machine that will not even echo. Everything below costs a
+  // second connection, and spending it on a host that did not answer the first one is how
+  // doctor stops being the quick command somebody runs when they are already stuck.
 
   // A shell that can SEE powershell.exe on the filesystem has a real Windows desktop
   // behind it — the cheapest Windows runner there is, and one nobody has to provision.
@@ -1171,7 +1244,64 @@ async function describeHost(name) {
   // it. The one list of places to look lives in remote.js, which is the file that later
   // has to actually run one.
   const look = await ask('ssh', [...ssh, name, `ls -d ${POWERSHELL_PATHS.map((p) => `'${p}'`).join(' ')}`], REACH_MS);
-  return readHostProbe(name, alive, look);
+  const report = readHostProbe(name, alive, look);
+
+  // And then the half that was written and never called.
+  //
+  // "Reachable" on its own is not an answer anybody can act on. The requirement this whole
+  // file exists to meet is that a stranger's AI can read what the tool needs and tell the
+  // person, with the exact commands — and a remote machine that comes back as one boolean
+  // and a sentence fails that completely. `describeRemote` answers the rest: what is
+  // installed there, whether anybody is signed in on the Windows desktop, whether it is
+  // locked, and a list of what is missing with the command for each.
+  //
+  // It never throws, but it does open a connection, so it is still wrapped: doctor answering
+  // less is a bad day, and doctor not answering is the command somebody runs when they are
+  // already stuck failing on them.
+  try {
+    const detail = await describeRemote(name, {
+      // What the cheap probe already proved, handed over rather than asked again. Without
+      // this, a machine with no Node on it comes back "could not be reached" and the fix
+      // offered is the ssh config that just worked.
+      answered: true,
+      powershell: report.powershell ?? null,
+      timeoutMs: REACH_MS * 2,
+      windowsTimeoutMs: REACH_MS * 4,
+    });
+    return withRemoteDetail(report, detail);
+  } catch (e) {
+    return { ...report, how: `${report.how}, but nothing more could be learned about it (${messageOf(e)})` };
+  }
+}
+
+/**
+ * Fold what the runner learned into what the cheap probe proved.
+ *
+ * Split out and exported so the merge can be tested without a network: the rule that the
+ * shallow answer wins on reachability is the whole point of it, and a rule that only exists
+ * inside a function nothing can call without an ssh key is a rule nobody will notice
+ * breaking.
+ *
+ * @param {HostReport} report   What the plain `echo` and `ls` probes established.
+ * @param {import('./remote.js').RemoteDescription} detail
+ * @returns {HostReport}
+ */
+export function withRemoteDetail(report, detail) {
+  /** @type {HostReport} */
+  const out = { ...report, detail };
+  // Windows, only ever added. The cheap probe asks the filesystem for powershell.exe and is
+  // right whether or not anything else on that machine works; the deep one cannot ask at all
+  // unless the runner started. So a `false` from the deep probe is "could not tell", and
+  // letting it clear a `true` would lose the Windows runner somebody already has.
+  if (detail.windows === true && out.windows !== true) {
+    out.windows = true;
+    if (detail.powershell) out.powershell = detail.powershell;
+  }
+  // `detail.how` already opens with the fact that a shell answers, so it replaces the
+  // shallower sentence rather than being appended to it. Two sentences saying the same thing
+  // in different words is how a reader starts wondering which of them is the real answer.
+  if (!detail.runnerStarted) out.how = detail.how;
+  return out;
 }
 
 /**
@@ -1572,25 +1702,51 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   // is "detect rather than ask" at its sharpest: a runner that already answers must never
   // be presented as something to go and set up.
   const windowsDriver = canDrive('windows');
+  // A Windows desktop nobody has signed into is not a runner. There is nothing on it to read
+  // — no windows, no controls — so calling it "partly covered" would be the exact over-claim
+  // this file exists to prevent. The question can only be asked when the runner started
+  // there, so `undefined` means nobody could tell and the older, more generous answer stands.
+  const windowsSignedOut = windowsHost?.detail?.desktopLoggedIn === false;
+  const windowsUsable = windowsHost !== undefined && windowsDriver && !windowsSignedOut;
   surfaces.push({
     id: 'windows',
     name: 'native Windows apps',
-    status: windowsHost && windowsDriver ? 'partial' : 'unavailable',
+    status: windowsUsable ? 'partial' : 'unavailable',
     summary: !windowsHost
       ? 'No Windows desktop is reachable from here. This is usually fine: an Electron product on Windows is watched over the debug port instead, from any machine.'
       : !windowsDriver
         ? `A real Windows desktop is reachable through ${windowsHost.name}, and this copy of Stays Fixed cannot drive one. ${noDriver('windows')}`
-        : `A real Windows desktop is already reachable through ${windowsHost.name}, and nothing has to be installed on it — the program that reads the screen is sent down the ssh connection each run and disappears when it closes. Two builds still cannot run at once, because Windows shows one desktop, so runs are one after the other and the comparison is weaker here than anywhere else.`,
-    canCheck: windowsHost && windowsDriver ? withoutADriver : [],
-    cannotCheck: windowsHost && windowsDriver ? ['meaning', 'pixels'] : CHANNELS.map((c) => c.id),
+        // The adapter's own paragraph, not a second one written here. It knows whether
+        // anybody is signed in and whether the screen is locked, and those two change the
+        // answer completely; a summary kept in this file could only ever guess at them, and
+        // two descriptions of one machine will eventually disagree.
+        : windowsHost.detail
+          ? `${describeWindows(windowsHost.detail)} Nothing has to be installed on it either — the program that reads the screen is sent down the ssh connection each run and disappears when it closes.`
+          : `A real Windows desktop is already reachable through ${windowsHost.name}, and nothing has to be installed on it — the program that reads the screen is sent down the ssh connection each run and disappears when it closes. Two builds still cannot run at once, because Windows shows one desktop, so runs are one after the other and the comparison is weaker here than anywhere else.`,
+    canCheck: windowsUsable ? withoutADriver : [],
+    cannotCheck: windowsUsable ? ['meaning', 'pixels'] : CHANNELS.map((c) => c.id),
     // Asked of the Windows adapter, which knows what it needs — the name of a machine and
     // the built program — rather than kept as a second opinion here. The one thing added
     // is the host name, because doctor found it by dialling and the adapter cannot.
+    //
+    // Plus whatever the machine itself is missing, which only the dial could find out: a
+    // desktop nobody has signed into, a screen that is locked. Those come with the sentence
+    // saying what each one unlocks, so an agent can relay one clear line to a person instead
+    // of inventing instructions.
     needs:
       windowsHost && windowsDriver
-        ? (asked.get('windows') ?? []).map((need) => ({ ...need, fix: need.fix.replace(/"the-ssh-host-name"/g, `"${windowsHost.name}"`) }))
+        ? [
+            ...(windowsHost.detail?.missing ?? []).map(needFromMissing),
+            ...(asked.get('windows') ?? []).map((need) => ({ ...need, fix: need.fix.replace(/"the-ssh-host-name"/g, `"${windowsHost.name}"`) })),
+          ]
         : [],
   });
+  if (windowsSignedOut && windowsHost) {
+    impossible.set(
+      'windows',
+      `${windowsHost.name} is a Windows machine and this copy can drive one, but nobody is signed in on that desktop. Nothing can be read off a desktop nobody has signed into. Sign in on it once and leave the session running — locking the screen afterwards is fine — and this becomes available.`,
+    );
+  }
   if (windowsHost && !windowsDriver) {
     impossible.set('windows', `${noDriver('windows')} Nothing you install on that machine changes it. Update Stays Fixed to a copy that has it.`);
   }
@@ -1763,6 +1919,49 @@ function nextSteps(surfaces, reference, repo) {
 // ── words ───────────────────────────────────────────────────────────────────
 
 /**
+ * What one reachable machine actually is, in the plainest words there are.
+ *
+ * Every one of these facts was already being collected and thrown away: `describeRemote`
+ * returns what is installed there, whether anybody is signed in, whether the desktop is
+ * locked and what each missing thing would unlock, and doctor was printing a host name.
+ *
+ * Nothing is invented when the answer is unknown. A machine whose runner would not start has
+ * an empty tools list because nothing could ask, not because nothing is installed, and the
+ * note that says so comes from the same place the facts do.
+ *
+ * @param {HostReport} host
+ * @returns {string[]}
+ */
+function hostLines(host) {
+  /** @type {string[]} */
+  const lines = [];
+  const detail = host.detail;
+  if (!detail) {
+    lines.push(`${host.name}: ${host.how}. Nothing further was asked of it.`);
+    return lines;
+  }
+  const has = Object.entries(detail.tools).filter(([, where]) => typeof where === 'string' && where !== '').map(([name]) => name);
+  const head = [detail.os, has.length > 0 ? `has ${plainList(has)}` : null].filter(Boolean).join(', ');
+  lines.push(`${host.name}: ${head || detail.how}.`);
+  if (detail.windows) {
+    lines.push(
+      `  Windows behind it${detail.windowsVersion ? ` (${detail.windowsVersion})` : ''}, ` +
+        `${detail.desktopLoggedIn === false ? 'with nobody signed in on the desktop' : detail.desktopLoggedIn === true ? 'signed in' : 'and whether anybody is signed in could not be read'}` +
+        `${detail.desktopLocked === true ? ', screen locked — controls still read correctly, only whole-screen pictures come back black' : ''}.`,
+    );
+  }
+  // Each one with the exact command, because "you need Node there" and "run this" are not the
+  // same message, and only one of them can be relayed to somebody who is not a programmer.
+  for (const missing of detail.missing) {
+    lines.push(`  ${missing.blocking === true ? 'needs' : 'would help'}: ${missing.what} — ${missing.howToGet}`);
+  }
+  if (!detail.runnerStarted) {
+    lines.push('  What is installed on it is unknown rather than absent: the program this tool sends down the connection did not start, so nothing could be asked.');
+  }
+  return lines;
+}
+
+/**
  * The same object, said out loud. Used by the CLI, and quoted verbatim into the
  * MCP answer so an agent and a person are never told different things.
  *
@@ -1835,6 +2034,10 @@ export function describeCapabilities(caps) {
   const runners = caps.hosts.filter((h) => h.reachable);
   if (runners.length > 0) {
     lines.push(`Other machines it can already reach: ${runners.map((h) => h.name + (h.windows ? ' (has a real Windows desktop behind it)' : '')).join(', ')}.`);
+    // And then what each of them actually is. A name and the word "reachable" is not
+    // something anybody can act on — the requirement is that an agent reading this can tell
+    // a person what a machine needs, with the command, and a one-word answer fails that.
+    for (const host of runners) for (const line of hostLines(host)) lines.push(`  ${line}`);
     lines.push('');
   }
   // Said out loud, because a machine left undialled is a runner somebody may be
@@ -1917,6 +2120,7 @@ export async function run(ctx) {
   const runners = caps.hosts.filter((h) => h.reachable);
   if (runners.length > 0) {
     say(paint.grey(`  machines it can already reach: ${runners.map((h) => h.name).join(', ')}`));
+    for (const host of runners) for (const line of hostLines(host)) say(paint.grey(`    ${line}`));
   }
   const undialled = caps.hosts.filter((h) => h.how.startsWith('not dialled'));
   if (undialled.length > 0) {

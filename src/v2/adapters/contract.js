@@ -611,11 +611,21 @@ export function undoOurFootprint(text, footprint) {
  * @returns {{text: string, truncated: boolean, bytes: number}}
  */
 export function trimForStorage(text, limit = 64 * 1024) {
-  const bytes = Buffer.byteLength(text, 'utf8');
-  if (bytes <= limit) return { text, truncated: false, bytes };
+  const whole = Buffer.from(String(text), 'utf8');
+  const bytes = whole.length;
+  if (bytes <= limit) return { text: String(text), truncated: false, bytes };
   const keep = Math.floor(limit / 2);
-  const head = text.slice(0, keep);
-  const tail = text.slice(-keep);
+  // Cut in BYTES, which is what the limit is counted in. This used to cut in characters, and
+  // on anything that is not plain ASCII the two are not the same number: a screenful of
+  // box-drawing or CJK is three bytes a character, so 90,000 bytes of it is only 30,000
+  // characters, both halves took the WHOLE text, and the stored value came out at 180,000
+  // bytes — the entire output twice, under a marker claiming 24,464 bytes had been left out
+  // of the middle. Three lies at once: the limit was not applied, the count was wrong, and
+  // the observation was marked not-fully-covered when in fact nothing had been dropped.
+  const headEnd = backToACharacter(whole, keep);
+  const tailStart = onToACharacter(whole, bytes - keep);
+  const head = whole.subarray(0, headEnd).toString('utf8');
+  const tail = whole.subarray(tailStart).toString('utf8');
   // The marker used to carry a COARSE size bucket, and the doc above it claimed a fingerprint
   // of the whole that was never actually computed. Both halves of that were wrong, and the
   // result was the worst thing this tool can produce: a change that happened entirely in the
@@ -636,8 +646,35 @@ export function trimForStorage(text, limit = 64 * 1024) {
   // as not fully covered, the coverage ledger states the hole, and the whole text is written
   // to the evidence folder so anybody can look.
   return {
-    text: `${head}\n... exactly ${bytes - keep * 2} bytes left out of the middle of ${bytes} ...\n${tail}`,
+    text: `${head}\n... exactly ${tailStart - headEnd} bytes left out of the middle of ${bytes} ...\n${tail}`,
     truncated: true,
     bytes,
   };
+}
+
+/**
+ * Cutting a multi-byte character in half turns it into a replacement character, which is a
+ * difference nobody made and which would then move about between runs. These two walk the cut
+ * to the nearest place a character actually starts — backwards for the head, forwards for the
+ * tail, so the two halves can never grow into each other.
+ *
+ * @param {Buffer} buffer
+ * @param {number} at
+ * @returns {number}
+ */
+function backToACharacter(buffer, at) {
+  let cut = at;
+  while (cut > 0 && (buffer[cut] & 0xC0) === 0x80) cut -= 1;
+  return cut;
+}
+
+/**
+ * @param {Buffer} buffer
+ * @param {number} at
+ * @returns {number}
+ */
+function onToACharacter(buffer, at) {
+  let cut = at;
+  while (cut < buffer.length && (buffer[cut] & 0xC0) === 0x80) cut += 1;
+  return cut;
 }

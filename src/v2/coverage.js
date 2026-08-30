@@ -98,7 +98,14 @@ import { listBuilds, listCaptures, loadCapture, referencePointer } from './store
  * @property {string} [buildId]
  * @property {string[]} paths                 Non-contract observation addresses, and every
  *                                            prefix of each, so a lookup is one set hit.
- * @property {string[]} [doors]               Door keys the journey's steps name. See doorKey.
+ * @property {string[]} [doors]               Door keys the journey's steps name, for steps that
+ *                                            named a door with nothing to tell apart from
+ *                                            another of the same name. See doorKey.
+ * @property {string[]} [doorAddresses]       Full door addresses, for steps that were specific
+ *                                            enough to build one. A route step knows its verb,
+ *                                            and GET /x and POST /x are two doors that share a
+ *                                            doorKey — so a step that knows which one it knocked
+ *                                            on lands here instead, and the other stays shut.
  * @property {string[]} [touchedFiles]
  * @property {string[]} [touchedFunctions]    'file:name', from the suite's own coverage.
  * @property {number} [functionsNotListed]    Functions that ran and were cut from the list to
@@ -412,9 +419,21 @@ export function walkFromCapture(capture, journey) {
     paths: touched.paths,
   };
   if (journey?.steps) {
-    walk.doors = journey.steps
-      .filter((s) => typeof s.door === 'string' && typeof s.kind === 'string')
-      .map((s) => doorKey({ kind: String(s.kind), name: String(s.door) }));
+    // Two lists, because a doorKey is kind and name only. That is right for an IPC channel or
+    // an exported name, where the name IS the door; it is wrong for a route, where GET /basket
+    // and POST /basket share a key and are two different doors. A step that knows which one it
+    // knocked on says so with `doorDetail`, and goes in the exact list — otherwise walking GET
+    // would report POST as walked too, which is the coverage ledger lying in the one direction
+    // it must never lie in.
+    const named = journey.steps.filter((s) => typeof s.door === 'string' && typeof s.kind === 'string');
+    const exact = named.filter((s) => typeof s.doorDetail === 'string' && s.doorDetail !== '');
+    const byName = named.filter((s) => typeof s.doorDetail !== 'string' || s.doorDetail === '');
+    if (byName.length > 0) walk.doors = byName.map((s) => doorKey({ kind: String(s.kind), name: String(s.door) }));
+    if (exact.length > 0) {
+      walk.doorAddresses = exact.map((s) =>
+        doorAddress({ kind: String(s.kind), name: String(s.door), detail: String(s.doorDetail), file: typeof s.doorFile === 'string' ? s.doorFile : undefined }),
+      );
+    }
   }
   if (journey?.touched?.files) walk.touchedFiles = journey.touched.files;
   if (journey?.touched?.functions) walk.touchedFunctions = journey.touched.functions;
@@ -442,7 +461,7 @@ const ADDRESS_RULE = new Set(['ipc', 'route', 'export', 'env']);
  * @returns {{state: 'opened'|'reached', how: string}|null}
  */
 export function whatTheWalkDid(door, walk, paths) {
-  if (walk.doors?.includes(doorKey(door))) {
+  if (walk.doorAddresses?.includes(door.address) || walk.doors?.includes(doorKey(door))) {
     return { state: 'opened', how: `"${walk.journey}" has a step that knocks on it directly.` };
   }
   if (ADDRESS_RULE.has(door.kind)) {
@@ -783,172 +802,6 @@ export async function ledger(store, product, opts = {}) {
   });
 }
 
-/**
- * The same picture, for one run.
- *
- * A verdict does not carry its observations, so on its own this can only report totals — and
- * it says `knows: 'counts only'` rather than pretending to a per-door answer it does not
- * have. Hand it the doors and the walks from that run and it upgrades to the full ledger.
- *
- * @param {Verdict} verdict
- * @param {{doors?: (Door|DoorFact)[], walks?: Walk[]}} [opts]
- * @returns {Ledger}
- */
-export function coverageOf(verdict, opts = {}) {
-  /** @type {Coverage} */
-  const coverage = verdict.coverage ?? { paths: 0, journeys: 0, byChannel: {}, gaps: [] };
-  if (opts.doors && opts.walks) {
-    const doors = opts.doors.map((d) => ('address' in d ? d : doorFact(d)));
-    return buildLedger({
-      product: verdict.product,
-      doors,
-      walks: opts.walks,
-      byChannel: coverage.byChannel,
-      captures: opts.walks.length,
-      builds: 1,
-      at: verdict.startedAt,
-      caveats: [`This is one run — ${nameRun(verdict)} — not everything this tool has ever walked.`],
-      gaps: coverage.gaps ?? [],
-    });
-  }
-
-  const doors = coverage.doorsKnown ?? 0;
-  const opened = coverage.doorsWalked ?? 0;
-  /** @type {string[]} */
-  const caveats = [
-    `This is one run — ${nameRun(verdict)} — not everything this tool has ever walked.`,
-    'A verdict carries totals rather than addresses, so this cannot name which doors were left shut. Call ledger(store, product) for that.',
-  ];
-  if (verdict.mode === 'stored-record') {
-    caveats.push(
-      verdict.modeWarning
-        ?? 'The old build was not booted. This run was compared against observations stored the last time it ran, which lets back in every difference that comes from the day being different.',
-    );
-  }
-  if (doors === 0) {
-    caveats.push('Nothing counted the doors on this run, so there is no denominator, and "nothing changed" here means only "nothing I looked at changed".');
-  }
-
-  return {
-    product: verdict.product,
-    at: verdict.startedAt,
-    knows: 'counts only',
-    doors,
-    opened,
-    reached: 0,
-    never: Math.max(0, doors - opened),
-    unwalkable: 0,
-    work: Math.max(0, doors - opened),
-    irreversible: 0,
-    entries: [],
-    byKind: {},
-    journeys: coverage.journeys ?? 0,
-    byJourneySource: {},
-    byChannel: coverage.byChannel ?? {},
-    captures: coverage.journeys ?? 0,
-    builds: 1,
-    caveats,
-    gaps: coverage.gaps ?? [],
-  };
-}
-
-/**
- * @param {Verdict} verdict
- * @returns {string}
- */
-function nameRun(verdict) {
-  const candidate = verdict.candidate?.version || verdict.candidate?.id || 'this build';
-  return `${candidate}, ${verdict.mode === 'paired' ? 'against the old build booted live' : 'against the stored record'}`;
-}
-
-// ---------------------------------------------------------------------------
-// Saying it out loud
-// ---------------------------------------------------------------------------
-
-/**
- * The ledger in plain English, honest and specific, one line each.
- *
- * The headline is the number nobody wants to publish, and it goes first on purpose:
- * "452 doors, 61 opened, 391 never opened. A clean result says nothing about those 391."
- *
- * There is no percentage anywhere in here, and that is not an oversight. A percentage
- * invites a target, a target invites gaming, and a gamed coverage number is worse than none
- * because somebody believes it.
- *
- * @param {Ledger} led
- * @returns {string[]} join with a space for a paragraph, or a newline for a list
- */
-export function describeCoverage(led) {
-  /** @type {string[]} */
-  const lines = [];
-
-  if (led.doors === 0) {
-    lines.push('Nothing here knows how many doors this product has, so there is no honest way to say how much of it was checked.');
-  } else {
-    const parts = [count(led.doors, 'door'), `${led.opened} opened`];
-    if (led.reached > 0) parts.push(`${led.reached} in code that ran but never addressed`);
-    parts.push(`${led.never} never opened`);
-    lines.push(`${parts.join(', ')}.`);
-    if (led.never > 0) lines.push(`A clean result says nothing about those ${led.never}.`);
-  }
-
-  if (led.unwalkable > 0) {
-    const permanent = led.irreversible > 0
-      ? `${led.irreversible} that would spend money, send a message or destroy something and are stopped at the call on purpose`
-      : 'doors there is nothing to knock on';
-    lines.push(
-      `Of those ${led.never}, ${led.unwalkable} can never be opened from here — settings that are read rather than called, names built while the program runs, and ${permanent}. That leaves ${led.work} that could be covered and are not.`,
-    );
-  } else if (led.work > 0 && led.doors > 0) {
-    lines.push(`All ${led.work} of the unopened ones could be covered.`);
-  }
-
-  // Every kind, not the worst four. There are five kinds of door in the whole tool, so
-  // cutting the list saved one line and dropped a whole category of the product out of the
-  // only sentence that says how much of it is covered.
-  const kinds = Object.entries(led.byKind)
-    .filter(([, k]) => k.doors > 0)
-    .sort((a, b) => b[1].never - a[1].never)
-    .map(([kind, k]) => `${k.opened} of ${k.doors} ${k.doors === 1 ? KIND_ONE[kind] ?? kind : KIND_MANY[kind] ?? kind}`);
-  if (kinds.length > 0) lines.push(`By kind: ${kinds.join(', ')}.`);
-
-  if (led.journeys === 0) {
-    lines.push('No journey has ever been walked against this product, so nothing here rests on anything.');
-  } else {
-    const sources = Object.entries(led.byJourneySource)
-      .filter(([, n]) => n > 0)
-      .sort((a, b) => b[1] - a[1])
-      .map(([source, n]) => `${n} ${SOURCE_PHRASE[source] ?? source}`);
-    lines.push(
-      `${count(led.journeys, 'journey')} produced ${count(led.captures, 'capture')}${sources.length > 0 ? ` — ${sources.join(', ')}` : ''}.`,
-    );
-  }
-
-  for (const caveat of led.caveats) lines.push(caveat);
-  if (led.gaps.length > 0) {
-    lines.push(`${count(led.gaps.length, 'other thing')} could not be looked at, and each one says what would fix it.`);
-  }
-  return lines;
-}
-
-/** @type {Record<string, string>} */
-const SOURCE_PHRASE = {
-  code: 'read out of the code',
-  suite: "harvested from the project's own tests",
-  recorded: 'recorded from a real session',
-  explored: 'found by an agent exploring',
-  unknown: 'of unrecorded origin',
-};
-
-/**
- * @param {number} n
- * @param {string} noun
- * @returns {string}
- */
-function count(n, noun) {
-  return `${n} ${noun}${n === 1 ? '' : 's'}`;
-}
-
 // ---------------------------------------------------------------------------
 // The work queue
 // ---------------------------------------------------------------------------
@@ -958,7 +811,7 @@ function count(n, noun) {
  * @property {number} [worst]              How many jobs to hand back. Default 12.
  * @property {boolean} [includeUnwalkable] Include doors nothing here could ever open. Off:
  *                                         they belong in the honest total, not in a queue,
- *                                         and describeCoverage names them anyway.
+ *                                         and the ledger counts them either way.
  * @property {number} [minDoors]           Ignore families smaller than this. Default 1.
  */
 
@@ -1108,11 +961,25 @@ export function toCoverage(led, opts = {}) {
   const out = [...led.gaps];
   if (led.doors > 0 && led.never > 0) {
     out.push({
-      what: `${led.never} of this product's ${led.doors} doors have never been opened by this tool.`,
-      why: 'No journey reaches them, so a break behind one of them would not show up in any run — clean or otherwise.',
+      // A product with one door read "1 of this product's 1 doors have never been opened",
+      // which is the sentence a reader stops believing the rest of the report over. The count
+      // is the whole point of the line, so it is worth the four words it costs to say it in
+      // English.
+      what: led.doors === 1
+        ? "This product's only door has never been opened by this tool."
+        : led.never === 1
+          ? `1 of this product's ${led.doors} doors has never been opened by this tool.`
+          : `${led.never} of this product's ${led.doors} doors have never been opened by this tool.`,
+      why: led.never === 1
+        ? 'No journey reaches it, so a break behind it would not show up in any run — clean or otherwise.'
+        : 'No journey reaches them, so a break behind one of them would not show up in any run — clean or otherwise.',
       unlockedBy: led.work > 0
-        ? `${led.work} of them could be covered by journeys that reach them — read out of your source, or named by hand in a journeys file.`
-        : 'Nothing. Every one of them is a door this tool cannot open from here, and each says why.',
+        ? led.work === 1
+          ? 'It could be covered by a journey that reaches it — read out of your source, or named by hand in a journeys file.'
+          : `${led.work} of them could be covered by journeys that reach them — read out of your source, or named by hand in a journeys file.`
+        : led.never === 1
+          ? 'Nothing. It is a door this tool cannot open from here, and it says why.'
+          : 'Nothing. Every one of them is a door this tool cannot open from here, and each says why.',
       channel: 'contract',
       doors: led.never,
     });

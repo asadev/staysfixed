@@ -32,6 +32,9 @@ import { proveCause } from '../../src/v2/cause.js';
 import { subtractWobble, wobbleStorm } from '../../src/v2/observation.js';
 import { duplicateGaps } from '../../src/v2/run.js';
 import { readFileRoutes } from '../../src/v2/adapters/source.js';
+import { journeysFrom, readPageRoutes } from '../../src/v2/adapters/web.js';
+import { asAddress, readMeaning } from '../../src/v2/adapters/electron.js';
+import { declaredObservations, findAppBundle, iosAdapter, readDeclaredDoors } from '../../src/v2/adapters/ios.js';
 
 const run = promisify(execFile);
 
@@ -314,6 +317,32 @@ describe('a wobble big enough to swallow the comparison is not a clean run', () 
     const out = subtractWobble([], wobbleOf(30, 70));
     assert.notEqual(out.couldNotTell, true);
   });
+
+  test('ten of eleven addresses wobbling is a storm, floor or no floor', () => {
+    // There used to be a floor: below twelve addresses the share was ignored altogether, so a
+    // journey that threw ten of its eleven addresses away came back clean about the one that
+    // was left. Small is not the same as unmeasurable.
+    const differences = Array.from({ length: 10 }, (_, i) => ({
+      path: `cli.row${i}.value`,
+      channel: /** @type {const} */ ('results'),
+      kind: /** @type {const} */ ('changed'),
+      journey: 'the walk',
+      reference: 'was',
+      candidate: 'now',
+      distance: 1,
+    }));
+    const out = subtractWobble(differences, wobbleOf(10, 1));
+    assert.equal(out.real.length, 0, 'the fixture has to actually swallow everything, or this proves nothing');
+    assert.equal(out.couldNotTell, true, 'ten differences were dropped and one address was compared — that is not a pass');
+  });
+
+  test('three of four is one too, because it leaves a single address standing', () => {
+    assert.equal(wobbleStorm(wobbleOf(3, 1)).stormy, true);
+  });
+
+  test('half wobbling still gets a verdict — half of the comparison survived', () => {
+    assert.equal(wobbleStorm(wobbleOf(6, 6)).stormy, false);
+  });
 });
 
 describe('two answers at one address are a hole, not a quiet overwrite', () => {
@@ -369,6 +398,243 @@ describe('a folder the route reader cannot open takes every route behind it, and
     } finally {
       await fsp.chmod(path.join(dir, 'app', 'locked'), 0o755).catch(() => {});
       await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+
+describe('a website\'s pages cannot go missing quietly', () => {
+  /**
+   * A tiny Next-shaped project with four pages, one of them behind a folder this account
+   * will not be allowed to open.
+   *
+   * @returns {Promise<{root: string, locked: string, done: () => Promise<void>}>}
+   */
+  const project = async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-pages-'));
+    for (const where of ['app', 'app/orders', 'app/admin', 'app/admin/settings']) {
+      await fsp.mkdir(path.join(root, where), { recursive: true });
+      await fsp.writeFile(path.join(root, where, 'page.tsx'), 'export default function P() { return null; }\n');
+    }
+    const locked = path.join(root, 'app', 'admin');
+    return {
+      root,
+      locked,
+      done: async () => {
+        await fsp.chmod(locked, 0o755).catch(() => {});
+        await fsp.rm(root, { recursive: true, force: true });
+      },
+    };
+  };
+
+  test('a folder that will not open is named, and the pages behind it become missing coverage', async (t) => {
+    const { root, locked, done } = await project();
+    try {
+      await fsp.chmod(locked, 0o000);
+      // Running as root, or on a filesystem that ignores permissions, this cannot be set up.
+      // Saying so is better than passing on a machine where the fixture did nothing.
+      let stillReadable = true;
+      try {
+        await fsp.readdir(locked);
+      } catch {
+        stillReadable = false;
+      }
+      if (stillReadable) return t.skip('this machine can read a folder with no permissions on it, so the hole cannot be made here');
+
+      /** @type {{unreadable: {folder: string, why: string}[]}} */
+      const collect = { unreadable: [] };
+      const pages = await readPageRoutes(root, collect);
+
+      assert.deepEqual(pages.map((p) => p.url).sort(), ['/', '/orders'], 'the fixture has to actually hide two pages, or this proves nothing');
+      assert.equal(collect.unreadable.length, 1, 'the folder was skipped and nothing anywhere said so');
+      assert.match(collect.unreadable[0].folder, /admin/);
+      assert.match(collect.unreadable[0].why, /permission/i, 'a person has to be able to act on the reason, so it cannot be an error code');
+
+      const journeys = journeysFrom({ config: {}, pages, unreadable: collect.unreadable });
+      const hole = journeys.find((j) => j.skip);
+      assert.ok(hole, 'the engine turns a journey carrying skip into missing coverage, and that is the only route from here to the ledger');
+      assert.match(String(hole.skip), /admin/);
+      assert.match(String(hole.skip), /hole, not a pass/);
+    } finally {
+      await done();
+    }
+  });
+
+  test('two screens with one name are two screens, and neither is thrown away', () => {
+    const journeys = journeysFrom({
+      config: {
+        screens: [
+          { name: 'checkout', url: '/checkout' },
+          { name: 'checkout', url: '/checkout/pay' },
+        ],
+      },
+      pages: [],
+    });
+    assert.equal(journeys.length, 2, 'the second used to overwrite the first in a Map keyed by name, and the loser was never walked and never counted as a gap');
+    const opens = journeys.map((j) => /** @type {any[]} */ (j.steps)[0].goto).sort();
+    assert.deepEqual(opens, ['/checkout', '/checkout/pay']);
+  });
+
+  test('the same screen written down twice really is one screen', () => {
+    const journeys = journeysFrom({
+      config: {
+        screens: [{ name: 'checkout', url: '/checkout' }],
+        journeys: [{ name: 'checkout', url: '/checkout' }],
+      },
+      pages: [],
+    });
+    assert.equal(journeys.length, 1, 'folding two identical entries together loses nothing; numbering them would walk one screen twice');
+  });
+});
+
+
+describe('a desktop control cannot hide a change in its own text', () => {
+  /**
+   * One control out of Chrome's accessibility tree, with whatever text you give it.
+   *
+   * @param {string} own
+   * @param {string} [name]
+   * @returns {any[]}
+   */
+  const control = (own, name = 'Notes') => [
+    { role: { value: 'textbox' }, name: { value: name }, value: { value: own }, properties: [] },
+  ];
+
+  test('text that differs only past character 200 does not record identically', () => {
+    // It used to be kept as its first two hundred characters and nothing else — no length,
+    // no fingerprint — so a total at the end of a long field could change completely and the
+    // comparison saw two identical strings.
+    const head = 'x'.repeat(200);
+    const before = readMeaning(control(`${head}the order total is 10.00`));
+    const after = readMeaning(control(`${head}the order total is  0.00`));
+    assert.notDeepEqual(before, after, 'two different fields recorded the same string, so the run could only ever say nothing had changed');
+    assert.match(String(before[0].state.value), /bytes left out of the middle/, 'what was dropped has to be stated, not implied');
+    assert.equal(before[0].trimmed, true, 'the caller reports the remaining hole from this flag');
+  });
+
+  test('a change that makes long text longer is caught by the byte count alone', () => {
+    const head = 'x'.repeat(300);
+    const before = readMeaning(control(head));
+    const after = readMeaning(control(`${head}x`));
+    assert.notDeepEqual(before, after);
+  });
+
+  test('two long paragraphs are two addresses, not one', () => {
+    // The name is half of an address, and cutting an address merges two things into one.
+    const long = 'y'.repeat(400);
+    const one = readMeaning(control('', `${long}one`))[0];
+    const two = readMeaning(control('', `${long}two`))[0];
+    assert.notEqual(asAddress(one.address), asAddress(two.address));
+  });
+});
+
+
+describe('a phone check cannot stop counting without saying so', () => {
+  /**
+   * A tiny iPhone project: two controls named in the code, one of them behind a folder this
+   * account will not be allowed to open.
+   *
+   * @returns {Promise<{root: string, locked: string, done: () => Promise<void>}>}
+   */
+  const project = async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-ios-'));
+    await fsp.mkdir(path.join(root, 'Sources', 'Secret'), { recursive: true });
+    await fsp.writeFile(path.join(root, 'Sources', 'App.swift'), 'Button().accessibilityIdentifier("saveButton")\n');
+    await fsp.writeFile(path.join(root, 'Sources', 'Secret', 'Pay.swift'), 'Button().accessibilityIdentifier("payButton")\n');
+    const locked = path.join(root, 'Sources', 'Secret');
+    return {
+      root,
+      locked,
+      done: async () => {
+        await fsp.chmod(locked, 0o755).catch(() => {});
+        await fsp.rm(root, { recursive: true, force: true });
+      },
+    };
+  };
+
+  test('a folder that will not open is named, and the controls behind it are a hole in the ledger', async (t) => {
+    const { root, locked, done } = await project();
+    try {
+      await fsp.chmod(locked, 0o000);
+      let stillReadable = true;
+      try {
+        await fsp.readdir(locked);
+      } catch {
+        stillReadable = false;
+      }
+      if (stillReadable) return t.skip('this machine can read a folder with no permissions on it, so the hole cannot be made here');
+
+      const read = await readDeclaredDoors(root);
+      assert.deepEqual(read.doors.map((d) => d.id), ['saveButton'], 'the fixture has to actually hide a control, or this proves nothing');
+      assert.equal(read.limits.length, 1);
+      assert.match(read.limits[0], /Secret/);
+      assert.match(read.limits[0], /permission/i);
+
+      // The count of declared controls is the denominator the ledger measures a walk against,
+      // so a search that quietly missed a folder flatters every run made with it.
+      const holes = declaredObservations(
+        /** @type {any} */ ({
+          bundleId: 'com.example.app', name: 'App', version: '1.0', build: '1', minimumOS: '15.0',
+          deviceFamilies: ['iPhone'], urlSchemes: [], permissions: [], backgroundModes: [],
+        }),
+        read.doors,
+        'what-the-app-declares',
+        read.limits,
+      ).filter((o) => o.meta?.refused === true);
+      assert.equal(holes.length, 1, 'a limit that changed the answer has to reach the coverage ledger, not only a sentence');
+      assert.match(String(holes[0].meta?.describe), /Secret/);
+    } finally {
+      await done();
+    }
+  });
+
+  test('stopping at the limit, or at a depth, is said out loud', async () => {
+    const { root, done } = await project();
+    try {
+      assert.match((await readDeclaredDoors(root, { limit: 0 })).limits.join(' '), /stopped after 0 named controls/);
+      assert.match((await readDeclaredDoors(root, { deepest: 0 })).limits.join(' '), /not looked in/);
+      assert.deepEqual((await readDeclaredDoors(root)).limits, [], 'a search that finished has nothing to report, or every run cries wolf');
+    } finally {
+      await done();
+    }
+  });
+
+  test('"no built app was found" says where the search stopped', async () => {
+    const { root, done } = await project();
+    try {
+      const found = await findAppBundle(root);
+      assert.equal(found.ok, false);
+      // Nothing was in the way here, so there is nothing to add. The point of the field is
+      // that when something IS in the way, the sentence changes.
+      assert.deepEqual(found.limits, []);
+      const shallow = await findAppBundle(root, {});
+      assert.equal(shallow.ok, false);
+      assert.doesNotMatch(shallow.why, /Where this search stopped/);
+    } finally {
+      await done();
+    }
+  });
+
+  test('the app\'s own interface tests are not offered a setting that does not exist', async (t) => {
+    if (process.platform !== 'darwin') return t.skip('detect stops before this on a machine that cannot run an iPhone app at all');
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-ios-tests-'));
+    try {
+      await fsp.mkdir(path.join(root, 'AppUITests'), { recursive: true });
+      await fsp.writeFile(
+        path.join(root, 'AppUITests', 'LoginTests.swift'),
+        'import XCTest\nclass LoginTests: XCTestCase { func testSignIn() { let app = XCUIApplication(); app.launch() } }\n',
+      );
+      const found = await iosAdapter.detect(/** @type {any} */ ({ root, config: {} }));
+      const about = found.missing.find((m) => /interface test/.test(m.what));
+      if (!about) return t.skip('this machine cannot run an iPhone app at all, so detect never gets as far as the tests');
+      // It used to end "put {"suite": {"scheme": "..."}} under "ios" in the settings and they
+      // become journeys". Nothing anywhere read that setting. Somebody following the sentence
+      // would have written it, seen the identical message next run, and had no way to tell
+      // whether the tool or their spelling was at fault.
+      assert.doesNotMatch(String(about.howToGet), /under "ios" in the settings/, 'a setting nothing reads must not be advertised');
+      assert.match(String(about.howToGet), /nothing to switch on/i);
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
     }
   });
 });

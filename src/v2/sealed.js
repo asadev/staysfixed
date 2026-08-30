@@ -296,26 +296,6 @@ export function classify(finding, opts = {}) {
 }
 
 /**
- * The same answer as a plain class name, for callers that already work in `FindingClass`.
- *
- * @param {Finding} finding
- * @param {ClassifyOptions} [opts]
- * @returns {FindingClass}
- */
-export function sealedClassOf(finding, opts = {}) {
-  return classify(finding, opts)?.class ?? 'ordinary';
-}
-
-/**
- * @param {Finding} finding
- * @param {ClassifyOptions} [opts]
- * @returns {boolean}
- */
-export function isSealed(finding, opts = {}) {
-  return classify(finding, opts) !== null;
-}
-
-/**
  * The refusal, written out for whoever reads it — an agent that has just been told no, or a
  * person reading the closing summary.
  *

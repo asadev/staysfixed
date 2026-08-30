@@ -264,9 +264,22 @@ export const OPTIONAL_RULES = [
 ];
 
 /**
- * A version stamp for the shipped set. Bump it when the defaults change, so a stored capture
- * normalised under the old rules is not silently compared against one normalised under the new
- * ones — see `rulesFingerprint`, which is the mechanism that actually catches it.
+ * A version stamp for the shipped set, and a thing to be careful with.
+ *
+ * It is the prefix on every fingerprint, so bumping it does not mark one rule as changed — it
+ * marks EVERY stored capture in the world as normalised under different rules, all at once, and
+ * every project's next check reports "compared across a change to the normalisation rules" until
+ * somebody ships again. That is a large, silent cost for a number nobody thinks twice about.
+ *
+ * So bump it only when a change alters what a comparison SHOWS. There is already a way to add a
+ * rule without paying it, and it should be the first thing tried: ship the new rule `off: true`.
+ * The fingerprint hashes `activeRules` only, so a rule nobody has switched on does not move it,
+ * the rule is documented and copyable from the day it ships, and each project turns it on when
+ * it wants it — which is one project's stored record going stale rather than everyone's.
+ *
+ * A genuinely new `kind` is the case that cannot dodge it: an old copy of the tool meets a rule
+ * it does not know how to apply, and pretending the two are comparable would be worse than the
+ * churn. Bump it there, and say so in the changelog.
  */
 export const RULES_VERSION = 1;
 
@@ -325,10 +338,17 @@ export function assertRules(rules) {
  * Merge a project's rules over the shipped ones.
  *
  * Same id wins, so a project turns a default off by writing `{id, off: true}` and narrows one
- * by writing `{id, paths: [...]}` — no need to restate a rule to change one field of it.
+ * by writing `{id, paths: [...]}` — no need to restate a rule to change one field of it. The
+ * type says so too now; it used to promise whole rules only, which made the one shape the
+ * paragraph above recommends a type error.
+ *
+ * A part-rule whose id matches nothing is REFUSED rather than inserted. Inserted, it became a
+ * rule with no `kind`, which every branch of the walker skips — so a project that misspelled
+ * `clock.iso` got exactly the silence of a rule that was working perfectly, on the one file
+ * whose whole job is to be auditable.
  *
  * @param {NormaliseRule[]} base
- * @param {NormaliseRule[]} extra
+ * @param {(NormaliseRule | (Partial<NormaliseRule> & {id: string}))[]} extra
  * @returns {NormaliseRule[]}
  */
 export function mergeRules(base, extra) {
@@ -337,7 +357,14 @@ export function mergeRules(base, extra) {
   for (const rule of base) byId.set(rule.id, rule);
   for (const rule of extra) {
     const existing = byId.get(rule.id);
-    byId.set(rule.id, existing ? { ...existing, ...rule } : rule);
+    if (!existing && ruleProblem(rule)) {
+      throw new StaysFixedError(`There is no normalisation rule called "${rule.id}" to change.`, {
+        hint: 'Check the spelling against the rule list, or write the whole rule out if you meant to add a new one.',
+      });
+    }
+    // Cast, because the refusal above is what proves it: an entry with no rule to merge
+    // into has already been through ruleProblem and come back clean, so it is a whole rule.
+    byId.set(rule.id, existing ? { ...existing, ...rule } : /** @type {NormaliseRule} */ (rule));
   }
   return [...byId.values()];
 }
@@ -352,32 +379,143 @@ export function activeRules(rules) {
 }
 
 /**
- * A short fingerprint of a rule set.
+ * A short fingerprint of what a rule set DOES.
  *
  * Stored on every capture. Comparing a capture normalised under one set of rules against one
- * normalised under another is meaningless — the differences you see are the rules changing,
- * not the product — and this is what lets the run notice and say so.
+ * normalised under another is meaningless — the differences you see are the rules changing, not
+ * the product — and this is what lets the run notice and say so.
+ *
+ * Two things are deliberately NOT in it, and both were bugs before they were decisions.
+ *
+ * WHERE A RULE APPLIES IS NOT WHAT IT DOES. `paths`, `channels` and `at` are scope. A rule that
+ * learns one more address goes on tidying everything it already tidied in exactly the same way,
+ * so a stored comparison is not suspect and saying it is spends the reader's attention on
+ * nothing. Scope is stamped separately by `rulesScope` and reported in its own quieter words,
+ * because a rule reaching a NEW address genuinely can start hiding something there and the
+ * honest thing is to name the address rather than to shrug or to shout.
+ *
+ * A FACT ABOUT THIS MACHINE IS NOT A RULE. `machineRules` builds patterns out of where the
+ * project is checked out, where home is, and what temp folder this machine handed out — and one
+ * of those is a fresh mkdtemp on every single run. Hashing those patterns made this fingerprint
+ * change on every run of the same binary, so the "the rules changed" caveat fired forever, on
+ * runs where nothing had changed at all, and never healed. It also emptied the caveat of
+ * meaning, which is worse: a warning that is always on is a warning nobody reads on the day it
+ * is true. Those rules go in by `id` and `kind` alone. The test is not "is this rule identical"
+ * but "would a change to it change what a comparison shows", and two machines both rewriting
+ * their own checkout to `<project>` produce the same normalised value.
  *
  * @param {NormaliseRule[]} rules
  * @returns {string}
  */
 export function rulesFingerprint(rules) {
   const active = activeRules(rules)
-    .map((r) => ({
-      id: r.id,
-      kind: r.kind,
-      pattern: r.pattern ?? '',
-      flags: r.flags ?? '',
-      with: r.with ?? '',
-      digits: r.digits ?? 0,
-      keys: r.keys ?? false,
-      numbers: r.numbers ?? false,
-      paths: [...(r.paths ?? [])].sort(),
-      channels: [...(r.channels ?? [])].sort(),
-      at: [...(r.at ?? [])].sort(),
-    }))
+    .map((r) =>
+      r.machine
+        ? { id: r.id, kind: r.kind, machine: true }
+        : {
+            id: r.id,
+            kind: r.kind,
+            pattern: r.pattern ?? '',
+            flags: r.flags ?? '',
+            with: r.with ?? '',
+            digits: r.digits ?? 0,
+            keys: r.keys ?? false,
+            numbers: r.numbers ?? false,
+          })
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return `v${RULES_VERSION}-${sha256(JSON.stringify(active)).slice(0, 12)}`;
+}
+
+/**
+ * Where each switched-on rule applies, as data rather than as a hash.
+ *
+ * Kept readable on purpose. The fingerprint can be a hash because the only question ever asked
+ * of it is "same or not"; scope has to answer "what is covered now that was not covered before",
+ * and no hash can. It is small — a handful of globs on a handful of rules — and it is what turns
+ * "the rules changed" into "this rule now also covers screen.checkout.total".
+ *
+ * @param {NormaliseRule[]} rules
+ * @returns {Record<string, string[]>}  Rule id to its globs, sorted. Rules that apply everywhere
+ *                                     are left out: an unscoped rule has nothing to say here.
+ */
+export function rulesScope(rules) {
+  /** @type {Record<string, string[]>} */
+  const scope = {};
+  for (const rule of activeRules(rules)) {
+    const where = [
+      ...(rule.paths ?? []),
+      ...(rule.channels ?? []).map((c) => `channel:${c}`),
+      ...(rule.at ?? []).map((a) => `inside:${a}`),
+    ].sort();
+    if (where.length > 0) scope[rule.id] = where;
+  }
+  return scope;
+}
+
+/**
+ * What actually changed between the rules a stored capture was tidied by and today's.
+ *
+ * This exists because the caveat it feeds used to print two hashes. An agent reading
+ * "v1-fcf4b8000217 versus v1-29141a9ec069" can do nothing with either of them — it cannot tell
+ * whether to distrust the comparison, re-run it, or ignore the line, so it ignores the line.
+ *
+ * The three answers are different sizes of news and are said as such:
+ *   behaviour changed  A rule now rewrites something differently. The comparison IS suspect.
+ *   scope changed      A rule reaches somewhere it did not. Only that address is suspect, and
+ *                      it is named, because "somewhere" is not something anybody can act on.
+ *   scope unknown      The stored capture predates the scope stamp. Say that, rather than
+ *                      diffing against an empty object and reporting every glob as new.
+ *
+ * @param {{fingerprint?: string, scope?: Record<string, string[]>}} before  From the stored capture.
+ * @param {{fingerprint?: string, scope?: Record<string, string[]>}} after   From this run.
+ * @returns {{same: boolean, behaviourChanged: boolean, scopeChanged: boolean, addressesNewlyCovered: string[], say: string}}
+ */
+export function describeRuleChange(before, after) {
+  const none = { same: true, behaviourChanged: false, scopeChanged: false, addressesNewlyCovered: [], say: '' };
+  if (!before.fingerprint || !after.fingerprint) return none;
+
+  const behaviourChanged = before.fingerprint !== after.fingerprint;
+  const knowScope = before.scope !== undefined && after.scope !== undefined;
+
+  /** @type {string[]} */
+  const newlyCovered = [];
+  if (knowScope) {
+    const was = /** @type {Record<string, string[]>} */ (before.scope);
+    const now = /** @type {Record<string, string[]>} */ (after.scope);
+    for (const [id, globs] of Object.entries(now)) {
+      const had = new Set(was[id] ?? []);
+      for (const glob of globs) if (!had.has(glob)) newlyCovered.push(`${id} now also covers ${glob}`);
+    }
+    // A rule that STOPPED covering an address can only show differences that were being hidden,
+    // which is the safe direction and not worth a line of anybody's attention.
+  }
+  const scopeChanged = newlyCovered.length > 0;
+
+  if (!behaviourChanged && !scopeChanged) {
+    return { ...none, same: !behaviourChanged && !scopeChanged };
+  }
+
+  /** @type {string[]} */
+  const parts = [];
+  if (behaviourChanged) {
+    parts.push(
+      'A normalisation rule rewrites something differently now than when the old build was recorded, '
+      + 'so some of what you see below may be the rules changing rather than the product, and a rule '
+      + 'that grew stricter since could be covering something up.',
+    );
+  }
+  if (scopeChanged) {
+    const named = newlyCovered.slice(0, 4).join('; ');
+    const more = newlyCovered.length > 4 ? `, and ${newlyCovered.length - 4} more` : '';
+    parts.push(
+      `A rule reaches somewhere it did not reach before: ${named}${more}. Everything else compares `
+      + 'normally; only what those cover could be quieter than it should be.',
+    );
+  } else if (behaviourChanged && !knowScope) {
+    parts.push('The old record predates the scope stamp, so which addresses each rule covered then cannot be compared.');
+  }
+
+  return { same: false, behaviourChanged, scopeChanged, addressesNewlyCovered: newlyCovered, say: parts.join(' ') };
 }
 
 /**
@@ -427,6 +565,7 @@ export function machineRules(where) {
       wouldHide: 'Nothing about the product. It only ever replaces a prefix that is a fact about the machine.',
       pattern: literal(where.root),
       with: '<project>',
+      machine: true,
     });
   }
   if (where.home) {
@@ -438,6 +577,7 @@ export function machineRules(where) {
       wouldHide: 'The username, where a product shows it deliberately.',
       pattern: literal(where.home),
       with: '<home>',
+      machine: true,
     });
   }
   if (where.tmp) {
@@ -449,6 +589,7 @@ export function machineRules(where) {
       wouldHide: 'Nothing the product decides.',
       pattern: literal(where.tmp),
       with: '<temp>',
+      machine: true,
     });
   }
   return rules;
@@ -501,7 +642,11 @@ const rxCache = new Map();
  * @returns {RegExp}
  */
 function regexFor(pattern, flags) {
-  const key = `${flags} ${pattern}`;
+  // Written as the escape, never as the byte itself. A raw NUL in a source file makes grep,
+  // ripgrep and file(1) call the whole file binary and skip it in silence, so every audit that
+  // searches this tree stops seeing this module. That is how a dead export in here survived a
+  // sweep that was looking straight at it.
+  const key = `${flags}\u0000${pattern}`;
   let rx = rxCache.get(key);
   if (!rx) {
     rx = new RegExp(pattern, flags);
@@ -625,6 +770,7 @@ export function normaliseCapture(capture, rules) {
     ...capture,
     observations: capture.observations.map((o) => normaliseObservation(o, rules)),
     rules: rulesFingerprint(rules),
+    rulesScope: rulesScope(rules),
   };
 }
 

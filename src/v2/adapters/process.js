@@ -36,13 +36,16 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   defineAdapter, howLongItTook, joinPath, notCovered, observation, sizeBucket,
   trimForStorage, undoOurFootprint,
 } from './contract.js';
+// The harvest writes the test-file steps this adapter walks, and it owns reading a runner's
+// output back. One place on purpose: a journey read differently from the way it was
+// harvested is not the same journey.
+import { quietenRunnerOutput, readChecks } from '../journeys/from-suite.js';
 
 // ---------------------------------------------------------------------------
 // The environment every run gets
@@ -150,16 +153,30 @@ export function watcherScript(opts) {
     "} catch { /* no child_process, nothing to watch */ }",
     "",
     "// --- what it tried to reach ----------------------------------------------",
-    "const loopback = new Set(['127.0.0.1', '::1', 'localhost', '0.0.0.0', '']);",
+    "const loopback = new Set(['127.0.0.1', '::1', 'localhost', '0.0.0.0']);",
     "try {",
     "  const net = require('node:net');",
     "  const connect = net.Socket.prototype.connect;",
     "  net.Socket.prototype.connect = function (...args) {",
-    "    const first = args[0];",
-    "    const host = typeof first === 'object' && first !== null ? String(first.host ?? first.path ?? '') : String(args[1] ?? '');",
-    "    const port = typeof first === 'object' && first !== null ? first.port : first;",
-    "    const local = loopback.has(host) || (typeof first === 'object' && first !== null && first.path);",
+    "    // Node normalises the arguments before they ever reach here, so what arrives is",
+    "    // usually the ARRAY [options, callback] and not the port and host somebody typed.",
+    "    // Reading `.host` off that array gives undefined, and an empty host used to mean",
+    "    // 'nowhere named, therefore this machine' - so every fetch, every http.get and every",
+    "    // net.connect walked straight out through a boundary that then reported nothing at",
+    "    // all. Measured on 2026-08-30: all three got a 200 back from the open internet and",
+    "    // the watcher's report was empty. Unwrap it first, and treat a shape nobody",
+    "    // recognises as somewhere to refuse rather than somewhere to allow, because a",
+    "    // boundary that fails open is not a boundary.",
+    "    const given = Array.isArray(args[0]) ? args[0][0] : args[0];",
+    "    const options = typeof given === 'object' && given !== null ? given : null;",
+    "    const host = options ? String(options.host ?? '') : String(args[1] ?? '');",
+    "    const port = options ? options.port : given;",
+    "    const readable = options !== null || typeof given === 'number' || typeof given === 'string';",
+    "    // A socket file is on this machine by definition, and a port with no host beside it",
+    "    // is the one case where 'nowhere named' really does mean here.",
+    "    const local = Boolean(options && options.path) || (readable && (host === '' || loopback.has(host)));",
     "    if (local && settings.allowLoopback) return connect.apply(this, args);",
+
     "    write('reached out', { host: host || 'somewhere it did not name', port: port ?? null });",
     "    // Refused, not allowed through. Whatever this was going to do out there, it does not",
     "    // do it twice, and the run is reported as having a hole rather than as having passed.",
@@ -177,9 +194,27 @@ export function watcherScript(opts) {
     "const settingsRead = new Set();",
     "try {",
     "  const real = process.env;",
+    "  const note = (key) => { if (typeof key === 'string') settingsRead.add(key); };",
+    "  // EVERY trap forwards, and every trap that changes something forwards with the TARGET",
+    "  // as the receiver. A proxy carrying only the traps we happen to care about is not a",
+    "  // window, it is a wall with a window in it. With no `set` trap, `process.env.X = 'y'`",
+    "  // takes the default, which reflects onto the PROXY, which lands on defineProperty",
+    "  // against Node's own env object and quietly does nothing at all. npm sets",
+    "  // npm_lifecycle_event and its npm_config_ family that way, reads them back, finds",
+    "  // nothing and exits 1 without printing one word - so every product whose start command",
+    "  // went through npm died here, and the report said, in good faith, that the product",
+    "  // would not boot. `staysfixed init` writes `npm run start` by default, so this was the",
+    "  // default path. Found by installing the published copy and pointing it at an ordinary",
+    "  // Express app.",
     "  const watched = new Proxy(real, {",
-    "    get(target, key) { if (typeof key === 'string') settingsRead.add(key); return target[key]; },",
-    "    has(target, key) { if (typeof key === 'string') settingsRead.add(key); return key in target; },",
+    "    get(target, key) { note(key); return Reflect.get(target, key); },",
+    "    has(target, key) { note(key); return Reflect.has(target, key); },",
+    "    set(target, key, value) { return Reflect.set(target, key, value); },",
+    "    deleteProperty(target, key) { return Reflect.deleteProperty(target, key); },",
+    "    ownKeys(target) { return Reflect.ownKeys(target); },",
+    "    getOwnPropertyDescriptor(target, key) { return Reflect.getOwnPropertyDescriptor(target, key); },",
+    "    defineProperty(target, key, descriptor) { return Reflect.defineProperty(target, key, descriptor); },",
+    "    getPrototypeOf(target) { return Reflect.getPrototypeOf(target); },",
     "  });",
     "  Object.defineProperty(process, 'env', { value: watched, configurable: true, writable: true });",
     "} catch { /* some hosts freeze this; the other channels still work */ }",
@@ -197,6 +232,7 @@ export function watcherScript(opts) {
  * @property {Map<string, number>} ran     Command as written, and how many times.
  * @property {Array<{host: string, port: number|null}>} reachedOut
  * @property {string[]} settingsRead
+ * @property {number} torn                 Lines of the report that could not be read back.
  */
 
 /**
@@ -207,7 +243,7 @@ export function watcherScript(opts) {
  */
 export async function readWatcher(reportFile) {
   /** @type {WatchedEvents} */
-  const seen = { inForce: false, ran: new Map(), reachedOut: [], settingsRead: [] };
+  const seen = { inForce: false, ran: new Map(), reachedOut: [], settingsRead: [], torn: 0 };
   let text;
   try {
     text = await fsp.readFile(reportFile, 'utf8');
@@ -218,7 +254,9 @@ export async function readWatcher(reportFile) {
   for (const line of text.split('\n')) {
     if (line.trim() === '') continue;
     let event;
-    try { event = JSON.parse(line); } catch { continue; }
+    // A half-written line is a program that started or a host that was reached and is now
+    // reported as neither. Counted, so the run can say it saw less than it saw.
+    try { event = JSON.parse(line); } catch { seen.torn += 1; continue; }
     if (event.kind === 'ran') {
       const command = String(event.what?.command ?? '');
       seen.ran.set(command, (seen.ran.get(command) ?? 0) + 1);
@@ -243,25 +281,111 @@ export async function readWatcher(reportFile) {
 
 /** @typedef {Map<string, string>} TreeSnapshot   relative path -> fingerprint of its contents */
 
-/** Folders left out of a snapshot: enormous, and not what anybody means by "it wrote a file". */
-const SNAPSHOT_SKIP = new Set(['node_modules', '.git', '.staysfixed']);
+/**
+ * Folders left out of a snapshot: enormous, and not what anybody means by "it wrote a file".
+ *
+ * `node_modules` is the one that had to be argued out rather than assumed. A build step that
+ * writes in there — a patch, a generated client, a native rebuild — is a real change to what
+ * ships, and leaving it out means that change is invisible. It stays out anyway, because
+ * fingerprinting thirty thousand files twice per journey per build turns a check that takes
+ * seconds into one that takes minutes, and a check nobody runs catches nothing.
+ *
+ * What is NOT acceptable is skipping it quietly. Every run says which folders it did not
+ * watch, as missing coverage rather than as a clean result, and `process.alsoWatch` takes any
+ * of these back off the list for a project that needs it. See `snapshotSkip`.
+ */
+export const SNAPSHOT_SKIP = new Set(['node_modules', '.git', '.staysfixed']);
+
+/**
+ * The folders this run will not watch, after the project has had its say.
+ *
+ * @param {Record<string, unknown>|undefined} config   The `process` section of the settings.
+ * @returns {Set<string>}
+ */
+export function snapshotSkip(config) {
+  const skip = new Set(SNAPSHOT_SKIP);
+  const alsoWatch = Array.isArray(config?.alsoWatch) ? config.alsoWatch : [];
+  for (const name of alsoWatch) skip.delete(String(name));
+  return skip;
+}
+
+/** A file recorded by its size because hashing it would have meant reading past the ceiling. */
+export const BY_SIZE_ALONE = 'compared by size alone, ';
+
+/** A file or folder nothing could read. Kept in the snapshot so it is never a silence. */
+export const COULD_NOT_READ = 'could not be looked at: ';
+
+/**
+ * Why a path would not open, in words rather than in an errno.
+ * @param {unknown} error
+ * @returns {string}
+ */
+function whyItWouldNotOpen(error) {
+  const code = String(/** @type {{code?: unknown}} */ (error)?.code ?? '');
+  if (code === 'EACCES' || code === 'EPERM') return 'no permission to read it';
+  if (code === 'EIO') return 'the disk would not answer';
+  if (code === 'ELOOP') return 'the symlinks point at each other';
+  if (code === 'EMFILE' || code === 'ENFILE') return 'this machine ran out of open files';
+  if (code === 'ENAMETOOLONG') return 'the name is longer than this machine allows';
+  if (code !== '') return code;
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A path that is simply not there any more was not there to begin with. */
+const isGone = (/** @type {unknown} */ error) => {
+  const code = String(/** @type {{code?: unknown}} */ (error)?.code ?? '');
+  return code === 'ENOENT' || code === 'ENOTDIR';
+};
+
+/**
+ * Fingerprint one file that is bigger than the read-it-all-at-once limit.
+ *
+ * Streamed rather than read into memory, so the size of the file is the machine's problem and
+ * not this process's. There is still a ceiling, because a file measured in tens of gigabytes
+ * would be read twice per journey per build and nobody would wait for it — and above that
+ * ceiling the answer is the size bucket, with the marker that says so, so the run can report
+ * it as a hole instead of as a match.
+ *
+ * @param {string} file
+ * @param {number} size
+ * @param {number} ceilingBytes
+ * @returns {Promise<string>}
+ */
+async function fingerprintBigFile(file, size, ceilingBytes) {
+  if (size > ceilingBytes) return `${BY_SIZE_ALONE}${sizeBucket(size)}`;
+  const hash = crypto.createHash('sha256');
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
+  return hash.digest('hex').slice(0, 16);
+}
 
 /**
  * Fingerprint every file under a folder.
  *
  * By CONTENTS, never by timestamp or size. A run that rewrites a file with the same bytes
  * has not changed anything, and reporting it as a change is how a tool teaches people to
- * ignore it. Files too big to hash are recorded by size with a note, so they still show a
- * change when they grow, and they say what they are.
+ * ignore it.
+ *
+ * A big file is streamed rather than bucketed. It used to be recorded as "too big to
+ * fingerprint, tens of megabytes", which meant a build that wrote a COMPLETELY DIFFERENT
+ * forty-megabyte bundle compared equal to the old one as long as the size landed in the same
+ * bucket — the exact file a bundler rewrites, silently passing. Reading a large file is cheap
+ * next to running the whole product twice, so it is read.
+ *
+ * Anything that cannot be read at all — a folder with no permission on it, a disk that will
+ * not answer — goes into the snapshot as its own entry rather than being dropped. Dropping a
+ * folder takes everything under it with it, and a file nobody looked at cannot be seen
+ * changing; the run reports those as holes.
  *
  * @param {string} root
  * @param {object} [opts]
- * @param {number} [opts.maxBytes]     Hash files up to this size. Default 8MB.
+ * @param {number} [opts.maxBytes]     Read files up to this size in one go. Default 8MB.
+ * @param {number} [opts.ceilingBytes] Above this, record the size instead of hashing. Default 4GB.
  * @param {Set<string>} [opts.skip]
  * @returns {Promise<TreeSnapshot>}
  */
 export async function snapshotTree(root, opts = {}) {
   const maxBytes = opts.maxBytes ?? 8 * 1024 * 1024;
+  const ceilingBytes = opts.ceilingBytes ?? 4 * 1024 * 1024 * 1024;
   const skip = opts.skip ?? SNAPSHOT_SKIP;
   /** @type {TreeSnapshot} */
   const snapshot = new Map();
@@ -270,7 +394,19 @@ export async function snapshotTree(root, opts = {}) {
   const walk = async (dir) => {
     /** @type {import('node:fs').Dirent[]} */
     let entries;
-    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      // A folder that will not open used to be dropped here without a word, and everything
+      // under it with it — so a file inside it could be created, rewritten or deleted and the
+      // run would report the folder as unchanged. It goes in the snapshot instead, and
+      // `describeRun` reports it as a hole.
+      if (!isGone(error)) {
+        const at = path.relative(root, dir);
+        snapshot.set(at === '' ? '.' : at, `${COULD_NOT_READ}${whyItWouldNotOpen(error)}`);
+      }
+      return;
+    }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -285,12 +421,15 @@ export async function snapshotTree(root, opts = {}) {
       if (!entry.isFile()) continue;
       try {
         const stat = await fsp.stat(full);
-        if (stat.size > maxBytes) {
-          snapshot.set(relative, `too big to fingerprint, ${sizeBucket(stat.size)}`);
-          continue;
-        }
-        snapshot.set(relative, crypto.createHash('sha256').update(await fsp.readFile(full)).digest('hex').slice(0, 16));
-      } catch { /* a file that vanished mid-walk was not there to begin with */ }
+        snapshot.set(relative, stat.size > maxBytes
+          ? await fingerprintBigFile(full, stat.size, ceilingBytes)
+          : crypto.createHash('sha256').update(await fsp.readFile(full)).digest('hex').slice(0, 16));
+      } catch (error) {
+        // A file that vanished between the listing and the read was not there to begin with.
+        // Anything else is a file nobody looked at, and staying quiet about it reads exactly
+        // like "it did not change".
+        if (!isGone(error)) snapshot.set(relative, `${COULD_NOT_READ}${whyItWouldNotOpen(error)}`);
+      }
     }
   };
 
@@ -337,6 +476,10 @@ export function compareTrees(before, after) {
  * @property {string|null} signal    Set when it was killed rather than finishing.
  * @property {boolean} timedOut
  * @property {number} ms
+ * @property {string} [couldNotStart]  Why the command never ran at all. A missing exit code
+ *                                     means two different things without this — killed, or
+ *                                     never started — and the second one compares equal on
+ *                                     both builds, which reads exactly like a clean run.
  */
 
 /**
@@ -377,6 +520,9 @@ export function runCommand(command, opts) {
     if (opts.stdin !== undefined) child.stdin?.end(opts.stdin);
     else child.stdin?.end();
 
+    /** @type {string|undefined} */
+    let couldNotStart;
+
     const finish = (/** @type {number|null} */ code, /** @type {string|null} */ signal) => {
       if (settled) return;
       settled = true;
@@ -390,6 +536,7 @@ export function runCommand(command, opts) {
         signal,
         timedOut,
         ms: Date.now() - started,
+        ...(couldNotStart ? { couldNotStart } : {}),
       });
     };
 
@@ -405,6 +552,10 @@ export function runCommand(command, opts) {
     opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     child.on('error', (error) => {
+      // Nothing ran. Said out loud rather than folded into "exit code null", which is what a
+      // killed run also looks like — and which is identical on both builds, so the comparison
+      // saw no difference and the run passed for the worst possible reason.
+      couldNotStart = error.message;
       err.push(Buffer.from(`${error.message}\n`));
       finish(null, null);
     });
@@ -591,6 +742,73 @@ function cloneOne(source, target, signal) {
  * @property {string} module               A path inside the project, or a package entry name.
  */
 
+/**
+ * The command a run line actually opens, named the way the code reader names it.
+ *
+ * These two lists only ever meet here. A command door is read out of package.json and comes
+ * out as either `staysfixed` (something the package installs) or `npm run build` (a script),
+ * while a journey is named by whoever wrote the settings — "build the app". So a journey
+ * carrying nothing but its own name matched no door at all.
+ *
+ * `pnpm run build` opens the same door as `npm run build`, because the door is the script in
+ * package.json and the package manager standing in front of it is not a second door.
+ *
+ * A line this cannot read plainly — a pipeline, a shell one-liner, anything with an operator
+ * in it — gets null instead of a guess. Missing a walked command leaves a job on the queue;
+ * naming the wrong one marks a door walked that nobody touched, and that is the single
+ * direction the coverage ledger is never allowed to be wrong in.
+ *
+ * @param {string} run   The command line, exactly as the settings wrote it.
+ * @returns {string|null}
+ */
+export function commandDoorName(run) {
+  const line = String(run ?? '').trim();
+  if (line === '') return null;
+  // An operator means the line runs more than one thing, and this cannot say which of them
+  // the door is.
+  if (/[|;&<>`$]/.test(line)) return null;
+  const words = line.split(/\s+/);
+  // FOO=bar in front of a command is the environment it runs in, not the command.
+  while (words.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) words.shift();
+  // A runner in front fetches or finds the real command and then runs it; the door is what
+  // comes after it.
+  while (words.length > 1 && (/^(npx|bunx)$/.test(words[0]) || (/^(pnpm|yarn|bun|npm)$/.test(words[0]) && /^(exec|dlx)$/.test(words[1])))) {
+    words.splice(0, words[0] === 'npx' || words[0] === 'bunx' ? 1 : 2);
+  }
+  // Flags to the runner itself — `npx --yes staysfixed` — belong to the runner.
+  while (words.length > 1 && words[0].startsWith('-')) words.shift();
+  if (words.length === 0) return null;
+  const program = path.basename(words[0]);
+  const rest = words.slice(1).filter((w) => !w.startsWith('-'));
+  if (/^(npm|pnpm|yarn|bun)$/.test(program)) {
+    if (words[1] === 'run' && rest[1]) return `npm run ${rest[1]}`;
+    // npm's own shorthands for four scripts. `yarn <anything>` is deliberately not read this
+    // way: with yarn a bare word may be a script or a command, and this cannot tell.
+    if (program !== 'yarn' && rest[0] && /^(test|start|stop|restart)$/.test(rest[0])) return `npm run ${rest[0]}`;
+    return null;
+  }
+  // An interpreter with something after it is running that something, and the door is whatever
+  // that file installs as — which this cannot know. Null, rather than reporting a door called
+  // "node" that the code reader never found.
+  if (words.length > 1 && /^(node|deno|sh|bash|zsh|dash|env|python|python3|ruby|perl)$/.test(program)) return null;
+  return program;
+}
+
+/**
+ * The door fields a command journey's step carries, or nothing when the command line is not
+ * plain enough to name one honestly. `door` in the settings overrides the reading, which is
+ * the way out for a project whose command line this cannot make sense of.
+ *
+ * @param {Record<string, unknown>} entry
+ * @returns {{door: string, kind: 'command'}|{}}
+ */
+function doorFields(entry) {
+  const named = typeof entry.door === 'string' && entry.door.trim() !== ''
+    ? entry.door.trim()
+    : commandDoorName(String(entry.run ?? ''));
+  return named ? { door: named, kind: /** @type {const} */ ('command') } : {};
+}
+
 /** Everything a prepared build needs to remember between journeys. */
 const prepared = new Map();
 
@@ -601,7 +819,7 @@ export const processAdapter = defineAdapter({
   name: 'process',
   title: 'CLI tools and libraries',
   describe:
-    'Runs a command, or imports a module, in a scratch copy of the project and reports what it printed, what it exited with, every file it created or changed, every program it started, every outbound connection it tried — all of which are refused — and roughly how long it took. Outbound calls and started programs are only visible when the thing being run is Node; for anything else those two channels are reported as not checked rather than as clean.',
+    'Runs a command, imports a module, or walks one of the project\'s own test files, in a scratch copy of the project — and reports what it printed, what it exited with, every file it created or changed, every program it started, every outbound connection it tried — all of which are refused — and roughly how long it took. A test file also reports each of its checks by name and why any failing one failed, so a check that goes red on the new build alone names itself. Outbound calls and started programs are only visible when the thing being run is Node; for anything else those two channels are reported as not checked rather than as clean.',
   channels: ['results', 'complaints', 'effects', 'counters'],
 
   /** @param {import('./contract.js').AdapterProject} project */
@@ -655,7 +873,17 @@ export const processAdapter = defineAdapter({
         surface: 'cli',
         from: 'the project config',
         channels: ['results', 'complaints', 'effects', 'counters'],
-        steps: [{ act: 'run', run: String(entry.run), cwd: entry.cwd, stdin: entry.stdin, env: entry.env }],
+        // `door` and `kind` are how the coverage ledger learns this journey ran that command.
+        // Without them a command counted as walked only if an observation landed at its own
+        // address, and this adapter writes everything under `cli.<journey name>` — so
+        // {"name": "build the app", "run": "npm run build"} produced `cli.build the app.*`
+        // against a door addressed `cli.npm run build`, and every command in the project read
+        // as never walked on a run that had just walked all of them. The address rule cannot
+        // rescue this one: it is switched off for commands on purpose.
+        steps: [{
+          act: 'run', run: String(entry.run), cwd: entry.cwd, stdin: entry.stdin, env: entry.env,
+          ...doorFields(entry),
+        }],
         irreversible: entry.irreversible === true,
         timeoutMs: entry.timeoutMs,
       });
@@ -668,6 +896,11 @@ export const processAdapter = defineAdapter({
         surface: 'library',
         from: 'the project config',
         channels: ['results', 'complaints', 'effects', 'counters'],
+        // No `door` here on purpose, and it was checked rather than assumed: `apiSurface`
+        // writes every exported name at `export.<journey name>.<name>`, which is exactly the
+        // branch the ledger already reads exports through, so these doors open on their own.
+        // Naming the module as the door instead would claim a door of that name that the code
+        // reader never found.
         steps: [{ act: 'import', module: String(entry.module) }],
         timeoutMs: entry.timeoutMs,
       });
@@ -766,15 +999,23 @@ export const processAdapter = defineAdapter({
       extra: {
         ...step.env,
         // `--import` is how a module gets to run before anything else does. It is appended
-        // rather than assigned so a project that needs its own options keeps them.
-        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import ${pathToUrl(places.watcher)}`.trim(),
+        // rather than assigned so a project that needs its own options keeps them — and the
+        // journey's own NODE_OPTIONS is the one that has to survive, which it did not: this
+        // line spread `step.env` and then overwrote it with the OUTER machine's value, so a
+        // journey that asked for `--max-old-space-size` got the comment's promise and none of
+        // its behaviour.
+        NODE_OPTIONS: `${step.env?.NODE_OPTIONS ?? process.env.NODE_OPTIONS ?? ''} --import ${pathToUrl(places.watcher)}`.trim(),
       },
     });
 
     // A step that names nothing to run must say so. Handing `undefined` to a shell runs a
     // command called "undefined", which fails identically on both builds and therefore
     // reports NO difference - a silent nothing that looks exactly like a clean check.
-    const nothingToRun = step.act === 'import' ? !step.module : !step.run;
+    const nothingToRun = step.act === 'import'
+      ? !step.module
+      : step.act === 'run-tests'
+        ? !step.file || !(step.command || step.run)
+        : !step.run;
     if (nothingToRun) {
       return [notCovered({
         channel: 'results',
@@ -782,22 +1023,53 @@ export const processAdapter = defineAdapter({
         reason: 'refused',
         says:
           `"${journey.describe}" says nothing to run. A command journey needs a "run" with the command line in it, ` +
-          `and an import journey needs a "module". Nothing was run, and that is a hole, not a pass.`,
+          `an import journey needs a "module", and a test-file journey needs the "file" it walks and the command ` +
+          `that runs it. Nothing was run, and that is a hole, not a pass.`,
       })];
     }
 
-    const before = await snapshotTree(places.work);
+    const runner = /** @type {import('../journeys/from-suite.js').Runner} */ (step.runner ?? 'node:test');
+    // The same list for both snapshots, and handed on to the report: a folder that is not
+    // watched has to be named in the run that did not watch it, not left to be discovered.
+    const skip = snapshotSkip(ctx.config);
+    const before = await snapshotTree(places.work, { skip });
     const result = step.act === 'import'
       ? await runCommand(importProbeCommand(String(step.module)), { cwd, env, timeoutMs: journey.timeoutMs ?? 60000, signal: ctx.signal })
-      : await runCommand(String(step.run), { cwd, env, timeoutMs: journey.timeoutMs ?? 120000, stdin: step.stdin, signal: ctx.signal });
-    const after = await snapshotTree(places.work);
+      : step.act === 'run-tests'
+        ? await runCommand(testFileCommand(step), { cwd, env, timeoutMs: journey.timeoutMs ?? 120000, signal: ctx.signal })
+        : await runCommand(String(step.run), { cwd, env, timeoutMs: journey.timeoutMs ?? 120000, stdin: step.stdin, signal: ctx.signal });
+    const after = await snapshotTree(places.work, { skip });
     const watched = await readWatcher(reportFile);
 
     const observations = await describeRun({
-      journey, result, before, after, watched, ctx,
+      journey, result, before, after, watched, ctx, skipped: [...skip].sort(),
       footprint: { dirs: [places.base, places.tmp, places.home], projectRoot: build.build.root },
+      // A test runner narrates its own stopwatch and nothing else moves between two runs of
+      // identical bytes, so taking the stopwatch out is what makes the whole of what it
+      // printed worth comparing. See `withoutRunnerTiming`.
+      quieten: step.act === 'run-tests' ? (text) => quietenRunnerOutput(runner, text) : undefined,
     });
     if (step.act === 'import') observations.push(...apiSurface(journey, result));
+    if (step.act === 'run-tests') {
+      observations.push(...(await suiteObservations({ journey, step, runner, result, root: places.work })));
+    }
+    // Only the first step is walked, and until now the rest were dropped without a word — a
+    // journey of three steps reported on one of them and read as a clean, complete walk.
+    // Nothing here builds a multi-step CLI journey today; a recording or an agent easily
+    // could, and a silent drop is how that arrives as a false pass.
+    const rest = (journey.steps ?? []).slice(1);
+    if (rest.length > 0) {
+      observations.push(notCovered({
+        channel: 'results',
+        path: joinPath('cli', journey.name, 'the rest of its steps'),
+        reason: 'not supported here',
+        says:
+          `"${journey.describe}" has ${rest.length + 1} steps and this adapter walks one command per journey, so ` +
+          `${rest.length} of them ${rest.length === 1 ? 'was' : 'were'} not walked: ` +
+          `${rest.map((/** @type {any} */ s) => s.run ?? s.module ?? s.file ?? s.act).join(', ')}. ` +
+          `Split them into a journey each. This is a hole, not a pass.`,
+      }));
+    }
     return observations;
   },
 
@@ -829,9 +1101,192 @@ export function importProbeCommand(moduleId) {
     "    : t === 'object' ? ('an object with ' + Object.keys(v).sort().join(', '))",
     "    : t === 'string' ? 'some text' : t;",
     "}",
-    "process.stdout.write(JSON.stringify(out, null, 2));",
+    "process.stdout.write('\\n' + " + JSON.stringify(EXPORTS_MARKER) + " + '\\n' + JSON.stringify(out, null, 2));",
   ].join('\n');
   return `node --input-type=module -e ${shellQuote(probe)} ${shellQuote(moduleId)}`;
+}
+
+/**
+ * How the probe's answer is told apart from anything the module printed on the way in.
+ *
+ * Without it the whole of stdout was handed to `JSON.parse`, so ONE line printed at import
+ * time — a dotenv banner, a deprecation warning, anything — made the parse fail, and the run
+ * then said "could not be imported, so nothing is known about what it exports". Both halves
+ * false: it imported perfectly, and its whole exported surface was sitting in the same
+ * string. Every export on that module read as never walked, which is the coverage ledger
+ * lying, and the API comparison that is the entire point of an import journey was off.
+ */
+const EXPORTS_MARKER = '<<< staysfixed: what it exports >>>';
+
+// ---------------------------------------------------------------------------
+// Walking a test file the harvest found
+// ---------------------------------------------------------------------------
+
+/**
+ * The command line for a test-file journey, exactly as it was harvested.
+ *
+ * The harvest wrote the program and its arguments down separately, and they are put back
+ * together with every part quoted, because a project with a space in its path is not a
+ * project this tool gets to be wrong about.
+ *
+ * ONE SUBSTITUTION, and only one. The program the harvest recorded is an absolute path to the
+ * Node binary on the machine that did the harvesting. A journey saved in a repository and
+ * walked on somebody else's laptop names a file that is not there, and the shell then fails
+ * the same way on BOTH builds - which produces no difference at all and reads exactly like a
+ * clean check. So a missing absolute Node is replaced with the Node running this, and
+ * anything else is left alone for the shell to find on the path.
+ *
+ * @param {{command?: string, argv?: string[], run?: string, file?: string}} step
+ * @returns {string}
+ */
+export function testFileCommand(step) {
+  if (!step.command) return String(step.run ?? '');
+  let program = String(step.command);
+  if (path.isAbsolute(program) && !exists(program) && /^node(\.exe)?$/.test(path.basename(program))) {
+    program = process.execPath;
+  }
+  return [program, ...(step.argv ?? []).map(String)].map(shellQuote).join(' ');
+}
+
+/**
+ * What a walked test file says, beyond what any command says.
+ *
+ * Four things, and each one answers a question an exit code cannot.
+ *
+ *   EACH CHECK, BY NAME, passed or failed. A suite that was already red stays red on both
+ *   builds and reports nothing, which is right: it was already failing and you did not break
+ *   it. A check that goes green-to-red on the new build alone is the finding, and it names
+ *   itself instead of arriving as "the exit code changed".
+ *
+ *   WHY EACH FAILING CHECK FAILED. "Still failing" and "failing for a completely different
+ *   reason" are different facts, and a flag cannot hold both.
+ *
+ *   THE CHECKS THE FILE CONTAINS, as a list. Add, rename or delete a test and this moves.
+ *
+ *   THE TEST FILE ITSELF, as a fingerprint of its contents. This is the one that stops the
+ *   whole feature crying wolf. If you edited the test, then every difference underneath it is
+ *   a difference you made on purpose, and the reader has to be told so in the same breath as
+ *   the difference rather than left to work it out. It is compared rather than merely noted,
+ *   so it appears exactly when it is true and never otherwise.
+ *
+ * FLAKES ARE NOT DEALT WITH HERE, on purpose. A check that flips between two runs of the same
+ * build lands in the wobble measurement like anything else that cannot answer twice, and is
+ * subtracted there. A second mechanism for the same problem is how two mechanisms end up
+ * disagreeing with each other.
+ *
+ * @param {object} input
+ * @param {import('./contract.js').Journey} input.journey
+ * @param {{file?: string, tests?: string[]}} input.step
+ * @param {import('../journeys/from-suite.js').Runner} input.runner
+ * @param {CommandResult} input.result
+ * @param {string} input.root            The scratch copy this build was walked in.
+ * @returns {Promise<import('./contract.js').Observation[]>}
+ */
+export async function suiteObservations(input) {
+  const { journey, step, runner, result, root } = input;
+  const id = journey.name;
+  const file = String(step.file ?? '');
+  /** @type {import('./contract.js').Observation[]} */
+  const out = [];
+
+  out.push(observation({
+    channel: 'results',
+    path: joinPath('test', id, 'the test file itself'),
+    value: await fingerprintOf(path.join(root, file)),
+    says:
+      `${file} as it stands in this build. If this is one of the things that changed, then whatever moved below ` +
+      `moved because you edited the test, and it cannot tell you whether the product still works - run the check ` +
+      `again once the test is the way you want it.`,
+    where: { file },
+  }));
+
+  const read = readChecks(runner, result.stdout);
+  if (!read.read) {
+    out.push(notCovered({
+      channel: 'results',
+      path: joinPath('test', id, 'the checks it reported'),
+      reason: 'crashed',
+      says:
+        `Nothing could be read back from ${file}: ${read.why} It was run, and what it printed and how it finished ` +
+        `are still compared exactly - but which of its checks passed is not known, and that is a hole, not a pass.`,
+      where: { file },
+    }));
+    return out;
+  }
+
+  out.push(observation({
+    channel: 'results',
+    path: joinPath('test', id, 'the checks it contains'),
+    value: read.checks.map((c) => c.name).sort(),
+    says:
+      `The ${read.checks.length} ${read.checks.length === 1 ? 'check' : 'checks'} ${file} reported. A name appearing ` +
+      `or disappearing here means the test file itself was added to or cut down.`,
+    where: { file },
+  }));
+
+  for (const check of read.checks) {
+    out.push(observation({
+      channel: 'results',
+      path: joinPath('test', id, check.name),
+      value: check.ok ? 'passed' : 'failed',
+      says: check.ok
+        ? `"${check.name}" in ${file} passed.`
+        : `"${check.name}" in ${file} failed. If it failed on the build you were happy with too, nothing is ` +
+          `reported - it was already broken, and you did not break it.`,
+      where: { file },
+    }));
+    if (check.detail) {
+      // A long failure message gets its middle cut out, and that used to be stored with
+      // nothing saying so — two different failures whose ends match would then compare equal
+      // and report "still failing for the same reason" when the reason had changed.
+      const kept = trimForStorage(check.detail);
+      out.push(observation({
+        channel: 'complaints',
+        path: joinPath('test', id, check.name, 'why it failed'),
+        value: kept.text,
+        says:
+          `What ${file} said when "${check.name}" failed. A check that was already failing and is now failing for a ` +
+          `different reason is a change, and this is where it shows.` +
+          (kept.truncated
+            ? ` It is ${sizeBucket(kept.bytes)}, so only the two ends are compared: a different failure with the same ` +
+              `ends and the same length would not be seen.`
+            : ''),
+        where: { file },
+        covered: kept.truncated ? false : undefined,
+        reason: kept.truncated ? 'too big' : undefined,
+      }));
+    }
+  }
+
+  out.push(observation({
+    channel: 'counters',
+    path: joinPath('count', id, 'checks that failed'),
+    value: read.checks.filter((c) => !c.ok).length,
+    says:
+      `How many of ${file}'s checks did not pass. Compared against the build you were happy with, so a suite that ` +
+      `was already red is not news.`,
+    where: { file },
+  }));
+
+  return out;
+}
+
+/**
+ * A file's contents in one short string, or a plain sentence saying it is not there.
+ *
+ * @param {string} file
+ * @returns {Promise<string>}
+ */
+async function fingerprintOf(file) {
+  try {
+    const bytes = await fsp.readFile(file);
+    return `${crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16)} (${bytes.length} bytes)`;
+  } catch (error) {
+    // "It is not here" and "it is here and would not open" are different facts, and one
+    // sentence for both means a permissions problem reads as a deleted test file.
+    if (isGone(error)) return 'there is no such file in this build';
+    return `${COULD_NOT_READ}${whyItWouldNotOpen(error)}`;
+  }
 }
 
 /** @param {string} text */
@@ -869,6 +1324,15 @@ function sanitise(name) {
  * @param {WatchedEvents} input.watched
  * @param {import('./contract.js').RunContext} input.ctx
  * @param {{dirs: string[], projectRoot?: string, ports?: number[]}} input.footprint
+ * @param {string[]} [input.skipped]  Folders this run did not watch, so it can say so.
+ * @param {(text: string) => string} [input.quieten]
+ *   Applied to what the program printed, after our own footprint is rubbed out and before
+ *   anything is compared. It exists for one narrow case and has to stay narrow: a harness the
+ *   journey itself started - a test runner - that narrates its own stopwatch into the output.
+ *   That is the harness talking about the machine, not the product talking about itself, and
+ *   it is the same reason durations are never compared anywhere else in here. It is NOT for
+ *   the product's own volatile output; that is the noise-control layer's job, where the rules
+ *   live in the project's git and a person can see and argue with them.
  * @returns {Promise<import('./contract.js').Observation[]>}
  */
 export async function describeRun(input) {
@@ -882,7 +1346,8 @@ export async function describeRun(input) {
     ['to the screen', result.stdout, 'results', 'printed to the screen', 'printed nothing at all'],
     ['as a complaint', result.stderr, 'complaints', 'complained about', 'complained about nothing'],
   ])) {
-    const text = undoOurFootprint(raw, footprint);
+    const plain = undoOurFootprint(raw, footprint);
+    const text = input.quieten ? input.quieten(plain) : plain;
     const kept = trimForStorage(text);
     let evidence;
     if (kept.truncated) {
@@ -913,6 +1378,17 @@ export async function describeRun(input) {
   }
 
   // ---- how it finished
+  if (result.couldNotStart) {
+    out.push(notCovered({
+      channel: 'complaints',
+      path: joinPath('cli', id, 'ran at all'),
+      reason: 'crashed',
+      says:
+        `"${journey.describe}" never started: ${result.couldNotStart}. Nothing about the product was observed here, ` +
+        `and a command that fails to start fails the same way on both builds — so without this line the comparison ` +
+        `would have found no difference and called it clean.`,
+    }));
+  }
   out.push(observation({
     channel: 'complaints',
     path: joinPath('cli', id, 'exit'),
@@ -938,6 +1414,54 @@ export async function describeRun(input) {
         : `"${journey.describe}" ${change.what} ${change.file}. Only the contents are compared, so rewriting the same bytes is not a change.`,
     }));
   }
+  // ---- and the three ways looking at files can come up short. All of them used to be
+  // silent, and a silence here is indistinguishable from "nothing changed", which is the one
+  // shape of wrong answer this whole tool exists to prevent.
+  const bySize = [...input.after].filter(([, mark]) => mark.startsWith(BY_SIZE_ALONE)).map(([file]) => file).sort();
+  if (bySize.length > 0) {
+    out.push(observation({
+      channel: 'effects',
+      path: joinPath('file', id, 'compared by size alone'),
+      value: bySize,
+      says:
+        `${bySize.length} file${bySize.length === 1 ? ' was' : 's were'} too big to read through, so ${bySize.length === 1 ? 'it was' : 'they were'} ` +
+        `compared by size rather than by contents: ${bySize.join(', ')}. A rewrite of the same rough size would NOT be seen. ` +
+        `This is a hole in what was checked, not a pass.`,
+      covered: false,
+      reason: 'too big',
+    }));
+  }
+  const unreadable = [...new Map([...input.before, ...input.after])]
+    .filter(([, mark]) => mark.startsWith(COULD_NOT_READ))
+    .map(([file, mark]) => `${file} (${mark.slice(COULD_NOT_READ.length)})`)
+    .sort();
+  if (unreadable.length > 0) {
+    out.push(observation({
+      channel: 'effects',
+      path: joinPath('file', id, 'could not be looked at'),
+      value: unreadable,
+      says:
+        `${unreadable.length} place${unreadable.length === 1 ? '' : 's'} in the scratch copy could not be read, so anything written ` +
+        `there — and anything underneath, for a folder — was not seen: ${unreadable.join(', ')}. This is a hole, not a pass.`,
+      covered: false,
+      reason: 'refused',
+    }));
+  }
+  if (input.skipped && input.skipped.length > 0) {
+    out.push(observation({
+      channel: 'effects',
+      path: joinPath('file', id, 'folders left unwatched'),
+      value: input.skipped,
+      says:
+        `Files written into ${input.skipped.join(', ')} were not watched. ` +
+        `node_modules is the one that costs something: a build step that patches a dependency, generates a client into it, ` +
+        `or rebuilds a native module changes what ships and is not seen here. It is left out because fingerprinting it twice ` +
+        `per run makes a check nobody waits for. Name it under "process.alsoWatch" in the settings to watch it anyway.`,
+      covered: false,
+      reason: 'too big',
+    }));
+  }
+
   out.push(observation({
     channel: 'counters',
     path: joinPath('count', id, 'files touched'),
@@ -971,6 +1495,18 @@ export async function describeRun(input) {
         says: `"${journey.describe}" tried to connect to ${host} and was refused. What it asked for is compared; whether it would have worked is not, because it was never allowed to happen.`,
         covered: false,
         reason: 'irreversible',
+      }));
+    }
+    if (watched.torn > 0) {
+      out.push(observation({
+        channel: 'effects',
+        path: joinPath('proc', id, 'events that could not be read back'),
+        value: watched.torn,
+        says:
+          `${watched.torn} line${watched.torn === 1 ? '' : 's'} of what the watcher wrote could not be read back, so ` +
+          `that many programs started or connections attempted are missing from this run. This is a hole, not a pass.`,
+        covered: false,
+        reason: 'crashed',
       }));
     }
     if (watched.settingsRead.length > 0) {
@@ -1020,8 +1556,12 @@ export async function describeRun(input) {
 export function apiSurface(journey, result) {
   /** @type {Record<string, string>} */
   let surface;
+  const at = result.stdout.lastIndexOf(EXPORTS_MARKER);
   try {
-    surface = JSON.parse(result.stdout);
+    // Only what comes after the marker. Anything the module printed while importing sits in
+    // front of it and is compared under "printed", where it belongs.
+    surface = JSON.parse(at === -1 ? result.stdout : result.stdout.slice(at + EXPORTS_MARKER.length));
+    if (surface === null || typeof surface !== 'object' || Array.isArray(surface)) throw new Error('not a list of names');
   } catch {
     return [notCovered({
       channel: 'results',
@@ -1045,14 +1585,6 @@ export function apiSurface(journey, result) {
     says: `"${journey.describe}" exports ${names.length} name${names.length === 1 ? '' : 's'}.`,
   }));
   return out;
-}
-
-/**
- * A scratch folder under the system temp directory, for callers that do not have one.
- * @param {string} [label]
- */
-export async function scratchFolder(label = 'staysfixed') {
-  return fsp.mkdtemp(path.join(os.tmpdir(), `${label}-`));
 }
 
 /** True when a path exists. Small enough to inline, useful enough to name. */

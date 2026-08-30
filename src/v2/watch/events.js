@@ -134,6 +134,12 @@ export const SOURCE_WORDS = Object.freeze({
  * @property {number} [total]               How many journeys there are.
  * @property {number} [count]               Whatever this event is counting.
  * @property {number} [watched]             Addresses watched so far, across every journey.
+ * @property {number} [steady]              Only on 'wobble'. Addresses answered the same way
+ *                                          twice, as the engine measured them.
+ * @property {boolean} [measured]           Only on 'wobble'. False when no wobble was taken.
+ * @property {string[]} [findingIds]        Only on 'check:done', and only when the whole
+ *                                          verdict was to hand: every finding that survived,
+ *                                          so a window can drop one that has been waived.
  * @property {number} [durationMs]
  * @property {PanelReference} [reference]   Only on 'reference'.
  * @property {PanelWobble} [wobble]         Only on 'wobble'.
@@ -235,6 +241,9 @@ export const SOURCE_WORDS = Object.freeze({
  * @property {string} summary
  * @property {number} findings
  * @property {number} sealed                How many need a person.
+ * @property {number} newlyUnstable         Addresses that were steady before this change and
+ *                                          are not now. A run can be `ok: false` on these
+ *                                          alone, with no findings at all.
  * @property {number} differencesReal
  * @property {number} differencesNoise
  * @property {number} durationMs
@@ -291,220 +300,30 @@ export const SOURCE_WORDS = Object.freeze({
  */
 
 // ---------------------------------------------------------------------------
-// Saying the new things
+// WHY THERE IS NO say*() FAMILY HERE ANY MORE  (removed 2026-08-30)
 // ---------------------------------------------------------------------------
-
-/**
- * Put an event on a stream that may not be there.
- *
- * Watching is a convenience everywhere in this tool: a check with nobody watching is the
- * normal case, and this keeps that from being an `if` at every call site.
- *
- * @param {EventSink|undefined|null} events
- * @param {PanelEvent} event
- * @returns {void}
- */
-export function say(events, event) {
-  if (!events || typeof events.emit !== 'function') return;
-  try {
-    events.emit(event);
-  } catch {
-    // A stream that cannot take an event is not a reason for a check to stop. It is the
-    // window's problem, and the window is optional.
-  }
-}
-
-/**
- * How many milliseconds in, according to the stream itself when it can say.
- * @param {EventSink|undefined|null} events
- * @returns {number}
- */
-function now(events) {
-  try {
-    return typeof events?.elapsed === 'function' ? events.elapsed() : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * The plan, said out loud, for a window that opened after the check started.
- *
- * @param {EventSink|undefined|null} events
- * @param {PanelPlanShape} plan
- * @returns {void}
- */
-export function sayPlan(events, plan) {
-  say(events, { type: 'plan', at: now(events), plan });
-}
-
-/**
- * Which build this is being measured against — and, when it is the weaker kind, that it is.
- *
- * @param {EventSink|undefined|null} events
- * @param {PanelReference} reference
- * @returns {void}
- */
-export function sayReference(events, reference) {
-  say(events, {
-    type: 'reference',
-    at: now(events),
-    reference,
-    message: reference.weak
-      ? `${reference.warning || 'This is a weaker check than usual.'} ${reference.how}`.trim()
-      : `Measured against ${reference.name}. ${reference.how}`.trim(),
-  });
-}
-
-/**
- * A journey starting, on a named surface.
- *
- * The surface is the new part. One repository builds a website, a desktop app and a phone app,
- * and a window that only says "walking checkout" leaves a person guessing which of the three
- * they are watching.
- *
- * @param {EventSink|undefined|null} events
- * @param {object} what
- * @param {string} what.journey
- * @param {Surface} [what.surface]
- * @param {string} [what.describe]
- * @param {string} [what.source]
- * @param {string} [what.run]              'a', 'b' or 'single'.
- * @param {number} [what.index]
- * @param {number} [what.total]
- * @returns {void}
- */
-export function sayJourneyStart(events, what) {
-  // "Website: buying one item with a saved card." The surface leads, because on a repository
-  // that builds five products the surface is the thing a person is trying to work out.
-  const where = what.surface ? `${surfaceWord(what.surface)}: ` : '';
-  const doing = what.describe || `walking ${what.journey}`;
-  say(events, {
-    type: 'journey:start',
-    at: now(events),
-    journey: what.journey,
-    describe: what.describe,
-    surface: what.surface,
-    surfaceWord: what.surface ? surfaceWord(what.surface) : undefined,
-    source: what.source,
-    run: what.run,
-    index: what.index,
-    total: what.total,
-    message: `${where}${doing}.`,
-  });
-}
-
-/**
- * The address count rising while a journey is still walking.
- *
- * This is the number that makes the window worth having open: proof that something is
- * happening, on a run where nothing is going to be wrong and there will be nothing to show.
- *
- * @param {EventSink|undefined|null} events
- * @param {string} journey
- * @param {number} count                    Addresses this journey has watched so far.
- * @returns {void}
- */
-export function sayAddresses(events, journey, count) {
-  say(events, { type: 'journey:addresses', at: now(events), journey, count });
-}
-
-/**
- * A journey finished.
- * @param {EventSink|undefined|null} events
- * @param {object} what
- * @param {string} what.journey
- * @param {number} what.count               Addresses watched.
- * @param {number} [what.unstable]          Of those, how many would not sit still.
- * @param {number} [what.durationMs]
- * @param {Surface} [what.surface]
- * @param {string} [what.message]
- * @returns {void}
- */
-export function sayJourneyDone(events, what) {
-  const unstable = Number(what.unstable ?? 0);
-  say(events, {
-    type: 'journey:done',
-    at: now(events),
-    journey: what.journey,
-    surface: what.surface,
-    surfaceWord: what.surface ? surfaceWord(what.surface) : undefined,
-    count: what.count,
-    durationMs: what.durationMs,
-    message:
-      what.message ||
-      `${plural(what.count, 'address', 'addresses')} watched` +
-        (unstable > 0 ? `, ${unstable} of which this build cannot answer the same way twice.` : '.'),
-  });
-}
-
-/**
- * The wobble, measured.
- *
- * Nobody else's tool has this number, so it does not get buried. Everything that would not sit
- * still between two runs of the SAME build was not caused by the change, and is subtracted
- * arithmetically rather than allowed for by a tolerance somebody guessed.
- *
- * @param {EventSink|undefined|null} events
- * @param {PanelWobble} wobble
- * @returns {void}
- */
-export function sayWobble(events, wobble) {
-  const note = wobble.note || wobbleSentence(wobble);
-  say(events, { type: 'wobble', at: now(events), wobble: { ...wobble, note }, count: wobble.unstable, message: note });
-}
-
-/**
- * One finding, the moment it is formed.
- *
- * The finding goes on the stream whole. Cutting it down is the mapper's job and only the
- * mapper's job — two places trimming the same shape is how a window ends up drawing a
- * finding that has already had its findings taken out of it.
- *
- * @param {EventSink|undefined|null} events
- * @param {Finding} finding
- * @returns {void}
- */
-export function sayFinding(events, finding) {
-  say(events, { type: 'finding', at: now(events), finding, message: finding?.title });
-}
-
-/**
- * The coverage, folded — which is mostly the list of what was NOT looked at.
- * @param {EventSink|undefined|null} events
- * @param {Coverage} coverage
- * @returns {void}
- */
-export function sayCoverage(events, coverage) {
-  const gaps = Array.isArray(coverage?.gaps) ? coverage.gaps.length : 0;
-  say(events, {
-    type: 'coverage',
-    at: now(events),
-    coverage,
-    count: gaps,
-    message: coverageSentence(trimCoverage(coverage)),
-  });
-}
-
-/**
- * A plain note, for anything that does not have a shape of its own.
- * @param {EventSink|undefined|null} events
- * @param {string} message
- * @returns {void}
- */
-export function sayNote(events, message) {
-  say(events, { type: 'note', at: now(events), message });
-}
-
-/**
- * The end.
- * @param {EventSink|undefined|null} events
- * @param {Verdict} verdict
- * @returns {void}
- */
-export function sayCheckDone(events, verdict) {
-  say(events, { type: 'check:done', at: now(events), verdict, durationMs: verdict?.durationMs, message: verdict?.summary });
-}
+//
+// This file used to export a second way of talking to a window: sayPlan, sayReference,
+// sayJourneyStart, sayAddresses, sayJourneyDone, sayWobble, sayFinding, sayCoverage,
+// sayNote and sayCheckDone, each one wrapping an emit. Nothing anywhere ever called a
+// single one of them. The engine emits its own plain CheckEvents and `makeMapper` below
+// translates them, so the tool carried two vocabularies for one window and only one of
+// them was wired.
+//
+// They were deleted rather than adopted, and the reason is the paragraph at the top of
+// watch/index.js: the ENGINE works everything out and the PANEL only draws. Every say*()
+// would have had run.js reach for the window's vocabulary at the moment it is meant to be
+// running a difference machine — and it would only have covered the one stream that
+// remembered to call them, where the mapper covers ANY stream, v1's events included. Dead
+// code in a tool whose job is telling the truth about a product is its own small lie: it
+// reads like a supported road and is a road nobody has ever driven down.
+//
+// What was NOT deleted is the vocabulary the window really needs. CLASS_WORDS and
+// SURFACE_NOTES are now embedded in the page by panel.js, exactly the way SURFACE_WORDS
+// and SOURCE_WORDS already were. CLASS_WORDS had to be: the panel was keeping a second
+// hand-written copy of the same map, and the two had already drifted — the panel said "a
+// bug already reported once" where this file says "a bug you already reported", and the
+// panel had no word for 'ordinary' at all.
 
 // ---------------------------------------------------------------------------
 // Trimming — what crosses into the window, and what stays out
@@ -661,6 +480,16 @@ export function trimVerdict(verdict) {
     typeof verdict?.sealed === 'number'
       ? Number(verdict.sealed)
       : list.filter((/** @type {any} */ f) => f?.sealed || isSealedClass(f?.class)).length;
+  // Addresses that used to be steady and are not any more. A run can have NO findings and
+  // still not be a pass because of these, and without the number the window cannot tell that
+  // apart from a run that compared nothing — the two look identical from `ok: false` and a
+  // finding count of nought, and they need opposite sentences.
+  const newlyUnstable =
+    typeof verdict?.newlyUnstable === 'number'
+      ? verdict.newlyUnstable
+      : Array.isArray(verdict?.newlyUnstable)
+        ? verdict.newlyUnstable.length
+        : 0;
   return {
     ok: Boolean(verdict?.ok),
     mode: verdict?.mode ?? 'stored-record',
@@ -668,6 +497,7 @@ export function trimVerdict(verdict) {
     summary: String(verdict?.summary ?? ''),
     findings: counted,
     sealed,
+    newlyUnstable,
     differencesReal: Number(verdict?.differencesReal ?? 0) || 0,
     differencesNoise: Number(verdict?.differencesNoise ?? 0) || 0,
     durationMs: Number(verdict?.durationMs ?? 0) || 0,
@@ -913,10 +743,17 @@ export function makeMapper(plan = {}) {
 
       case 'wobble': {
         announcedWobble = true;
+        // What the ENGINE measured, wherever it said it. `steady` used to be guessed here as
+        // "everything watched so far, minus the unstable ones", and those are two different
+        // populations: `watched` counts what the adapters wrote down, while the wobble is
+        // measured over addresses. The guess therefore claimed addresses had answered the
+        // same way twice that the build had never been asked at. It is kept only as a
+        // fallback, for a stream that says nothing about steadiness at all.
+        const said = numberOr(event.steady);
         const wobble = /** @type {PanelWobble|undefined} */ (event.wobble) ?? {
-          measured: true,
+          measured: event.measured !== false,
           unstable: Number(event.count) || 0,
-          steady: Math.max(0, watched - (Number(event.count) || 0)),
+          steady: said ?? Math.max(0, watched - (Number(event.count) || 0)),
           newlyUnstable: 0,
         };
         return [{ type: 'wobble', at, message: message ?? wobbleSentence(wobble), wobble, count: wobble.unstable }];
@@ -993,6 +830,14 @@ export function makeMapper(plan = {}) {
         type: 'check:done',
         at,
         verdict: trimVerdict(verdict),
+        // WHICH findings, not just how many. A finding only ever ARRIVES at a window; there
+        // was no way to take one away again, and findings are taken away — the engine's
+        // verdict carries every difference it found, and the gates in check.js then remove
+        // the ones an agent has recorded as intended and hand back the settled list. Both
+        // verdicts reach the window, in that order, so a waived finding stayed drawn beside
+        // a terminal that had already stopped reporting it. Naming the survivors is what
+        // lets the window agree: anything drawn that is not on this list is gone.
+        findingIds: findings.map((/** @type {any} */ f) => String(f?.id ?? '')).filter(Boolean),
         durationMs: verdict.durationMs,
         message: message ?? verdict.summary,
       });

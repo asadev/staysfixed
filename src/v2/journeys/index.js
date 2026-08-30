@@ -32,7 +32,7 @@ import path from 'node:path';
 
 import { measureWobble } from '../observation.js';
 import { journeysFromCode } from './from-routes.js';
-import { harvestJourneys } from './from-suite.js';
+import { DEFAULT_HARVEST_BUDGET_MS, harvestJourneys, testsNear } from './from-suite.js';
 import { loadJourneyFolder, whatWillNotReplay } from './record.js';
 
 /** @typedef {import('../types.js').Journey} Journey */
@@ -46,7 +46,7 @@ import { loadJourneyFolder, whatWillNotReplay } from './record.js';
 /** @typedef {import('../adapters/source.js').Door} Door */
 
 export { journeysFromCode, journeysFromDoors, irreversibility } from './from-routes.js';
-export { detectRunner, harvestJourneys, listTestFiles } from './from-suite.js';
+export { detectRunner, harvestJourneys, listTestFiles, testsNear, DEFAULT_HARVEST_BUDGET_MS } from './from-suite.js';
 export { startRecording, recordSession, saveJourneys, loadJourneys, loadJourneyFolder, redact } from './record.js';
 
 /**
@@ -369,7 +369,13 @@ export async function checkReproducible(journeys, opts = {}) {
  *   Journeys harvested from the project's own tests. OFF by default, and deliberately:
  *   harvesting RUNS the suite, which starts processes and takes minutes. Nothing that
  *   expensive should happen because somebody called a function called `gather`. When it is
- *   off, the report says what it would have unlocked.
+ *   off, the report says what it would have unlocked. When it is on it is held to a time
+ *   budget - `DEFAULT_HARVEST_BUDGET_MS` unless the caller says otherwise - and every test
+ *   file the budget did not reach is named, one by one, in the gaps.
+ * @property {string[]} [changed]
+ *   Project files this change touched, relative to the root. Given, the harvested journeys
+ *   are narrowed to the ones MEASURED going through one of them, and the rest are named in
+ *   the gaps rather than quietly dropped. Left out, every harvested journey is walked.
  * @property {false|{dir?: string, files?: string[]}} [recorded]
  *   Recorded sessions. On by default: it only reads files. Defaults to `.staysfixed/journeys`.
  * @property {Journey[]} [explored]           Journeys an agent produced, handed straight in.
@@ -471,15 +477,32 @@ export async function gather(opts) {
       root,
     };
     const harvest = await harvestJourneys(suiteOptions);
-    collected.push(...harvest.journeys);
+    // Narrowed on a measurement, never on a hunch: the harvest recorded which project files
+    // each test file actually executed, and one that went through nothing you changed would
+    // run identical code twice. Anything left out is named, because a test quietly not run
+    // is the difference between a safety net and a story about one.
+    const near = opts.changed ? testsNear(harvest.journeys, opts.changed) : { walk: harvest.journeys, skipped: [] };
+    collected.push(...near.walk);
+    for (const left of near.skipped) {
+      gaps.push({
+        what: `The tests in "${left.journey}" were not walked for this change.`,
+        why: left.why,
+        unlockedBy: 'Nothing to install. Leave `changed` out of gather() and every harvested test file is walked, whatever it goes through.',
+      });
+    }
     gaps.push(...suiteGaps(harvest.report));
     missing.push(...harvest.report.missing);
     notes.push(...harvest.report.notes);
   } else {
     gaps.push({
       what: "The project's own test suite was not harvested, so every path its tests walk is invisible to this check.",
-      why: 'Harvesting runs the suite one file at a time, which starts processes and takes minutes, so it never happens unless it is asked for.',
-      unlockedBy: 'Ask for it: gather({suite: true}). Every test file that repeats twice becomes a journey nobody had to write.',
+      why:
+        'Harvesting runs the suite one file at a time and twice each, which starts processes and takes minutes. This ' +
+        'tool is worth having because it is cheap enough to run on every change, so nothing that expensive is ever ' +
+        'switched on for somebody without being asked for.',
+      unlockedBy:
+        `Ask for it: gather({suite: true}). Every test file that repeats twice becomes a journey nobody had to write, ` +
+        `and the harvest stops after ${Math.round(DEFAULT_HARVEST_BUDGET_MS / 1000)} seconds and names whatever it did not reach.`,
     });
   }
 
@@ -580,6 +603,63 @@ export async function gather(opts) {
 }
 
 /**
+ * A number of milliseconds as a person would say it. "0 seconds" reads as no budget at all.
+ * @param {number} ms
+ * @returns {string}
+ */
+function inSeconds(ms) {
+  return ms < 1000 ? 'under a second' : `${Math.round(ms / 1000)} seconds`;
+}
+
+/**
+ * The project's own test suite, as journeys ready to walk, in the shape a check wants back.
+ *
+ * `gather` does everything and is the right door for anything exploring what a project has.
+ * This is the narrow one: somebody asked for `--journeys suite`, and what they need back is
+ * a list of journeys and a list of holes - nothing else, and no second reading of the source
+ * that the caller has already done.
+ *
+ * WHAT THE CALLER IS SIGNING UP FOR, in one place so it cannot be missed. This RUNS the
+ * project's tests, one file at a time and twice each, inside the harvest's own temp folder.
+ * It is held to a time budget, and every file the budget did not reach comes back as a
+ * named hole. Hand it `changed` and only the test files measured going through one of those
+ * are kept, with the rest named too. Nothing is ever skipped quietly.
+ *
+ * @param {object} opts
+ * @param {string} opts.root
+ * @param {Surface} [opts.surface]
+ * @param {true|Partial<import('./from-suite.js').HarvestOptions>} [opts.suite]
+ * @param {string[]} [opts.changed]
+ * @param {(message: string) => void} [opts.log]
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<{journeys: GatheredJourney[], gaps: CoverageGap[], report: GatherReport}>}
+ */
+export async function journeysFromSuite(opts) {
+  const gathered = await gather({
+    root: opts.root,
+    surface: opts.surface,
+    suite: opts.suite ?? true,
+    changed: opts.changed,
+    // The caller asked for the suite. Reading the source and loading recordings are other
+    // sources with their own costs, and doing them here would charge for work nobody asked
+    // for and hand back journeys nobody expected.
+    code: false,
+    recorded: false,
+    log: opts.log,
+    signal: opts.signal,
+  });
+  return {
+    journeys: gathered.journeys.filter((journey) => journey.source === 'suite'),
+    // Everything except "the doors were never counted". That hole is real when nobody read
+    // the source at all, and it is a lie here: the caller asking for the suite reads the
+    // source through the contract adapter on the same run, and a ledger carrying a hole
+    // somebody has already filled sends a reader looking for work that is done.
+    gaps: gathered.report.gaps.filter((gap) => gap.channel !== 'contract'),
+    report: gathered.report,
+  };
+}
+
+/**
  * @param {import('./from-suite.js').HarvestReport} report
  * @returns {CoverageGap[]}
  */
@@ -591,6 +671,19 @@ function suiteGaps(report) {
       what: `The tests in ${rejected.file} are not being used as a journey.`,
       why: rejected.why,
       unlockedBy: 'Nothing to install. Either that file is not repeatable, or it needs something the harvest did not give it.',
+    });
+  }
+  if (report.notReached.length > 0) {
+    gaps.push({
+      // Every one of them, by name, however many there are. This used to stop at twenty and
+      // add "and 14 more", which is the same failure as "some tests were skipped" wearing a
+      // number: a reader cannot act on a name they were not given, and the reader who most
+      // needs the full list is precisely the one whose harvest reached almost nothing. The
+      // sentence gets long. A ledger that is honest and long beats one that is short and
+      // leaves half of somebody's suite unaccounted for.
+      what: `${report.notReached.length} test ${report.notReached.length === 1 ? 'file was' : 'files were'} never run, so whatever they walk is not being watched: ${report.notReached.join(', ')}.`,
+      why: `The harvest was held to ${inSeconds(report.budgetMs ?? DEFAULT_HARVEST_BUDGET_MS)} so that running it on every change stays affordable, and it ran out before these.`,
+      unlockedBy: 'Give it longer — suite: {budgetMs} in your settings file, or gather({suite: {budgetMs}}) in code, and 0 means no budget at all. Or narrow it to the files that matter with gather({suite: {only}}).',
     });
   }
   if (report.runner === 'none') {

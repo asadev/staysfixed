@@ -308,12 +308,16 @@ export async function measureStability(store, buildId) {
   let measuredJourneys = 0;
 
   for (const journey of journeys) {
-    const pair = await twoRunsOf(store, buildId, journey);
+    const looked = await twoRunsOf(store, buildId, journey);
+    const pair = looked.pair;
     if (!pair) {
       byJourney.push({
         journey,
         measured: false,
-        why: 'This build only ever walked this journey once, so nothing here says how steady it was.',
+        why:
+          looked.unreadable > 0
+            ? `${looked.unreadable} of the ${looked.stored} stored runs of this journey could not be read, so the pair needed to measure how steady it was is not there. This build DID walk it more than once — the evidence is on the disk and it is damaged, which is a different problem from never having walked it.`
+            : 'This build only ever walked this journey once, so nothing here says how steady it was.',
         paths: 0,
         steady: 0,
         unstableCount: 0,
@@ -412,36 +416,47 @@ function stabilityNote(measured, journeys, measuredJourneys, steady, unstable) {
  * would measure the difference between two afternoons and call it wobble. So: take the
  * newest second run, then the newest first run that came before it.
  *
+ * WHY IT SAYS HOW MANY IT COULD NOT READ. One unreadable capture must never take the whole
+ * stability record with it, and it never did — but it used to vanish into a `continue`, and
+ * a journey that lost its pair that way came back as the same plain `null` a journey that
+ * was genuinely only ever walked once comes back as. The caller then wrote "this build only
+ * ever walked this journey once, so nothing here says how steady it was" onto the reference,
+ * for good, about a journey that was walked twice and whose evidence is sitting on the disk
+ * damaged. That sentence sends somebody to walk it again; the truth would have sent them to
+ * look at their store.
+ *
  * @param {Store} store
  * @param {string} buildId
  * @param {string} journey
- * @returns {Promise<{a: Capture, b: Capture}|null>}
+ * @returns {Promise<{pair: {a: Capture, b: Capture}|null, stored: number, unreadable: number}>}
  */
 async function twoRunsOf(store, buildId, journey) {
   const refs = await listCaptures(store, { buildId, journey });
-  if (refs.length < 2) return null;
+  if (refs.length < 2) return { pair: null, stored: refs.length, unreadable: 0 };
 
   /** @type {Capture[]} */
   const captures = [];
+  let unreadable = 0;
   for (const ref of refs) {
     /** @type {Capture|null} */
     let capture = null;
     try {
       capture = await loadCapture(store, ref);
     } catch {
-      // One unreadable file must never take the whole stability record with it.
+      unreadable += 1;
       continue;
     }
     if (capture) captures.push(capture);
+    else unreadable += 1;
   }
 
   for (let i = captures.length - 1; i >= 0; i--) {
     if (captures[i].run !== 'b') continue;
     for (let j = i - 1; j >= 0; j--) {
-      if (captures[j].run === 'a') return { a: captures[j], b: captures[i] };
+      if (captures[j].run === 'a') return { pair: { a: captures[j], b: captures[i] }, stored: refs.length, unreadable };
     }
   }
-  return null;
+  return { pair: null, stored: refs.length, unreadable };
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,11 +1047,26 @@ export async function currentReference(store, product) {
  * The ship hook uses this to work out which product it is looking at when nobody said, and
  * a `doctor` or summary uses it to name the products that are not being checked at all.
  *
+ * BOTH OF THOSE USES ARE RUINED BY A LIST THAT IS QUIETLY SHORT. A build record that cannot
+ * be read is a build that is not in the list, and a product whose only builds are damaged
+ * records is a product that is not in the list at all — so the ship hook sees one product
+ * where there are two and blesses the wrong one without a word, and the summary says a
+ * product is not being checked when it is. Until 2026-08-30 this asked for the builds without
+ * asking to be told about the ones that were skipped, so neither could have known.
+ *
+ * The problems come back BESIDE the list rather than through a callback nobody has to pass,
+ * because a caller that does not want to hear them now has to say so on purpose.
+ *
  * @param {Store} store
- * @returns {Promise<{product: string, hasReference: boolean, builds: number}[]>}
+ * @returns {Promise<{products: {product: string, hasReference: boolean, builds: number}[], problems: string[]}>}
+ *   `problems` is empty when every build folder could be read. Each entry is a plain
+ *   sentence naming a folder that could not be, and anything built on this list is weaker
+ *   for as long as one is there.
  */
 export async function productsKnown(store) {
-  const builds = await listBuilds(store);
+  /** @type {string[]} */
+  const problems = [];
+  const builds = await listBuilds(store, { onProblem: (message) => problems.push(message) });
   /** @type {Map<string, {product: string, hasReference: boolean, builds: number}>} */
   const seen = new Map();
   for (const record of builds) {
@@ -1047,5 +1077,5 @@ export async function productsKnown(store) {
     if (record.isReference) entry.hasReference = true;
     seen.set(product, entry);
   }
-  return [...seen.values()].sort((a, b) => a.product.localeCompare(b.product));
+  return { products: [...seen.values()].sort((a, b) => a.product.localeCompare(b.product)), problems };
 }

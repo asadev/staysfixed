@@ -44,6 +44,7 @@ import { promisify } from 'node:util';
 import { safeName } from '../core/paths.js';
 import { StaysFixedError } from '../core/errors.js';
 import { referencePointer } from './store.js';
+import { NOT_THE_TOOLS_OWN_FOLDER } from './rank.js';
 
 const run = promisify(execFile);
 
@@ -213,17 +214,6 @@ export async function readIntents(store, product) {
   const raw = await readJsonFile(intentsFile(store, product), []);
   if (!Array.isArray(raw)) return [];
   return raw.filter((i) => i && typeof i === 'object' && typeof i.id === 'string' && typeof i.summary === 'string');
-}
-
-/**
- * Forget a product's intents. Housekeeping, and the way a test starts clean.
- *
- * @param {Store} store
- * @param {string} product
- * @returns {Promise<void>}
- */
-export async function forgetIntents(store, product) {
-  await fsp.rm(intentsFile(store, product), { force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -397,11 +387,17 @@ export async function fingerprintTree(root) {
   }
 
   const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD'], root);
-  const status = (await git(['status', '--porcelain'], root)) ?? '';
+  // Both questions are asked with this tool's own folder left out, the same way ranking asks
+  // them. Without that, sealing an intent moves the tree it has just fingerprinted — the seal
+  // writes into .staysfixed, git reports the new file, and the next comparison says the code
+  // changed when nobody touched a line of it. In a project that has run `init` the folder is
+  // in .gitignore and this makes no difference; in one that has not, it is the difference
+  // between "you edited this after you sealed" and the truth.
+  const status = (await git(['status', '--porcelain', '--', NOT_THE_TOOLS_OWN_FOLDER], root)) ?? '';
   const changedFiles = filesFromStatus(status);
   // The diff itself is hashed rather than kept. Two moments only ever need to be compared, and
   // keeping the text would put a copy of the working tree in a file people commit by accident.
-  const diff = (await git(['diff', 'HEAD'], root)) ?? '';
+  const diff = (await git(['diff', 'HEAD', '--', NOT_THE_TOOLS_OWN_FOLDER], root)) ?? '';
   const digest = shortDigest([head, status, diff]);
 
   return {
@@ -522,16 +518,6 @@ async function git(args, cwd) {
 // ---------------------------------------------------------------------------
 // The bookkeeping this lane shares
 // ---------------------------------------------------------------------------
-
-/**
- * Where intents and waivers live: beside the engine's observations, not inside them.
- *
- * @param {Store} store
- * @returns {string}
- */
-export function stateDir(store) {
-  return store.dir;
-}
 
 /**
  * @param {Store} store

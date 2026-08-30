@@ -256,7 +256,7 @@ export async function saveCapture(store, capture) {
  * clears those up.
  *
  * @param {Store} store
- * @param {{build: BuildFingerprint, journey: string, run: CaptureRun, id?: string, source?: JourneySource, startedAt?: string, rules?: string}} opts
+ * @param {{build: BuildFingerprint, journey: string, run: CaptureRun, id?: string, source?: JourneySource, startedAt?: string, rules?: string, rulesScope?: Record<string, string[]>}} opts
  * @returns {Promise<{ref: CaptureRef, append: (o: Observation) => Promise<void>, close: (end?: {durationMs?: number, coverage?: Coverage, note?: string}) => Promise<CaptureRef>, abandon: () => Promise<void>}>}
  */
 export async function openCaptureWriter(store, opts) {
@@ -282,6 +282,7 @@ export async function openCaptureWriter(store, opts) {
   };
   if (opts.source) shell.source = opts.source;
   if (opts.rules) shell.rules = opts.rules;
+  if (opts.rulesScope) shell.rulesScope = opts.rulesScope;
   await handle.write(JSON.stringify(headerOf(shell)) + '\n');
 
   let open = true;
@@ -367,6 +368,16 @@ async function bumpBuild(store, capture) {
 }
 
 /**
+ * The first line of a capture file.
+ *
+ * The field list is written out rather than spread, so that what reaches disk is a decision
+ * somebody made. The cost of that is this: a field added to `Capture` and not added here is
+ * silently dropped, and everything downstream reads its absence as a fact about the run. It
+ * happened to `rulesScope` — stamped on every capture, written to none of them, and the
+ * feature that reads it took the "this record predates the stamp" branch forever. If you add
+ * a field to Capture that a later run needs, add it here and to the read in `loadCapture`,
+ * and prove it with a write-then-read test rather than a unit test on the stamping.
+ *
  * @param {Capture} capture
  * @returns {Record<string, unknown>}
  */
@@ -381,6 +392,7 @@ function headerOf(capture) {
     run: capture.run,
     startedAt: capture.startedAt,
     rules: capture.rules,
+    rulesScope: capture.rulesScope,
   };
 }
 
@@ -512,6 +524,7 @@ export async function loadCapture(store, where) {
   };
   if (header.source) capture.source = header.source;
   if (header.rules) capture.rules = header.rules;
+  if (header.rulesScope) capture.rulesScope = header.rulesScope;
   if (end?.coverage) capture.coverage = end.coverage;
 
   const notes = [];
@@ -822,6 +835,59 @@ export async function pruneBuild(store, buildId, opts = {}) {
     kept += refs.length - doomed.length;
   }
   return { removed, kept };
+}
+
+/**
+ * Throw the whole of a build away: its record, its captures, its folder.
+ *
+ * The companion `pruneBuild` thins one build's captures down to the newest few, which is the
+ * right tool when a build is worth keeping and its hundred captures are not. It is the wrong
+ * tool for the growth anybody actually measures: one build FOLDER per check, forever, in a
+ * directory this tool asks people to commit. Nothing could remove a folder at all, so the only
+ * housekeeping that existed could not touch the thing that grows.
+ *
+ * The two refusals are the same two, for the same reason, and they are loud rather than quiet
+ * because deleting the evidence of what "working" means is not recoverable:
+ *
+ *   - A build any product points at as its reference is never removed. Its captures are the
+ *     only record of what working looked like, and once they are gone the next check has
+ *     nothing to compare against.
+ *   - A build whose own record cannot be read is never removed. An unreadable record is the
+ *     one state where we do not know what we would be deleting, and "I could not tell, so I
+ *     deleted it" is the wrong way round.
+ *
+ * WHAT TO KEEP IS NOT DECIDED HERE. This removes one build that has been named. Which builds
+ * are worth keeping — how many, how long, whether a `work-` build off a dirty tree is worth
+ * less than a `git-` one off a commit — is a policy about somebody's disk and their history,
+ * and it belongs where the run knows what it just did, not in the file that owns the folder.
+ *
+ * @param {Store} store
+ * @param {string} buildId
+ * @returns {Promise<{removed: true, captures: number}>}
+ */
+export async function removeBuild(store, buildId) {
+  const record = await loadBuild(store, buildId);
+  const references = await loadReferences(store);
+
+  // Asked of the POINTERS rather than of the build's own record, for the reason spelled out in
+  // pruneBuild: a build whose build.json is missing answers nothing, and reading it the other
+  // way round would skip the guard exactly when it matters most.
+  const pointedAt = Object.values(references).filter((p) => p?.buildId === buildId);
+  if (pointedAt.length > 0) {
+    throw new StaysFixedError(
+      `${buildId} is the reference for ${pointedAt.map((p) => p.product).join(', ')}, so it cannot be thrown away.`,
+      { hint: 'Point the reference at a newer build first, with setReference.' },
+    );
+  }
+  if (!record) {
+    throw new StaysFixedError(`Nothing here says what ${buildId} is, so it will not be thrown away.`, {
+      hint: 'Its build.json is missing. Deleting a build on the strength of a record nobody can read is how the evidence for "this used to work" disappears. Run a check against it to rewrite the record, or delete the folder deliberately.',
+    });
+  }
+
+  const captures = (await listCaptures(store, { buildId })).length;
+  await fsp.rm(buildDir(store, buildId), { recursive: true, force: true });
+  return { removed: true, captures };
 }
 
 /**

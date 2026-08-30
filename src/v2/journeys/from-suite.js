@@ -374,6 +374,13 @@ export async function runOneFile(opts) {
 
   /** @type {NodeJS.ProcessEnv} */
   const env = { ...process.env, STAYSFIXED_HARVEST: '1' };
+  // Node's own test runner marks the processes it starts with NODE_TEST_CONTEXT, and a test
+  // file that finds it switches from TAP to a private binary stream meant for its parent. Let
+  // that through and every file we run comes back having reported nothing at all, and the
+  // harvest says - calmly, one line per file - that this project's suite cannot be walked.
+  // It bites whenever the harvest is itself started from inside a test run, which is exactly
+  // where anybody would first try it.
+  delete env.NODE_TEST_CONTEXT;
   // Node's own runner writes coverage for the process and every child it spawns, which is
   // exactly how a test file's own run gets measured. Vitest is asked for its own instead.
   if (wantCoverage && opts.runner === 'node:test') env.NODE_V8_COVERAGE = coverageDir;
@@ -505,30 +512,149 @@ function runToEnd(command, argv, opts) {
 // ---------------------------------------------------------------------------
 
 /**
- * Pull the check names out of TAP.
+ * One check a test file reported.
+ *
+ * `detail` is only filled in for a check that failed, and it is the whole of what the runner
+ * said about it. It matters because "this test is still failing" and "this test is failing
+ * for a completely different reason now" are two different facts, and a pass-or-fail flag
+ * alone cannot tell them apart - which is exactly the half an exit code misses.
+ *
+ * @typedef {object} Check
+ * @property {string} name
+ * @property {boolean} ok
+ * @property {string} [detail]
+ */
+
+/**
+ * Pull the checks out of TAP, each with whether it passed and what it said when it did not.
  *
  * Names rather than counts, because two runs producing thirteen checks each is not the same
  * evidence as two runs producing the same thirteen checks.
  *
  * @param {string} output
- * @returns {{tests: string[], passed: number, failed: number}}
+ * @returns {Check[]} in the order the runner reported them
  */
-export function parseTap(output) {
-  /** @type {string[]} */
-  const tests = [];
-  let passed = 0;
-  let failed = 0;
-  for (const line of output.split('\n')) {
-    const match = /^\s*(not )?ok\s+\d+\s*-?\s*(.*)$/.exec(line);
+export function parseTapChecks(output) {
+  /** @type {Check[]} */
+  const checks = [];
+  const lines = String(output).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^\s*(not )?ok\s+\d+\s*-?\s*(.*)$/.exec(lines[i]);
     if (!match) continue;
     const name = match[2].replace(/\s*#\s*(SKIP|TODO).*$/i, '').trim();
     if (name === '') continue;
-    tests.push(name);
-    if (match[1]) failed++;
-    else passed++;
+    const ok = !match[1];
+    if (ok) {
+      checks.push({ name, ok });
+      continue;
+    }
+    // A failing check is followed by an indented block holding what went wrong. It opens on
+    // `---` and closes on `...`, and everything between is the reason this check is worth
+    // reading rather than counting.
+    /** @type {string[]} */
+    const said = [];
+    let j = i + 1;
+    if (/^\s*---\s*$/.test(lines[j] ?? '')) {
+      j++;
+      while (j < lines.length && !/^\s*\.\.\.\s*$/.test(lines[j])) {
+        said.push(lines[j]);
+        j++;
+      }
+      i = j;
+    }
+    const detail = withoutRunnerTiming(said.join('\n')).trim();
+    checks.push(detail === '' ? { name, ok } : { name, ok, detail });
   }
-  tests.sort();
-  return { tests, passed, failed };
+  return checks;
+}
+
+/**
+ * Pull the check names out of TAP.
+ *
+ * @param {string} output
+ * @returns {{tests: string[], passed: number, failed: number}}
+ */
+export function parseTap(output) {
+  const checks = parseTapChecks(output);
+  return {
+    tests: checks.map((c) => c.name).sort(),
+    passed: checks.filter((c) => c.ok).length,
+    failed: checks.filter((c) => !c.ok).length,
+  };
+}
+
+/**
+ * The runner's own stopwatch, taken back out of what it printed.
+ *
+ * Measured rather than assumed: two runs of the same three-check file, on the same bytes,
+ * minutes apart, differ in exactly four lines and every one of them is a `duration_ms`.
+ * Nothing else moves. So this one small rule turns the whole of what a test runner printed
+ * from noise into something worth comparing word for word - and comparing it is the point,
+ * because a program that starts printing a deprecation warning under a test that still
+ * passes is invisible to an exit code.
+ *
+ * WHAT THIS COULD HIDE, said plainly: a test that got slower. That is already the one thing
+ * this tool refuses to report on principle - see `howLongItTook` in adapters/contract.js -
+ * so nothing is lost here that was ever going to be claimed.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function withoutRunnerTiming(text) {
+  return String(text)
+    .split('\n')
+    .filter((line) => !/^\s*#?\s*duration_ms[:\s]/.test(line))
+    .join('\n');
+}
+
+/** The keys vitest fills in from a clock. A named list, so nothing else is touched. */
+const VITEST_CLOCK_KEYS = new Set([
+  'duration', 'startTime', 'endTime', 'start', 'end', 'setupDuration', 'collectDuration',
+  'prepareDuration', 'environmentSetupDuration', 'runtime', 'heap',
+]);
+
+/**
+ * Everything a test runner printed, with its own stopwatch out of it and nothing else.
+ *
+ * Node's runner narrates its timings as `duration_ms` lines, which come straight out. Vitest
+ * hands back a JSON report with the times scattered through it under named keys, so it is
+ * parsed and those exact keys - a named list, never a pattern over the text - are replaced.
+ * Replaced rather than deleted, because a key vanishing and a key holding a different number
+ * are two different facts and only one of them is the clock.
+ *
+ * Anything that will not parse comes back with the line rule applied and no more. Guessing
+ * at the shape of text nobody recognises is how a real change gets rubbed out.
+ *
+ * @param {Runner} runner
+ * @param {string} text
+ * @returns {string}
+ */
+export function quietenRunnerOutput(runner, text) {
+  const plain = withoutRunnerTiming(text);
+  if (runner !== 'vitest') return plain;
+  const start = plain.indexOf('{');
+  if (start < 0) return plain;
+  try {
+    const report = JSON.parse(plain.slice(start));
+    return `${plain.slice(0, start)}${JSON.stringify(hushClock(report), null, 2)}`;
+  } catch {
+    return plain;
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function hushClock(value) {
+  if (Array.isArray(value)) return value.map(hushClock);
+  if (value === null || typeof value !== 'object') return value;
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  for (const [key, inner] of Object.entries(value)) {
+    out[key] = VITEST_CLOCK_KEYS.has(key) && typeof inner === 'number' ? 'a time, not compared' : hushClock(inner);
+  }
+  return out;
 }
 
 /**
@@ -537,24 +663,75 @@ export function parseTap(output) {
  */
 async function readVitestResults(file) {
   try {
-    const report = JSON.parse(await fsp.readFile(file, 'utf8'));
-    /** @type {string[]} */
-    const tests = [];
-    let passed = 0;
-    let failed = 0;
-    for (const suite of report.testResults ?? []) {
-      for (const assertion of suite.assertionResults ?? []) {
-        const name = [assertion.ancestorTitles?.join(' > '), assertion.title].filter(Boolean).join(' > ');
-        tests.push(name);
-        if (assertion.status === 'passed') passed++;
-        else if (assertion.status === 'failed') failed++;
-      }
-    }
-    tests.sort();
-    return { tests, passed, failed };
+    const checks = checksFromVitestReport(JSON.parse(await fsp.readFile(file, 'utf8')));
+    return {
+      tests: checks.map((c) => c.name).sort(),
+      passed: checks.filter((c) => c.ok).length,
+      failed: checks.filter((c) => !c.ok).length,
+    };
   } catch {
     return { tests: [], passed: 0, failed: 0 };
   }
+}
+
+/**
+ * Vitest's own JSON report, as checks.
+ *
+ * @param {any} report
+ * @returns {Check[]}
+ */
+export function checksFromVitestReport(report) {
+  /** @type {Check[]} */
+  const checks = [];
+  for (const suite of report?.testResults ?? []) {
+    for (const assertion of suite?.assertionResults ?? []) {
+      const name = [assertion.ancestorTitles?.join(' > '), assertion.title].filter(Boolean).join(' > ');
+      if (name === '') continue;
+      const ok = assertion.status === 'passed';
+      const detail = withoutRunnerTiming(
+        Array.isArray(assertion.failureMessages) ? assertion.failureMessages.join('\n') : '',
+      ).trim();
+      checks.push(ok || detail === '' ? { name, ok } : { name, ok, detail });
+    }
+  }
+  return checks;
+}
+
+/**
+ * The checks a walked test file reported, read out of whatever the runner printed.
+ *
+ * This is the walking half of the harvest. `runOneFile` reads a runner it started itself and
+ * knows exactly where the report went; a journey being walked months later has only the text
+ * the command printed. The two live next to each other on purpose - a journey read
+ * differently from the way it was harvested is not the same journey.
+ *
+ * `read` false is not "no checks". It means nothing here could tell, and the caller has to
+ * report that as a hole rather than as a file with nothing in it.
+ *
+ * @param {Runner} runner
+ * @param {string} stdout
+ * @returns {{checks: Check[], read: boolean, why: string}}
+ */
+export function readChecks(runner, stdout) {
+  const text = String(stdout ?? '');
+  if (runner === 'vitest') {
+    // Asked for `--reporter=json` with nowhere to put it, vitest prints the report to the
+    // screen, sometimes after a banner. The first `{` that parses is the report.
+    const start = text.indexOf('{');
+    if (start >= 0) {
+      try {
+        const checks = checksFromVitestReport(JSON.parse(text.slice(start)));
+        if (checks.length > 0) return { checks, read: true, why: `Vitest reported ${checks.length} checks.` };
+      } catch { /* fall through to TAP, which some vitest setups print instead */ }
+    }
+  }
+  const checks = parseTapChecks(text);
+  if (checks.length > 0) return { checks, read: true, why: `${checks.length} checks reported.` };
+  return {
+    checks: [],
+    read: false,
+    why: 'The test runner printed nothing this could read as a list of checks, so which checks passed is not known.',
+  };
 }
 
 /**
@@ -719,6 +896,11 @@ export function relativeIfInside(url, root) {
  * @property {string[]} [files]         Exact files, relative to the root. Overrides listing.
  * @property {string[]} [only]          Substrings a test file's path must contain.
  * @property {number} [limit]           Stop after this many files. Coverage says so out loud.
+ * @property {number} [budgetMs]        Stop harvesting once this much time has gone, and name
+ *                                      every file that was not reached. Default
+ *                                      `DEFAULT_HARVEST_BUDGET_MS`. Zero means no budget,
+ *                                      which is a thing to ask for on purpose and never a
+ *                                      default.
  * @property {1|2} [repeat]             Runs per file. Two is the default and it is the point:
  *                                      a journey that does not reproduce twice on the same
  *                                      build is rejected at birth rather than admitted and
@@ -748,10 +930,35 @@ export function relativeIfInside(url, root) {
  * @property {{file: string, failed: number}[]} failing
  *                                         Files whose checks did not all pass. Kept anyway —
  *                                         what a test exercises is useful even when it is red.
+ * @property {string[]} notReached
+ *                                         Test files the budget ran out before. Named one by
+ *                                         one, never counted: "some of your tests were
+ *                                         skipped" tells a reader nothing they can act on, and
+ *                                         a reader who cannot tell which half of their suite is
+ *                                         being watched will assume it is all of it.
+ * @property {number} [budgetMs]           The budget this harvest was held to, when it had one.
  * @property {Missing[]} missing
  * @property {string[]} notes
  * @property {number} durationMs
  */
+
+/**
+ * How long a harvest gets before it stops and says what it did not reach.
+ *
+ * WHY THERE IS A BUDGET AT ALL. This whole tool is worth using because it is cheap enough to
+ * run on every change. A stranger's test suite is not cheap: twenty minutes is an ordinary
+ * number for a real one, and the harvest runs every file TWICE to prove it repeats. A check
+ * that costs three quarters of an hour is a check nobody runs, and a check nobody runs
+ * catches nothing - which is a worse failure than any bug it could have found.
+ *
+ * Ninety seconds is not a guess about how long suites take. It is a statement about how long
+ * somebody will wait inside an edit-and-check loop before deciding to switch the thing off.
+ *
+ * The budget stops the harvest. It never stops it QUIETLY: every file it did not reach is
+ * named in the report and lands in the coverage ledger by name, because a partial harvest
+ * reported as a whole one is the tool lying about how much of the product it is watching.
+ */
+export const DEFAULT_HARVEST_BUDGET_MS = 90_000;
 
 /**
  * Harvest journeys out of a project's own test suite.
@@ -761,7 +968,14 @@ export function relativeIfInside(url, root) {
  */
 export async function harvestJourneys(opts) {
   const started = Date.now();
-  const root = path.resolve(opts.root);
+  // The real path, never the one we were handed. On a Mac /tmp is a symlink to /private/tmp,
+  // so a project reached through /tmp runs its tests and gets coverage back full of
+  // /private/tmp paths - every one of which looks like a file outside the project, and every
+  // one of which is thrown away. The harvest then says, perfectly calmly, that the tests
+  // touched nothing at all. That is a silence, and a silence is the one failure this tool
+  // exists to prevent, so the path is resolved once, here, before anything is measured
+  // against it.
+  const root = await realRoot(opts.root);
   const log = opts.log ?? (() => {});
   const detection = opts.runner
     ? { runner: opts.runner, why: 'The runner was named by the caller.', binary: opts.binary, missing: [], notes: [] }
@@ -780,10 +994,13 @@ export async function harvestJourneys(opts) {
     touchedMeasured: false,
     rejected: [],
     failing: [],
+    notReached: [],
     missing: [...(detection.missing ?? [])],
     notes: [...(detection.notes ?? [])],
     durationMs: 0,
   };
+  const budgetMs = opts.budgetMs ?? DEFAULT_HARVEST_BUDGET_MS;
+  if (budgetMs > 0) report.budgetMs = budgetMs;
 
   if (runner === 'none') {
     report.durationMs = Date.now() - started;
@@ -818,6 +1035,14 @@ export async function harvestJourneys(opts) {
   for (const file of listed.files) {
     if (opts.signal?.aborted) {
       report.rejected.push({ file, why: 'The harvest was stopped before this file was reached.' });
+      continue;
+    }
+    // Checked before starting a file rather than after finishing one, so the budget is a
+    // ceiling on when the harvest STARTS work and not a suggestion that one slow file can
+    // blow through by ten minutes. What it costs: a file that would just have fitted is left
+    // out. What it buys: the number in the budget is the truth.
+    if (budgetMs > 0 && Date.now() - started >= budgetMs) {
+      report.notReached.push(file);
       continue;
     }
     log(`Running ${file}${repeat > 1 ? ' (twice, to see whether it repeats)' : ''}.`);
@@ -872,6 +1097,15 @@ export async function harvestJourneys(opts) {
   }
 
   if (!opts.scratchDir) await fsp.rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+
+  if (report.notReached.length > 0) {
+    report.notes.push(
+      `The harvest stopped after ${Math.round((Date.now() - started) / 1000)} seconds, which is its budget, with ` +
+      `${report.notReached.length} test ${report.notReached.length === 1 ? 'file' : 'files'} still to go. Whatever ` +
+      `those walk is not being watched. They are named one by one, and a bigger budget or a narrower list of files ` +
+      `is how they get in.`,
+    );
+  }
 
   report.journeys = journeys.length;
   report.touchedFiles = touchedEverything.size;
@@ -985,4 +1219,76 @@ export function slugPath(file) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * The path a project really lives at, with every symlink on the way resolved.
+ *
+ * @param {string} root
+ * @returns {Promise<string>}
+ */
+async function realRoot(root) {
+  const absolute = path.resolve(root);
+  try {
+    return await fsp.realpath(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Only the tests near the change
+// ---------------------------------------------------------------------------
+
+/**
+ * Split harvested journeys into the ones worth walking for this change and the ones that
+ * cannot have been touched by it.
+ *
+ * WHY THIS IS ALLOWED TO BE A FILTER AT ALL. Skipping tests to go faster is normally how a
+ * safety net gets holes cut in it, and the usual version of this - guess from the name, walk
+ * `total.test.js` because `total.js` changed - earns that reputation, because a name is not
+ * evidence.
+ *
+ * This is not that. Harvesting a file MEASURES what it executed: Node writes the coverage
+ * itself, and every harvested journey arrives carrying the list of project files that
+ * actually ran. A test file whose measured list holds not one file you touched cannot have
+ * run different code, so walking it proves nothing and costs a process launch.
+ *
+ * THE TWO WAYS THIS COULD BE WRONG, and what is done about each. A test that reaches code by
+ * a path the coverage never saw - a child process, a native module - would be dropped on
+ * false evidence, so a journey that does not KNOW what it touched is always walked and never
+ * filtered. And code reached only on some runs would make the measurement itself unsteady,
+ * which is exactly what the harvest's two runs reject a file for. What is left is filtered on
+ * a measurement, not on a hunch.
+ *
+ * Nothing here decides quietly: the ones left out come back named, for the ledger.
+ *
+ * @param {SuiteJourney[]} journeys
+ * @param {string[]} changed          Project files that changed, relative to the root.
+ * @returns {{walk: SuiteJourney[], skipped: {journey: string, why: string}[]}}
+ */
+export function testsNear(journeys, changed) {
+  const changedFiles = new Set(changed.map((file) => String(file).split(path.sep).join('/')));
+  /** @type {SuiteJourney[]} */
+  const walk = [];
+  /** @type {{journey: string, why: string}[]} */
+  const skipped = [];
+
+  for (const journey of journeys) {
+    const touched = journey.touched;
+    if (!touched?.measured || touched.files.length === 0) {
+      walk.push(journey);
+      continue;
+    }
+    // Its own file counts. A test you edited is the most interesting one there is.
+    const reaches = [...touched.files, journey.from ?? ''].some((file) => changedFiles.has(file));
+    if (reaches) walk.push(journey);
+    else {
+      skipped.push({
+        journey: journey.name,
+        why: 'Nothing it was measured going through was changed, so it would run exactly the same code twice.',
+      });
+    }
+  }
+  return { walk, skipped };
 }

@@ -55,6 +55,14 @@ const NOT_SOURCE = new Set([
 
 const SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.mts', '.cts', '.vue', '.svelte'];
 
+/**
+ * How many files a journey may touch and still be used to say where a finding lives.
+ *
+ * A journey that went through four hundred files touches everything, and letting it answer
+ * would put every finding at distance zero and quietly switch the whole ranking off.
+ */
+const MAX_JOURNEY_FILES = 25;
+
 /** Ceilings, so a check on a very large repo never turns into a crawl of it. */
 const MAX_FILES = 4000;
 const MAX_FILE_BYTES = 400_000;
@@ -122,6 +130,14 @@ const CHANNEL_WEIGHT = {
  * @property {boolean} beyond        The source file is in this project and no path of at
  *                                   most `maxHops` imports leads to it from anything changed.
  * @property {string} [beyondFile]   Which file, so the sentence can name it.
+ * @property {{journey: string, files: number}} [tooBroad]
+ *                                   Nothing named the finding's own source, and the journey
+ *                                   it came from touched so many files that using them would
+ *                                   have put everything at distance zero. That is a THIRD
+ *                                   kind of not knowing, and until 2026-08-30 it was worded
+ *                                   as the first — the reader was told nothing said which
+ *                                   code this came from, when in fact plenty did and all of
+ *                                   it was too broad to be worth anything.
  */
 
 /**
@@ -151,6 +167,17 @@ const CHANNEL_WEIGHT = {
  *                                    everything downstream has to be told which of the two
  *                                    it is looking at.
  * @property {string} [patchUnreadWhy]
+ * @property {string} base         What the diff was measured FROM: 'HEAD' when only the
+ *                                 working tree was read, or the reference build's commit when
+ *                                 one was named. A hunk in this patch can only be reverted in
+ *                                 a checkout of THIS commit, which is why it travels with it.
+ * @property {boolean} committed   True when the diff was measured from the reference build's
+ *                                 commit rather than from HEAD, so work that has already been
+ *                                 committed is inside it too. False means the working tree was
+ *                                 all that was read, and nothing downstream may then say a
+ *                                 word about whether the product changed — only about whether
+ *                                 the working tree did.
+ * @property {string} [baseWhy]    Why the commit that was asked for was not used.
  */
 
 /**
@@ -163,15 +190,21 @@ const CHANNEL_WEIGHT = {
  *   guards?: string[],
  *   touches?: Record<string, string[]>,
  *   changed?: Changed,
+ *   since?: string,
  *   maxHops?: number,
  * }} opts
+ *   `since` is the reference build's commit. Pass it and a change that has been COMMITTED is
+ *   measured like any other; leave it out and only the working tree is read, which goes blind
+ *   the moment an agent commits its work — and committing at the end of a task is what an
+ *   agent does.
  * @returns {Promise<{findings: Finding[], notes: string[], youChanged: string[]}>}
  */
 export async function rankFindings(findings, opts) {
   /** @type {string[]} */
   const notes = [];
   const guards = opts.guards ?? [];
-  const changed = opts.changed ?? (await whatChanged(opts.cwd));
+  const changed = opts.changed ?? (await whatChanged(opts.cwd, { since: opts.since }));
+  if (changed.baseWhy) notes.push(changed.baseWhy);
   if (!changed.ok && changed.why) {
     notes.push(
       `${changed.why} Findings are ordered by what kind of thing they are instead of by how far they sit from your edit.`,
@@ -208,13 +241,20 @@ export async function rankFindings(findings, opts) {
         `${graph.unreadable.length} source ${graph.unreadable.length === 1 ? 'file' : 'files'} could not be opened for the distance measure: ${graph.unreadable.slice(0, 3).join(', ')}. The same warning applies — what they import looks unconnected.`,
       );
     }
+    if (graph.unreadableDirs.length > 0) {
+      notes.push(
+        `${graph.unreadableDirs.length} ${graph.unreadableDirs.length === 1 ? 'folder' : 'folders'} could not be opened for the distance measure: ${graph.unreadableDirs.slice(0, 3).join(', ')}${graph.unreadableDirs.length > 3 ? ', and others' : ''}. Nothing inside ${graph.unreadableDirs.length === 1 ? 'it' : 'them'} is in the graph at all, so a difference coming from there cannot be placed near or far from your edit.`,
+      );
+    }
     distances = distancesFrom(graph.neighbours, seeds, hops);
   } else if (changed.ok && changed.patchUnread !== true) {
-    notes.push('Nothing in the working tree has changed, so none of this can be blamed on an edit you just made.');
+    notes.push(`${nothingChanged(changed)} None of this can be blamed on an edit you just made.`);
   }
 
+  /** @type {string[]} */
+  const blindSpots = [];
   const ranked = findings.map((finding) => {
-    const sealedClass = classOf(finding, guards);
+    const sealedClass = classOf(finding, guards, (what) => blindSpots.push(what));
     const how = distanceFor(finding, distances, changed.root, opts.touches ?? {}, known);
     /** @type {Finding} */
     const out = {
@@ -222,12 +262,18 @@ export async function rankFindings(findings, opts) {
       class: sealedClass,
       sealed: sealedClass !== 'ordinary',
       rank: scoreOf(finding, sealedClass, how),
-      why: explain(finding, sealedClass, how, seeds.length > 0, hops),
+      why: explain(finding, sealedClass, how, seeds.length > 0, hops, changed),
     };
     const near = nearestFiles(finding, distances, changed.root);
     if (near.length > 0) out.nearFiles = near;
     return out;
   });
+
+  if (blindSpots.length > 0) {
+    notes.push(
+      `${blindSpots.slice(0, 3).join(' ')}${blindSpots.length > 3 ? ` And ${blindSpots.length - 3} more like it.` : ''} Anything filed as ordinary that came from one of those is ordinary only as far as anybody could see.`,
+    );
+  }
 
   ranked.sort((a, b) => b.rank - a.rank || (b.count ?? 0) - (a.count ?? 0) || a.id.localeCompare(b.id));
   return { findings: ranked, notes, youChanged: [...changed.files, ...changed.untracked] };
@@ -246,9 +292,13 @@ export async function rankFindings(findings, opts) {
  *
  * @param {Finding} finding
  * @param {string[]} guards  Guard names, so a difference touching one is sealed by name.
+ * @param {(what: string) => void} [onBlind]  Told when a value could not be turned into text
+ *   at all. That value was not searched for money, signing in, losing data, a crash or a
+ *   guard — so `ordinary` coming back means "nothing found in what could be read", which is
+ *   not the same claim and must not be made silently.
  * @returns {FindingClass}
  */
-export function classOf(finding, guards) {
+export function classOf(finding, guards, onBlind) {
   const haystack = [
     finding.title,
     finding.signature ?? '',
@@ -272,9 +322,27 @@ export function classOf(finding, guards) {
   // and diffed several times over.
   /** @type {string[]} */
   const values = [];
+  let blind = 0;
+  /** @param {unknown} value */
+  const add = (value) => {
+    const said = asText(value);
+    if (said.ok) values.push(said.text);
+    else blind += 1;
+  };
   for (const d of finding.differences) {
-    if (d.reference !== undefined) values.push(asText(d.reference));
-    if (d.candidate !== undefined) values.push(asText(d.candidate));
+    if (d.reference !== undefined) add(d.reference);
+    if (d.candidate !== undefined) add(d.candidate);
+  }
+  // A value that will not turn into text — something holding a loop, a BigInt — used to come
+  // back as the empty string and go into the search alongside the real ones. Nothing matched
+  // in it, of course, and the finding was filed `ordinary`, which is exactly the class an
+  // agent is allowed to wave through on its own. The whole point of this function is that a
+  // crash or a charge cannot be waved through, so being unable to look inside a value has to
+  // travel out of here rather than be spent as a quiet nothing-found.
+  if (blind > 0 && onBlind) {
+    onBlind(
+      `${blind} ${blind === 1 ? 'value' : 'values'} in "${finding.title}" could not be read as text, so nothing looked inside ${blind === 1 ? 'it' : 'them'} for money, signing in, losing data, a crash or a guard.`,
+    );
   }
   /** @param {RegExp} rx */
   const says = (rx) => rx.test(haystack) || values.some((v) => rx.test(v));
@@ -312,14 +380,30 @@ export function classOf(finding, guards) {
  * empty string rather than taking the run down over a sealing check.
  *
  * @param {unknown} value
- * @returns {string}
+ * @returns {{ok: boolean, text: string}}  `ok` is false only when the value could not be
+ *   turned into anything searchable at all. An empty string that came back from a value with
+ *   genuinely no words in it, and an empty string standing in for a value nobody could read,
+ *   used to be indistinguishable here.
  */
 function asText(value) {
-  if (typeof value === 'string') return value;
+  if (typeof value === 'string') return { ok: true, text: value };
   try {
-    return JSON.stringify(value) ?? '';
+    const json = JSON.stringify(value);
+    // undefined, a function or a symbol. There are no words in any of those, and saying so
+    // is a true answer rather than a failure.
+    if (json === undefined) return { ok: true, text: '' };
+    return { ok: true, text: json };
   } catch {
-    return '';
+    // A BigInt, or a value holding a loop. Last try: whatever it says about itself.
+    try {
+      const said = String(value);
+      // "[object Object]" is not the value, it is the shape of the value, and searching it
+      // for the word "charge" proves nothing at all.
+      if (said && said !== '[object Object]') return { ok: true, text: said };
+    } catch {
+      // Even its own toString threw. There is nothing left to read.
+    }
+    return { ok: false, text: '' };
   }
 }
 
@@ -359,16 +443,20 @@ function scoreOf(finding, sealedClass, how) {
  * @param {HowFar} how
  * @param {boolean} knewWhatChanged
  * @param {number} hops   How far out the measure walked before it stopped.
+ * @param {Changed} changed
  */
-function explain(finding, sealedClass, how, knewWhatChanged, hops) {
+function explain(finding, sealedClass, how, knewWhatChanged, hops, changed) {
   if (sealedClass !== 'ordinary') {
     return `Nobody may wave this through on their own: it touches ${SEAL_WORDS[sealedClass]}. It goes to a person whatever caused it.`;
   }
   if (!knewWhatChanged) {
-    return 'Nothing in the working tree has changed, so there is no edit to measure this against.';
+    return `${nothingChanged(changed)} There is no edit to measure this against.`;
   }
   if (how.beyond) {
     return `This comes from ${how.beyondFile}, which is source code the project has and which nothing you changed reaches within ${hops} steps. That is as far from your edit as this measure goes — the strongest shape a side effect has.`;
+  }
+  if (how.tooBroad) {
+    return `The only thing that says where this comes from is "${how.tooBroad.journey}", and that journey goes through ${how.tooBroad.files} files — too many for it to mean anything about where this lives, so how far it sits from your edit is unknown. Treat it as unexplained until you have checked.`;
   }
   if (how.distance === null) {
     return 'Nothing says which code this comes from, so how far it sits from your edit is unknown. Treat it as unexplained until you have checked.';
@@ -376,6 +464,23 @@ function explain(finding, sealedClass, how, knewWhatChanged, hops) {
   if (how.distance === 0) return 'This is in a file you just changed, so it is most likely what you meant to do.';
   if (how.distance === 1) return 'This is one step away from a file you changed, so your edit probably reaches it.';
   return `This is ${how.distance} steps away from anything you changed. That is what a side effect looks like.`;
+}
+
+/**
+ * The true version of "nothing has changed", which depends on what was actually looked at.
+ *
+ * Reading only the working tree and finding it clean says nothing whatever about whether the
+ * product changed — the change may be sitting in a commit. Saying "nothing has changed" on
+ * the back of that was this file's own blind spot described in the tool's most confident
+ * voice, four times over, on a run that had just found four differences.
+ *
+ * @param {Changed} changed
+ * @returns {string}
+ */
+function nothingChanged(changed) {
+  return changed.committed
+    ? 'Nothing has changed between the build you were happy with and this one — not in a commit and not in the working tree.'
+    : 'Nothing in the working tree has changed, and nothing here looked at what may already be committed.';
 }
 
 /**
@@ -418,10 +523,16 @@ function distanceFor(finding, distances, root, touches, known) {
 
   for (const file of finding.nearFiles ?? []) look(file);
 
+  /** @type {{journey: string, files: number}[]} */
+  const tooBroad = [];
   if (found.length === 0 && seenButUnreached.length === 0) {
     for (const journey of journeysOf(finding)) {
       const files = touches[journey];
-      if (!files || files.length === 0 || files.length > 25) continue;
+      if (!files || files.length === 0) continue;
+      if (files.length > MAX_JOURNEY_FILES) {
+        tooBroad.push({ journey, files: files.length });
+        continue;
+      }
       for (const file of files) look(file);
     }
   }
@@ -429,6 +540,7 @@ function distanceFor(finding, distances, root, touches, known) {
   // ceiling, and a list that is bounded today is bounded by a constant somebody may raise.
   if (found.length > 0) return { distance: found.reduce((best, n) => (n < best ? n : best), found[0]), beyond: false };
   if (seenButUnreached.length > 0) return { distance: null, beyond: true, beyondFile: seenButUnreached[0] };
+  if (tooBroad.length > 0) return { distance: null, beyond: false, tooBroad: tooBroad[0] };
   return { distance: null, beyond: false };
 }
 
@@ -456,16 +568,56 @@ function nearestFiles(finding, distances, root) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Everything this tool writes about your project, kept out of what your project IS.
+ *
+ * A build is told from another build, and an edit is told from the rest of the tree, by what
+ * git says is in the working tree: the diff, plus the list of files git does not know about.
+ * Stays Fixed's own folder is a file git does not know about, and it gains files on every
+ * single run. Left in, it is counted as something the agent just changed.
+ *
+ * That cost the fingerprint first, and it was the worse half: two runs on identical source
+ * were two different builds, so the second could never find the first one's record, a clean
+ * checkout was never clean, `--against HEAD` matched nothing, and the stored-record
+ * comparison the whole design rests on could not work at all. Measured on a scratch product:
+ * five runs, one unchanged source file, five different build ids.
+ *
+ * It cost the ranking too, and that half went unfixed until 2026-08-30. `whatChanged` reads
+ * the same two git calls to work out how far a finding sits from the edit, so the tool's own
+ * output was one of the places the walk started from — a clean tree never got the sentence
+ * saying it was clean, `youChanged` named `.staysfixed/...` back to the person as a file
+ * they had edited, and the causal proof copied the whole store into its scratch checkout and
+ * believed there was a change to undo when there was none.
+ *
+ * Excluded rather than gitignored, and that difference matters: gitignoring it would fix the
+ * fingerprint and would also throw away the observation files the design says to keep
+ * forever. What a project's own tooling wrote about a project is never part of the project.
+ */
+export const NOT_THE_TOOLS_OWN_FOLDER = ':(exclude,top).staysfixed';
+
+/**
  * Read the working tree's diff: which files, and which hunks inside them.
  *
  * Read-only, and allowed to fail. A project that is not in git still gets
  * checked - it just gets its findings ordered by kind rather than by distance,
  * and it is told so.
  *
+ * A CHANGE THAT HAS BEEN COMMITTED IS STILL A CHANGE. This used to read the working tree and
+ * nothing else, so the moment an agent committed its work — which is what an agent does at
+ * the end of a task, and the reference is a shipped build, which is by definition a commit —
+ * the diff came back empty, the distance measure went blind, the ranking lost its ordering,
+ * and every finding carried the sentence "nothing in the working tree has changed, so there
+ * is no edit to measure this against" while the tool sat there holding four differences it
+ * had just found. The change was neither missing nor unknowable: it is `git diff <the
+ * reference's commit>`, which covers what was committed and what is still uncommitted in one
+ * patch. `since` is that commit, and with it "nothing has changed" becomes a thing this can
+ * say truthfully instead of a thing it says whenever the tree happens to be clean.
+ *
  * @param {string} cwd
+ * @param {{since?: string}} [opts]  `since` is the reference build's commit. Without it, only
+ *   the working tree is read, which is right for a caller that has no reference to name.
  * @returns {Promise<Changed>}
  */
-export async function whatChanged(cwd) {
+export async function whatChanged(cwd, opts = {}) {
   const root = await git(['rev-parse', '--show-toplevel'], cwd);
   if (!root) {
     return {
@@ -476,6 +628,8 @@ export async function whatChanged(cwd) {
       hunks: [],
       patch: '',
       root: cwd,
+      base: 'HEAD',
+      committed: false,
     };
   }
   const head = await git(['rev-parse', '--verify', 'HEAD'], cwd);
@@ -488,12 +642,38 @@ export async function whatChanged(cwd) {
       hunks: [],
       patch: '',
       root,
+      base: 'HEAD',
+      committed: false,
     };
   }
 
-  const diff = await gitTry(['diff', 'HEAD', '-U3', '--no-color', '--no-ext-diff'], cwd);
-  const names = await gitTry(['diff', 'HEAD', '--name-only'], cwd);
-  const others = await gitTry(['ls-files', '--others', '--exclude-standard'], cwd);
+  // A commit that is not in this checkout is not a reason to give up — the working tree is
+  // still worth reading — but it IS a reason to say so, because everything measured after it
+  // is measured from somewhere other than where the caller asked.
+  let base = 'HEAD';
+  let baseWhy = '';
+  if (opts.since) {
+    const resolved = await git(['rev-parse', '--verify', `${opts.since}^{commit}`], root);
+    if (resolved) base = resolved;
+    else {
+      baseWhy = `The build you were happy with is at ${opts.since}, and that commit is not in this checkout, so your change was measured from the working tree alone. Anything you have already committed is invisible to the ordering below.`;
+    }
+  }
+
+  // Asked from the repository root, not from wherever the caller was standing. `git diff`
+  // answers for the whole repository whatever folder it is run in; `git ls-files --others`
+  // does not — it lists only what is under the current folder, and it names those files
+  // relative to it. So a check run from a subfolder used to hand back new files under a path
+  // that resolved against the root to somewhere that does not exist, and never mentioned a
+  // new file anywhere else in the repository at all. The distance measure then started from
+  // a file that is not there, and the causal proof quietly declined to carry the real one
+  // into its scratch checkout because it "could not find" it.
+  // One argument, not a range. `git diff <commit>` is that commit's tree against the WORKING
+  // TREE, so committed work and uncommitted work arrive together in one patch that applies
+  // cleanly to a checkout of that commit — which is exactly what the causal proof needs.
+  const diff = await gitTry(['diff', base, '-U3', '--no-color', '--no-ext-diff', '--', NOT_THE_TOOLS_OWN_FOLDER], root);
+  const names = await gitTry(['diff', base, '--name-only', '--', NOT_THE_TOOLS_OWN_FOLDER], root);
+  const others = await gitTry(['ls-files', '--others', '--exclude-standard', '--', NOT_THE_TOOLS_OWN_FOLDER], root);
 
   // Not knowing WHICH files changed is a different and worse failure than not being able to
   // read the diff of them, so it is reported as not knowing anything rather than as an empty
@@ -508,6 +688,8 @@ export async function whatChanged(cwd) {
       hunks: [],
       patch: '',
       root,
+      base,
+      committed: base !== 'HEAD',
     };
   }
 
@@ -519,7 +701,10 @@ export async function whatChanged(cwd) {
     hunks: diff.ok ? parseHunks(diff.text) : [],
     patch: diff.ok ? diff.text : '',
     root,
+    base,
+    committed: base !== 'HEAD',
   };
+  if (baseWhy) changed.baseWhy = baseWhy;
   if (!diff.ok) {
     // A diff that is too big for the buffer, or a git that took too long, used to come back
     // as the empty string — which every reader downstream read as "the working tree is
@@ -616,7 +801,7 @@ export function parseHunks(patch) {
  *
  * @param {string} root
  * @param {{maxFiles?: number}} [opts]
- * @returns {Promise<{neighbours: Map<string, Set<string>>, files: string[], truncated: boolean, tooBig: string[], unreadable: string[]}>}
+ * @returns {Promise<{neighbours: Map<string, Set<string>>, files: string[], truncated: boolean, tooBig: string[], unreadable: string[], unreadableDirs: string[]}>}
  */
 export async function importGraph(root, opts = {}) {
   const limit = opts.maxFiles ?? MAX_FILES;
@@ -665,7 +850,7 @@ export async function importGraph(root, opts = {}) {
     }
   }
 
-  return { neighbours, files: files.list, truncated: files.truncated, tooBig, unreadable };
+  return { neighbours, files: files.list, truncated: files.truncated, tooBig, unreadable, unreadableDirs: files.unreadableDirs };
 }
 
 /**
@@ -707,13 +892,15 @@ export function distancesFrom(neighbours, seeds, maxHops) {
  *
  * @param {string} root
  * @param {number} limit
- * @returns {Promise<{list: string[], truncated: boolean}>}
+ * @returns {Promise<{list: string[], truncated: boolean, unreadableDirs: string[]}>}
  */
 async function sourceFiles(root, limit) {
   /** @type {string[]} */
   const list = [];
   /** @type {string[]} */
   const queue = [root];
+  /** @type {string[]} */
+  const unreadableDirs = [];
   let truncated = false;
   while (queue.length > 0) {
     const dir = queue.pop();
@@ -723,6 +910,12 @@ async function sourceFiles(root, limit) {
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
     } catch {
+      // A folder that will not open is every source file inside it, gone from the graph
+      // without a word — and this one was worse than the file-level version above it,
+      // because a folder is not one file, it is a whole branch of the product. Everything
+      // under it then looks like code nothing imports, so a side effect in it is either
+      // ranked as "we have no idea where this came from" or missed by the graph entirely.
+      unreadableDirs.push(path.relative(root, dir) || dir);
       continue;
     }
     for (const entry of entries) {
@@ -737,12 +930,12 @@ async function sourceFiles(root, limit) {
       if (!SOURCE_EXTENSIONS.includes(path.extname(entry.name))) continue;
       if (list.length >= limit) {
         truncated = true;
-        return { list, truncated };
+        return { list, truncated, unreadableDirs };
       }
       list.push(path.join(dir, entry.name));
     }
   }
-  return { list, truncated };
+  return { list, truncated, unreadableDirs };
 }
 
 /**

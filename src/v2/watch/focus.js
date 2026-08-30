@@ -131,19 +131,29 @@ export async function bringForward(name) {
  *  - When one of ours is in front and you have chosen nothing yet, it is left alone. That
  *    first appearance is the point: it is how you see what is happening.
  *
- * @param {{claims?: string[], everyMs?: number, graceMs?: number}} [opts]
+ * `look` and `putBack` exist so this loop can be exercised without a screen. They default to
+ * the two functions above and nothing in the tool passes them; a test does, because the
+ * bookkeeping — what counts as yours, when the screen is given back, how many times it
+ * happened — is the part that has to be right, and it is unreachable behind two calls to
+ * `osascript` that answer differently on every machine and not at all on most of them.
+ *
+ * @param {{claims?: string[], everyMs?: number, graceMs?: number, look?: () => Promise<string|null>, putBack?: (name: string) => Promise<boolean>}} [opts]
  * @returns {ScreenGuard}
  */
 export function guardTheScreen(opts = {}) {
   const everyMs = opts.everyMs ?? LOOK_EVERY_MS;
   const graceMs = opts.graceMs ?? GRACE_MS;
+  const whoIsInFront = opts.look ?? frontmostApp;
+  const putBack = opts.putBack ?? bringForward;
 
   /** @type {Set<string>} everything the tool opened */
   const ours = new Set(opts.claims ?? []);
   /** @type {string|null} the last application the person chose for themselves */
   let yours = null;
   let handedBack = 0;
-  let stopped = process.platform !== 'darwin';
+  // Nothing to guard where there is no window server — unless a caller supplied its own way
+  // of looking, which means it is being driven deliberately rather than left to the machine.
+  let stopped = process.platform !== 'darwin' && !opts.look;
   /** @type {ReturnType<typeof setTimeout>|null} */
   let timer = null;
   const startedAt = Date.now();
@@ -166,14 +176,14 @@ export function guardTheScreen(opts = {}) {
 
   const look = async () => {
     if (stopped) return;
-    const front = await frontmostApp();
+    const front = await whoIsInFront();
     if (front) {
       if (!isOurs(front)) {
         // The person chose this. It is now what "yours" means.
         yours = front;
       } else if (yours && Date.now() - startedAt > graceMs) {
         // Something of ours is in front, and there is somewhere to put you back.
-        const ok = await bringForward(yours);
+        const ok = await putBack(yours);
         if (ok) {
           handedBack += 1;
           detail(`the screen was taken by ${front}; gave it back to ${yours}`);

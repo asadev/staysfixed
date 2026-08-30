@@ -1201,7 +1201,24 @@ export const windowsAdapter = defineAdapter({
           // Pixels last, and only as evidence. A picture is written to the evidence folder and
           // pointed at; it is never the thing compared.
           const shot = await runner.call('shot', { hwnd: window.hwnd }, { timeoutMs: 45_000 });
-          if (shot.ok && shot.png && Number(shot.bytes) <= MAX_SHOT_BYTES) {
+          // THREE WAYS OUT OF HERE AND TWO OF THEM USED TO BE SILENT. A picture that failed,
+          // came back empty, or came back bigger than the cap simply produced no observation
+          // at all — so the pixels channel dropped out of the run without a word, and the
+          // ledger reported the same coverage as a run where every window was photographed.
+          // A cap is a decision and a decision has to be visible; a failure is a hole and a
+          // hole has to be named. Neither is a reason to lose the rest of the walk.
+          const tooBig = shot.ok === true && Boolean(shot.png) && Number(shot.bytes) > MAX_SHOT_BYTES;
+          if (!shot.ok || !shot.png || tooBig) {
+            seen.push(notCovered({
+              channel: 'pixels',
+              path: joinPath('screen', label, 'picture'),
+              reason: tooBig ? 'too big' : 'crashed',
+              says: tooBig
+                ? `The picture of "${label}" came back at ${sizeBucket(Number(shot.bytes))}, over the ${sizeBucket(MAX_SHOT_BYTES)} this keeps, so it was not stored. Every other channel still looked at that window; only the picture is missing.`
+                : `No picture of "${label}" could be taken${shot.error ? `: ${String(shot.error)}` : '.'} Every other channel still looked at that window; only the picture is missing.`,
+            }));
+          }
+          if (shot.ok && shot.png && !tooBig) {
             const file = path.join(ctx.evidenceDir, `windows-${journey.name}-${label.replace(/[^a-z0-9]+/gi, '-')}.png`);
             await fsp.writeFile(file, Buffer.from(String(shot.png), 'base64'));
             seen.push(observation({

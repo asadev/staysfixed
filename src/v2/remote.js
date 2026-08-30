@@ -57,8 +57,29 @@ import { howLongItTook, joinPath, notCovered, observation, sizeBucket, timeBucke
  */
 export const SENTINEL = '#SF#';
 
-/** The kinds of far side this file knows how to start. */
+/**
+ * The kinds of far side this file knows how to start.
+ *
+ * Checked at runtime rather than only in the types, because the types are not there when it
+ * matters. `farSideCommand` branches on 'windows' and treats everything else as posix, so a
+ * kind spelled 'win' used to be handed the Node bootstrap and sent to a Windows box, where it
+ * failed several seconds later as "node: not found" — a message about the far machine for a
+ * mistake made on this one.
+ */
 export const RUNNER_KINDS = /** @type {const} */ (['posix', 'windows']);
+
+/**
+ * @param {unknown} kind
+ * @returns {RunnerKind}
+ */
+function checkKind(kind) {
+  if (!(/** @type {readonly unknown[]} */ (RUNNER_KINDS).includes(kind))) {
+    throw new StaysFixedError(`There is no far side called "${String(kind)}".`, {
+      hint: `The kinds this file can start are: ${RUNNER_KINDS.join(', ')}.`,
+    });
+  }
+  return /** @type {RunnerKind} */ (kind);
+}
 
 /** @typedef {'posix'|'windows'} RunnerKind */
 
@@ -191,7 +212,7 @@ export function nodeBootstrap() {
  * @returns {string}
  */
 export function farSideCommand(kind, opts = {}) {
-  if (kind === 'windows') {
+  if (checkKind(kind) === 'windows') {
     const encoded = encodePowerShell(powerShellBootstrap());
     if (opts.psPath) return `exec "${opts.psPath}" -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
     const candidates = POWERSHELL_PATHS.map((p) => `"${p}"`).join(' ');
@@ -302,6 +323,12 @@ export function makeFrames() {
  * Written as text rather than shipped as a file because it must never be installed. It exists
  * in the memory of one `node -e` for the length of one run.
  *
+ * `read` says how long the file really was and whether it cut it. It used to hand back the
+ * first 64K with nothing to say it had stopped there, and two builds of a product whose file
+ * differs only after byte 65536 would then be compared, byte for byte, on two identical
+ * halves — and reported as unchanged. A cap that cannot be seen from the outside is not a cap,
+ * it is a wrong answer.
+ *
  * @returns {string}
  */
 export function posixAgentScript() {
@@ -331,7 +358,11 @@ const ops = {
     done({ ok: true, found });
   },
   read: (req, done) => {
-    try { done({ ok: true, text: fs.readFileSync(req.file, 'utf8').slice(0, req.limit || 65536) }); }
+    try {
+      const all = fs.readFileSync(req.file, 'utf8');
+      const cap = req.limit || 65536;
+      done({ ok: true, text: all.slice(0, cap), length: all.length, truncated: all.length > cap });
+    }
     catch (e) { done({ ok: false, error: String(e.message) }); }
   },
   sh: (req, done) => {
@@ -422,7 +453,7 @@ process.stdin.on('end', () => process.exit(0));
  * @param {RemoteRunnerOptions} opts
  */
 export function remoteRunner(opts) {
-  const kind = opts.kind ?? 'posix';
+  const kind = checkKind(opts.kind ?? 'posix');
   const host = opts.host;
   const say = opts.log ?? (() => {});
   const surface = opts.surface;
@@ -740,7 +771,13 @@ export function describeFacts(f) {
 /**
  * @typedef {object} RemoteDescription
  * @property {string} host
- * @property {boolean} reachable
+ * @property {boolean} reachable          A shell on that machine answers. NOT the same
+ *   question as `runnerStarted`, and folding the two together was a real bug: a machine with
+ *   ssh working and no Node on it came back as "could not be reached", and the fix offered
+ *   was to go and check the ssh config that already works.
+ * @property {boolean} runnerStarted      The small program this tool pushes down the
+ *   connection actually ran there. False on a reachable machine means Node is missing or too
+ *   old, and everything below is unknown for that reason rather than because nothing answered.
  * @property {string} how                 Plain English: what answered, or why nothing did.
  * @property {string|null} os
  * @property {boolean} windows            A real Windows desktop sits behind this host.
@@ -767,20 +804,35 @@ const TOOLS_WORTH_ASKING_ABOUT = ['node', 'git', 'adb', 'emulator', 'java', 'pyt
  *
  * It never throws. Somebody running doctor is already stuck.
  *
+ * WHAT THE CALLER MAY ALREADY KNOW. Starting the far side needs Node on that machine, so a
+ * machine with a perfectly good shell and no Node used to come back from here as "it could
+ * not be reached" — and `missingOn` then told somebody to go and fix the ssh config that
+ * already works. A caller that has proved the shell answers with something cheaper (doctor
+ * dials every host with a plain `echo` before it gets here) says so with `answered`, and
+ * hands over whatever its own probe found, so a failure to start the runner is reported as
+ * the missing Node it actually is.
+ *
  * @param {string} host
- * @param {{timeoutMs?: number, log?: (m: string) => void}} [opts]
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs]         How long one request may take. Default 20s.
+ * @param {number} [opts.windowsTimeoutMs]  The Windows probe on its own, which pays for
+ *   PowerShell's start-up and is therefore slower than everything else. Default 45s.
+ * @param {(m: string) => void} [opts.log]
+ * @param {boolean} [opts.answered]         The caller has already proved a shell answers here.
+ * @param {string|null} [opts.powershell]   A powershell.exe path the caller's own probe found.
  * @returns {Promise<RemoteDescription>}
  */
 export async function describeRemote(host, opts = {}) {
   /** @type {RemoteDescription} */
   const out = {
     host,
-    reachable: false,
-    how: 'it did not answer',
+    reachable: opts.answered === true,
+    runnerStarted: false,
+    how: opts.answered === true ? 'a shell on it answered when the caller dialled it' : 'it did not answer',
     os: null,
-    windows: false,
+    windows: typeof opts.powershell === 'string' && opts.powershell !== '',
     windowsVersion: null,
-    powershell: null,
+    powershell: opts.powershell ?? null,
     desktopLoggedIn: null,
     desktopLocked: null,
     tools: {},
@@ -792,6 +844,7 @@ export async function describeRemote(host, opts = {}) {
   try {
     const facts = await runner.open();
     out.reachable = true;
+    out.runnerStarted = true;
     out.how = 'it answered over ssh with the key already in the config';
     out.os = [facts.platform, facts.release].filter(Boolean).join(' ') || null;
 
@@ -799,10 +852,21 @@ export async function describeRemote(host, opts = {}) {
     out.tools = /** @type {Record<string, string|null>} */ (found.found ?? {});
 
     // The Windows question, asked of the filesystem rather than of $PATH. See POWERSHELL_PATHS.
-    const test = await runner.shell(
-      POWERSHELL_PATHS.map((p) => `if [ -x "${p}" ]; then echo "${p}"; fi`).join('; ')
-    );
-    const psPath = test.stdout.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? null;
+    // Skipped entirely when the caller's own probe already found the path: it is the same
+    // question and asking it twice only creates a second chance for the two to disagree.
+    let psPath = out.powershell;
+    if (!psPath) {
+      const test = await runner.shell(
+        POWERSHELL_PATHS.map((p) => `if [ -x "${p}" ]; then echo "${p}"; fi`).join('; ')
+      );
+      psPath = test.stdout.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? null;
+      // A probe that was killed comes back with an empty answer, which is the same empty
+      // answer a machine with no Windows on it gives. Reported as "no Windows here", that
+      // loses somebody the Windows runner they already have, and nothing anywhere says why.
+      if (!psPath && test.killed) {
+        out.notes.push('Whether there is a Windows desktop behind this machine is unknown: the question timed out rather than came back "no".');
+      }
+    }
     if (psPath) {
       out.powershell = psPath;
       out.windows = true;
@@ -819,7 +883,10 @@ export async function describeRemote(host, opts = {}) {
       ].join('; ');
       const probe = await runner.shell(
         `"${psPath}" -NoProfile -NonInteractive -EncodedCommand ${encodePowerShell(script)}`,
-        { timeoutMs: 45_000 }
+        // Its own knob, because this one call costs PowerShell's start-up and everything else
+        // here costs a round trip. Folding it into `timeoutMs` would mean a caller that wants
+        // the rest to be quick has to allow forty-five seconds for it too.
+        { timeoutMs: opts.windowsTimeoutMs ?? 45_000 }
       );
       const line = probe.stdout.split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? '';
       const [caption, version, explorers, logonui] = line.split('|');
@@ -828,12 +895,26 @@ export async function describeRemote(host, opts = {}) {
         out.desktopLoggedIn = Number(explorers) > 0;
         out.desktopLocked = Number(logonui) > 0;
       } else {
-        out.notes.push('PowerShell is there but did not answer a question about the desktop, so how much of Windows is usable is unknown.');
+        // Which of the two it was matters to whoever reads it: a probe that ran out of time
+        // says nothing about the machine, and a probe that answered something unreadable says
+        // something is wrong with PowerShell there. Both used to arrive as one sentence.
+        out.notes.push(
+          probe.killed
+            ? `PowerShell is there and the question about the desktop was still running after ${Math.round((opts.windowsTimeoutMs ?? 45_000) / 1000)} seconds, so how much of Windows is usable is unknown — not "not much".`
+            : 'PowerShell is there but did not answer a question about the desktop, so how much of Windows is usable is unknown.',
+        );
       }
     }
     await runner.close();
   } catch (error) {
-    out.how = error instanceof RemoteLinkLost ? error.message : `it could not be reached (${String(error)})`;
+    const why = error instanceof RemoteLinkLost ? error.message : String(error);
+    // Two different failures, and they were being reported as one. A machine that never
+    // answered is an ssh problem. A machine that answers and could not start the runner is a
+    // Node problem, and saying "it could not be reached" about it sends somebody to fix a
+    // connection that is working — while the one thing that would help goes unmentioned.
+    out.how = out.reachable
+      ? `a shell on it answers, but the small program this tool sends down the connection would not start there (${why})`
+      : error instanceof RemoteLinkLost ? why : `it could not be reached (${why})`;
     try { await runner.close(); } catch { /* nothing to close */ }
   }
 
@@ -868,8 +949,16 @@ export function missingOn(d) {
   if (!d.tools.node) {
     missing.push({
       what: 'Node on that machine',
+      // Two ways to get here and they deserve different words. Either the runner started and
+      // `which node` came back empty, or the runner never started at all — in which case the
+      // tools list is empty because nothing could ask, and a Node that is present but too old
+      // looks exactly the same from here. Saying "install Node" at somebody who has Node 12
+      // and is not told the version matters is how a person spends an afternoon on the wrong
+      // thing.
       unlocks: 'the general remote runner, which is how any platform there is walked',
-      howToGet: `ssh ${d.host} 'sudo apt-get install -y nodejs' — or whatever that machine installs packages with.`,
+      howToGet: d.reachable && !d.runnerStarted
+        ? `The program this tool sends down would not start there, which is Node missing or too old. Check it with: ssh ${d.host} 'node --version' — it has to be 22 or newer. Install or upgrade it with whatever that machine installs packages with, for example: ssh ${d.host} 'sudo apt-get install -y nodejs'`
+        : `ssh ${d.host} 'sudo apt-get install -y nodejs' — or whatever that machine installs packages with.`,
       blocking: true,
     });
   }
@@ -901,6 +990,12 @@ export function notesOn(d) {
   const notes = [];
   if (!d.reachable) return notes;
   notes.push('Nothing is installed on that machine. The program that does the watching is sent down the connection each run and dies with it.');
+  // Said out loud, because everything else in this description is empty for one reason and an
+  // empty list that does not say why reads as "there is nothing there". There may be plenty
+  // there; nothing could ask.
+  if (!d.runnerStarted) {
+    notes.push(`A shell on ${d.host} answers, but the program this tool sends down the connection did not start, so nothing below was actually asked of that machine — what is installed on it is unknown rather than absent.`);
+  }
   if (d.windows) {
     notes.push(`Windows is reached through ${d.powershell}, called from the Linux side. That absolute path is used deliberately: powershell.exe is not on the path of a non-interactive ssh session even when the machine is configured to add it.`);
     notes.push('Windows shows one desktop, so two builds can never run there at the same time. Runs are one after the other, and that is a real weakening of the same-machine guarantee, not a detail.');

@@ -26,6 +26,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { check, whatWasNotChecked, loadAdapters, ADAPTER_FOR_SURFACE } from '../../src/v2/check.js';
+import { buildLedger, doorFact, toCoverage, walkFromCapture } from '../../src/v2/coverage.js';
+import { httpAdapter } from '../../src/v2/adapters/http.js';
 import { capabilities } from '../../src/v2/doctor.js';
 import { callTool } from '../../src/v2/mcp/tools.js';
 import { scratchDir, cleanUp } from '../support.mjs';
@@ -343,5 +345,91 @@ describe('what this machine and this copy can honestly claim', () => {
         );
       }
     }
+  });
+});
+
+/**
+ * The join the whole ledger rests on: a door read out of the code, and an address the running
+ * product answered at.
+ *
+ * These are pure and fast on purpose. The bug they exist for was silent and total — every route
+ * on every server read as never walked, on runs that had just asked the server for all of them,
+ * because the HTTP adapter writes its observations under `api.<journey name>` and a route door's
+ * address is `route.<VERB>.<url>`. Nothing failed, nothing was slow, and the one number in this
+ * tool that must never be optimistic was instead wrong in the honest direction while the SENTENCE
+ * built from it was wrong in the direction that makes a person go and redo work already done.
+ */
+describe('a door and the address a walk touched', () => {
+  /**
+   * @param {string} name
+   * @param {string} verb
+   * @returns {any}
+   */
+  const routeDoor = (name, verb) =>
+    doorFact({ kind: 'route', name, detail: verb, file: 'server.js', line: 1, inTest: false, named: true, via: 'literal' });
+
+  /**
+   * A walk built the way the engine builds one, from a capture and the journey behind it.
+   * @param {string} journeyName
+   * @param {any} journey
+   * @returns {any}
+   */
+  const walkOf = (journeyName, journey) =>
+    walkFromCapture(
+      /** @type {any} */ ({
+        id: 'c', journey: journeyName, build: { id: 'b', product: 'shop' }, run: 'single',
+        startedAt: '2026-08-30T00:00:00Z', durationMs: 1,
+        observations: ['status', 'body', 'shape'].map((leaf) => ({ path: `api.${journeyName}.${leaf}`, channel: 'results', value: 1 })),
+      }),
+      journey,
+    );
+
+  test('the HTTP adapter says which route each of its journeys knocks on', async () => {
+    const root = await scratchDir('staysfixed-doors');
+    await fsp.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'shop', dependencies: { express: '^4' } }));
+    await fsp.writeFile(
+      path.join(root, 'server.js'),
+      "import express from 'express';\nconst app = express();\napp.get('/products', (q, r) => r.json([]));\napp.post('/products', (q, r) => r.json({}));\n",
+    );
+
+    const journeys = await httpAdapter.journeys(/** @type {any} */ ({ root, config: {} }));
+    const get = journeys.find((j) => j.name === 'GET /products');
+    assert.ok(get, 'the adapter has to offer a journey for a route it found');
+    const step = /** @type {any} */ (get?.steps?.[0]);
+    assert.equal(step.door, '/products');
+    assert.equal(step.kind, 'route');
+    assert.equal(step.doorDetail, 'GET', 'without the verb, walking GET would report POST as walked too');
+  });
+
+  test('walking GET opens GET and leaves POST shut', async () => {
+    const root = await scratchDir('staysfixed-doors');
+    await fsp.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'shop', dependencies: { express: '^4' } }));
+    await fsp.writeFile(
+      path.join(root, 'server.js'),
+      "import express from 'express';\nconst app = express();\napp.get('/products', (q, r) => r.json([]));\napp.post('/products', (q, r) => r.json({}));\n",
+    );
+    const journeys = await httpAdapter.journeys(/** @type {any} */ ({ root, config: {} }));
+
+    const led = buildLedger({
+      product: 'shop',
+      doors: [routeDoor('/products', 'GET'), routeDoor('/products', 'POST')],
+      walks: [walkOf('GET /products', journeys.find((j) => j.name === 'GET /products'))],
+      byChannel: {}, captures: 1, builds: 1, caveats: [], gaps: [],
+    });
+
+    assert.equal(led.doors, 2, 'two verbs on one url are two doors, and a break behind either is a break');
+    assert.equal(led.opened, 1);
+    assert.equal(led.never, 1);
+    const shut = led.entries.find((e) => e.state === 'never');
+    assert.equal(shut?.address, 'route.POST./products', 'the door left shut has to be the one nothing walked');
+  });
+
+  test('a route nothing walked is still counted, so a clean run cannot read as full coverage', () => {
+    const led = buildLedger({
+      product: 'shop', doors: [routeDoor('/health', 'GET')], walks: [],
+      byChannel: {}, captures: 0, builds: 1, caveats: [], gaps: [],
+    });
+    assert.equal(led.never, 1);
+    assert.match(toCoverage(led).gaps[0].what, /only door has never been opened/, 'and it reads as English on a one-door product');
   });
 });

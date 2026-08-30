@@ -16,6 +16,7 @@
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fsp from 'node:fs/promises';
+import path from 'node:path';
 
 import {
   openStore,
@@ -28,6 +29,9 @@ import {
   setReference,
   referenceFor,
   referencePointer,
+  ensureStore,
+  removeBuild,
+  saveBuild,
 } from '../../src/v2/store.js';
 import { scratchDir, cleanUp } from '../support.mjs';
 
@@ -203,5 +207,91 @@ describe('a capture that never finished being written', () => {
     assert.ok(back);
     assert.equal(back.complete, true);
     assert.equal(back.observations.length, 2);
+  });
+});
+
+/**
+ * What a capture carries has to survive being written down.
+ *
+ * `rulesScope` was stamped on every capture by `normaliseCapture` and written to none of them,
+ * because `headerOf` lists its fields by hand. Every unit test on the stamping passed. The
+ * feature that reads it back took the "this record predates the stamp" branch on every capture
+ * ever written, and nothing anywhere said so. Only a write-then-read can see that, so there is
+ * one here, and it should grow a line every time a field is added to a capture.
+ */
+describe('a capture keeps what it was stamped with', () => {
+  test('the rules and their scope survive both ways of writing one', async () => {
+    const root = await scratchDir('staysfixed-header');
+    const store = openStore({ root });
+    await ensureStore(store);
+
+    const build = /** @type {any} */ ({ id: 'build-h', product: 'demo' });
+    const scope = { 'clock.iso': ['screen.**'] };
+
+    await saveCapture(store, /** @type {any} */ ({
+      id: 'whole', journey: 'j', build, run: 'single', startedAt: new Date().toISOString(),
+      durationMs: 1, observations: [{ path: 'a.b', channel: 'results', value: 'x' }],
+      rules: 'v1-abcdef123456', rulesScope: scope,
+    }));
+    const whole = await loadCapture(store, { buildId: 'build-h', journey: 'j', captureId: 'whole' });
+    assert.equal(whole?.rules, 'v1-abcdef123456');
+    assert.deepEqual(whole?.rulesScope, scope, 'stamped and never written down is the same as never stamped');
+
+    const writer = await openCaptureWriter(store, {
+      build, journey: 'streamed', run: 'single', id: 'bit-by-bit',
+      rules: 'v1-abcdef123456', rulesScope: scope,
+    });
+    await writer.append(/** @type {any} */ ({ path: 'a.b', channel: 'results', value: 'x' }));
+    await writer.close();
+    const streamed = await loadCapture(store, { buildId: 'build-h', journey: 'streamed', captureId: 'bit-by-bit' });
+    assert.deepEqual(streamed?.rulesScope, scope, 'the streaming writer is the one a real run uses');
+  });
+});
+
+/**
+ * Throwing a build away, and the two things that must survive somebody tidying up.
+ *
+ * The store grows by one build folder per check, in a directory this tool asks people to
+ * commit, and nothing could remove one. What is dangerous about adding that is not the
+ * deleting — it is deleting the wrong one. So both refusals are tested before the success is.
+ */
+describe('throwing a build away', () => {
+  /** @returns {Promise<any>} */
+  async function storeWithTwoBuilds() {
+    const root = await scratchDir('staysfixed-remove');
+    const store = openStore({ root });
+    await ensureStore(store);
+    for (const id of ['git-old', 'git-new']) {
+      await saveBuild(store, /** @type {any} */ ({ id, product: 'demo' }));
+      await saveCapture(store, /** @type {any} */ ({
+        id: 'c', journey: 'j', build: { id, product: 'demo' }, run: 'single',
+        startedAt: new Date().toISOString(), durationMs: 1,
+        observations: [{ path: 'a.b', channel: 'results', value: 'x' }],
+      }));
+    }
+    return store;
+  }
+
+  test('a build nothing points at goes, and its captures go with it', async () => {
+    const store = await storeWithTwoBuilds();
+    const gone = await removeBuild(store, 'git-old');
+    assert.equal(gone.removed, true);
+    assert.equal(gone.captures, 1, 'it has to say how much evidence it threw away');
+    assert.equal((await listCaptures(store, { buildId: 'git-old' })).length, 0);
+    assert.equal((await listCaptures(store, { buildId: 'git-new' })).length, 1, 'and leave everything else alone');
+  });
+
+  test('the reference is refused, because its captures are the only record of what working means', async () => {
+    const store = await storeWithTwoBuilds();
+    await setReference(store, 'git-old', { product: 'demo' });
+    await assert.rejects(() => removeBuild(store, 'git-old'), /is the reference for demo/);
+    assert.equal((await listCaptures(store, { buildId: 'git-old' })).length, 1, 'and nothing is deleted on the way to refusing');
+  });
+
+  test('a build whose own record cannot be read is refused, not guessed at', async () => {
+    const store = await storeWithTwoBuilds();
+    await fsp.rm(path.join(store.buildsDir, 'git-old', 'build.json'), { force: true });
+    await assert.rejects(() => removeBuild(store, 'git-old'), /Nothing here says what git-old is/);
+    assert.equal((await listCaptures(store, { buildId: 'git-old' })).length, 1, '"I could not tell, so I deleted it" is the wrong way round');
   });
 });

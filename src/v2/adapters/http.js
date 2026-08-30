@@ -371,7 +371,13 @@ export const httpAdapter = defineAdapter({
         surface: 'server',
         from: route.file,
         channels: ['results', 'complaints', 'effects', 'counters'],
-        steps: [{ act: 'request', method, route: route.name, url, unfilled }],
+        // `door` and `doorDetail` are how the coverage ledger learns that this journey walked
+        // that route. Without them a route counted as opened only if an observation happened to
+        // land at its own address, and this adapter writes its observations under `api.<journey
+        // name>` — so every route on every server read as never walked, on runs that had just
+        // asked the server for all of them. The verb is part of it: GET /basket and POST
+        // /basket are two doors.
+        steps: [{ act: 'request', method, route: route.name, url, unfilled, door: route.name, kind: 'route', doorDetail: route.detail ?? method }],
         // A route that changes something is walked — against a restored fixture, that is
         // the whole point. Only a route the project itself marks as irreversible is held
         // back, and even then only when nothing is watching to refuse the effect.
@@ -389,7 +395,10 @@ export const httpAdapter = defineAdapter({
         surface: 'server',
         from: 'the project config',
         channels: ['results', 'complaints', 'effects', 'counters'],
-        steps: [{ act: 'request', method: String(extra.method ?? 'GET'), route: String(extra.url), url, unfilled, headers: extra.headers, body: extra.body }],
+        // A request written by hand in the settings names its own route, so it opens the same
+        // door the code reader found — as long as the url is the route's pattern rather than a
+        // filled-in one, which is the shape the settings ask for.
+        steps: [{ act: 'request', method: String(extra.method ?? 'GET'), route: String(extra.url), url, unfilled, headers: extra.headers, body: extra.body, door: String(extra.route ?? extra.url), kind: 'route', doorDetail: String(extra.method ?? 'GET') }],
         irreversible: extra.irreversible === true,
       });
     }

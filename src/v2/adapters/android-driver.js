@@ -1393,8 +1393,13 @@ export async function permissionsHeld(device, pkg) {
  * and pids are stripped from the text kept, since all three differ on every run and none of
  * them is ever the finding.
  *
+ * There is no time window here, and there used to be a `sinceMs` in this signature that
+ * nothing read. The window comes from the other end: the adapter clears both log buffers
+ * before it walks anything, so what is left is this run. An option that silently does
+ * nothing is worse than no option, because a caller passing it believes it worked.
+ *
  * @param {Device} device
- * @param {{pkg: string, pid?: number, sinceMs?: number}} what
+ * @param {{pkg: string, pid?: number}} what
  * @returns {Promise<{crashes: string[], anrs: string[], errors: string[], lines: string[], raw: string}>}
  */
 export async function complaints(device, what) {

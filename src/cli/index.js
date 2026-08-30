@@ -12,6 +12,7 @@ import { setLogLevel } from '../core/log.js';
 import { V2_COMMANDS } from '../v2/cli.js';
 import { SHIP_COMMANDS } from '../v2/ship.js';
 import { INIT_COMMANDS } from '../v2/init.js';
+import { BROWSERS_COMMAND } from '../v2/browsers.js';
 export { watchFlags } from './watch-flags.js';
 
 /** @type {{version?: string}} */
@@ -62,9 +63,22 @@ export const VERSION = pkg.version ?? '0.0.0';
  * @property {() => Promise<{run: (ctx: CliContext) => Promise<number>}>} [load]
  */
 
-/** @type {ArgSpec} */
+/**
+ * The flags every command takes.
+ *
+ * `no-color` is declared as its own switch rather than as `color`, and that is not a
+ * spelling choice. Colour is settled in bin/staysfixed.js, before anything else is
+ * imported, because src/core/log.js decides once at load whether it may paint — so by the
+ * time a command is parsed the answer is already fixed and nothing here could change it.
+ * Declaring `color` made `--color` a real flag that turned nothing on, which is the worst
+ * kind: a person types it, the tool accepts it, and nothing happens. There is no way to
+ * force colour ON from here, so the only honest thing to offer is the half that works.
+ * `--no-color` is named so `--help` and the parser agree; the work is already done.
+ *
+ * @type {ArgSpec}
+ */
 const GLOBAL_SPEC = {
-  booleans: ['verbose', 'quiet', 'help', 'version', 'color'],
+  booleans: ['verbose', 'quiet', 'help', 'version', 'no-color'],
   strings: ['config', 'cwd'],
   alias: { v: 'verbose', q: 'quiet', h: 'help', V: 'version' },
 };
@@ -77,7 +91,7 @@ const GLOBAL_VALUE_FLAGS = new Set(['--config', '--cwd']);
  * are declared once here so the two commands cannot drift apart.
  */
 const WATCH_SPEC = {
-  booleans: ['watch', 'watch-front', 'keep-open', 'profile'],
+  booleans: ['watch', 'watch-front', 'keep-open', 'profile', 'snap'],
   strings: ['watch-side', 'watch-width'],
 };
 
@@ -87,12 +101,20 @@ const WATCH_OPTIONS = [
   ['--watch-side <side>', 'Which side of the app the panel sits on: left or right. Default right.'],
   ['--watch-width <n>', 'How wide the panel is, in pixels. Default 460.'],
   ['--no-keep-open', 'Close the panel as soon as the run finishes.'],
+  ['--no-snap', 'Leave both windows exactly where they are instead of putting them side by side.'],
   ['--watch-front', 'Bring the panel to the front. By default it opens behind your work.'],
   ['--profile', 'Print where the time went when the run is over.'],
 ];
 
-/** @type {Record<string, CommandEntry>} */
-const COMMANDS = {
+/**
+ * Every command, and the only list of them. `--help` is printed from this, and every
+ * flag any command accepts is declared in its `spec` here — so a flag that prints in the
+ * help and a flag the parser knows about cannot drift apart. It is exported so that can
+ * be checked from outside rather than by reading two lists side by side.
+ *
+ * @type {Record<string, CommandEntry>}
+ */
+export const COMMANDS = {
   init: {
     summary: 'Set this project up. Takes about thirty seconds.',
     usage: 'staysfixed init [--force] [--json]',
@@ -228,6 +250,16 @@ const COMMANDS = {
     examples: ['staysfixed mcp', 'staysfixed mcp --v1'],
     spec: { booleans: ['v1'] },
   },
+
+  /*
+   * `browsers` was written, tested, given a finished command entry in src/v2/browsers.js
+   * with a comment saying "wiring it up is one line" — and that line was never written.
+   * README.md told people to run `npx staysfixed browsers` and `--clean` to tidy up after
+   * an interrupted run, and both answered "There is no command called browsers". Somebody
+   * whose disk was filling with abandoned browser profiles had no way to clear them and no
+   * reason to doubt the page telling them there was.
+   */
+  browsers: BROWSERS_COMMAND,
 };
 
 /*
@@ -410,15 +442,28 @@ function splitCommand(argv) {
 }
 
 /**
+ * The global flags plus one command's own — with the command winning any name they share.
+ *
+ * That last part is the whole reason this is not a concatenation. `--version` is global and
+ * means "print the tool's version"; `staysfixed ship --version 0.14.0` means "the release
+ * that went out was called 0.14.0", and it is in that command's own help. Merged naively,
+ * the name landed in both lists, the parser reads booleans first, and `staysfixed ship
+ * --version 0.14.0` printed `0.7.2` and shipped nothing at all — no error, no clue, and the
+ * release script that called it carried on. A command's own list of flags is the more
+ * specific statement of what that command means, so it wins.
+ *
  * @param {ArgSpec} base
  * @param {ArgSpec} extra
  * @returns {ArgSpec}
  */
 function mergeSpec(base, extra) {
+  const claimed = new Set([...(extra.booleans ?? []), ...(extra.strings ?? []), ...(extra.arrays ?? [])]);
+  /** @param {string[]|undefined} names */
+  const keep = (names) => (names ?? []).filter((name) => !claimed.has(name));
   return {
-    booleans: [...(base.booleans ?? []), ...(extra.booleans ?? [])],
-    strings: [...(base.strings ?? []), ...(extra.strings ?? [])],
-    arrays: [...(base.arrays ?? []), ...(extra.arrays ?? [])],
+    booleans: [...keep(base.booleans), ...(extra.booleans ?? [])],
+    strings: [...keep(base.strings), ...(extra.strings ?? [])],
+    arrays: [...keep(base.arrays), ...(extra.arrays ?? [])],
     alias: { ...(base.alias ?? {}), ...(extra.alias ?? {}) },
   };
 }

@@ -152,7 +152,6 @@
  * @property {string|null} [branch]
  * @property {boolean} [dirty]        Working tree had uncommitted changes.
  * @property {string} [artifact]      Path to the built thing. NOT stored here — see store.js.
- * @property {string} [artifactSha256]
  * @property {string} [builtAt]       ISO timestamp.
  * @property {string} [platform]      e.g. 'darwin-arm64'. Comparing across platforms warns.
  * @property {string} [tool]          Stays Fixed version that captured it.
@@ -183,7 +182,12 @@
  * @property {Coverage} [coverage]    What this capture did NOT manage to look at.
  * @property {boolean} [complete]     False when the file was read back torn — see store.js.
  * @property {string} [note]
- * @property {string} [rules]         Id of the normalisation rule set applied, if any.
+ * @property {string} [rules]         Fingerprint of what the normalisation rules DO, if any
+ *                                   were applied. Scope is stamped separately — see rulesScope.
+ * @property {Record<string, string[]>} [rulesScope]
+ *                                   Where each scoped rule applied, by rule id. Absent on
+ *                                   captures written before this was stamped, which is a real
+ *                                   state and says "cannot be compared" rather than "nothing".
  */
 
 // ---------------------------------------------------------------------------
@@ -438,6 +442,12 @@ export {};
  *                                    '$.items.3.name'. Used by sort, round and drop.
  * @property {boolean} [off]          Shipped, documented, and not switched on.
  * @property {string} [whyOff]        Why it is not on by default.
+ * @property {boolean} [machine]      This rule's pattern is a fact about THIS machine — where
+ *                                    the project is checked out, where home is, where the temp
+ *                                    folder went today — rather than a decision about what to
+ *                                    tidy. Two machines running the same rule write the same
+ *                                    placeholder, so the rule is the same rule and its pattern
+ *                                    must not reach the fingerprint. See rulesFingerprint.
  */
 
 /**

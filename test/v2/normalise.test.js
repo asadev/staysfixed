@@ -21,6 +21,11 @@ import {
   explain,
   normaliseObservation,
   describeRules,
+  describeRuleChange,
+  machineRules,
+  mergeRules,
+  rulesFingerprint,
+  rulesScope,
 } from '../../src/v2/normalise.js';
 
 /** The character a terminal uses to start a colour code. Built rather than typed, so this file holds no control characters. */
@@ -249,5 +254,124 @@ describe('normalising answers for itself', () => {
   test('a timestamp three levels down is still a timestamp', () => {
     const out = clean({ lines: ['built at 2026-08-29T11:04:02.113Z', 'ok'], count: 2 });
     assert.equal(JSON.stringify(out).includes('2026-08-29T11:04:02.113Z'), false);
+  });
+});
+
+/**
+ * The stamp that decides whether a stored comparison is trustworthy.
+ *
+ * This is a warning-fatigue test more than a correctness one. The caveat this stamp feeds fired
+ * on EVERY run of the published 0.7.2 — same binary, minutes apart, nothing edited — because a
+ * per-run temp folder was baked into a rule's pattern and hashed along with it. A warning that
+ * is always on is a warning nobody reads on the day it is true, so these hold the line in both
+ * directions: it must not move when nothing meaningful changed, and it must still move when
+ * something did.
+ */
+describe('the fingerprint of a rule set', () => {
+  /**
+   * The rule set a real check builds, including the scratch folder that is fresh every run.
+   * @param {string} scratch
+   * @returns {any[]}
+   */
+  function asACheckWouldBuildIt(scratch) {
+    return mergeRules(DEFAULT_RULES, [
+      ...machineRules({ root: '/somewhere/demo', home: '/home/somebody', tmp: '/var/tmp' }),
+      ...machineRules({ root: scratch }),
+    ]);
+  }
+
+  test('does not move because this run got a different temp folder', () => {
+    const first = rulesFingerprint(asACheckWouldBuildIt('/var/tmp/staysfixed-check-aaaaaa'));
+    const second = rulesFingerprint(asACheckWouldBuildIt('/var/tmp/staysfixed-check-zzzzzz'));
+    assert.equal(first, second, 'a fresh scratch folder is a fact about the run, not a change to the rules');
+  });
+
+  test('does not move because the same rules ran on a different machine', () => {
+    const here = rulesFingerprint(mergeRules(DEFAULT_RULES, machineRules({ root: '/Users/a/demo', home: '/Users/a', tmp: '/var/folders/x' })));
+    const there = rulesFingerprint(mergeRules(DEFAULT_RULES, machineRules({ root: '/home/b/demo', home: '/home/b', tmp: '/tmp' })));
+    assert.equal(here, there, 'both machines rewrite their own checkout to <project>, so both comparisons mean the same thing');
+  });
+
+  test('still moves when a rule actually rewrites something differently', () => {
+    const before = rulesFingerprint(DEFAULT_RULES);
+    const after = rulesFingerprint(mergeRules(DEFAULT_RULES, [{ id: 'clock.iso', pattern: 'something-else' }]));
+    assert.notEqual(before, after, 'this is the case the stamp exists for and it must never go quiet');
+  });
+
+  test('a rule shipped switched off changes nothing, which is the way to add one without churn', () => {
+    const before = rulesFingerprint(DEFAULT_RULES);
+    const withNewRule = rulesFingerprint([
+      ...DEFAULT_RULES,
+      { id: 'hash.sha', kind: 'replace', what: 'x', why: 'y', wouldHide: 'z', pattern: '[0-9a-f]{40}', with: '<sha>', off: true },
+    ]);
+    assert.equal(before, withNewRule);
+  });
+
+  test('scope is not behaviour: narrowing a rule leaves the comparison trustworthy', () => {
+    const scoped = mergeRules(DEFAULT_RULES, [{ id: 'clock.iso', paths: ['screen.**'] }]);
+    assert.equal(rulesFingerprint(DEFAULT_RULES), rulesFingerprint(scoped), 'where a rule applies is not what it does');
+    assert.deepEqual(rulesScope(scoped)['clock.iso'], ['screen.**']);
+  });
+
+  test('a rule that applies everywhere says nothing about scope', () => {
+    assert.equal('clock.iso' in rulesScope(DEFAULT_RULES), false);
+  });
+
+  test('changing one field of a shipped rule needs only its id', () => {
+    const merged = mergeRules(DEFAULT_RULES, [{ id: 'clock.iso', off: true }]);
+    assert.equal(merged.find((r) => r.id === 'clock.iso')?.off, true);
+    assert.equal(merged.find((r) => r.id === 'clock.iso')?.kind, 'replace', 'the rest of the rule has to survive');
+  });
+
+  test('a part-rule naming a rule that does not exist is refused, not quietly kept', () => {
+    assert.throws(
+      () => mergeRules(DEFAULT_RULES, [{ id: 'clock.izo', off: true }]),
+      /no normalisation rule called "clock.izo"/,
+      'kept, it became a rule with no kind that every branch skips - a typo that looks exactly like a rule that works',
+    );
+  });
+});
+
+describe('saying what changed about the rules, rather than printing two hashes', () => {
+  test('nothing changed is nothing said', () => {
+    const change = describeRuleChange({ fingerprint: 'v1-aaa', scope: {} }, { fingerprint: 'v1-aaa', scope: {} });
+    assert.equal(change.same, true);
+    assert.equal(change.say, '');
+  });
+
+  test('a behaviour change says the comparison itself may be the rules', () => {
+    const change = describeRuleChange({ fingerprint: 'v1-aaa', scope: {} }, { fingerprint: 'v1-bbb', scope: {} });
+    assert.equal(change.behaviourChanged, true);
+    assert.match(change.say, /rather than the product/);
+  });
+
+  test('a rule reaching a new address names the address', () => {
+    const change = describeRuleChange(
+      { fingerprint: 'v1-aaa', scope: {} },
+      { fingerprint: 'v1-aaa', scope: { 'clock.iso': ['screen.checkout.total'] } },
+    );
+    assert.equal(change.same, false);
+    assert.equal(change.behaviourChanged, false, 'adding scope does not change how anything already covered is tidied');
+    assert.deepEqual(change.addressesNewlyCovered, ['clock.iso now also covers screen.checkout.total']);
+    assert.match(change.say, /screen\.checkout\.total/, 'an agent cannot act on "somewhere"');
+    assert.match(change.say, /Everything else compares normally/);
+  });
+
+  test('a rule that stopped covering an address is not news', () => {
+    const change = describeRuleChange(
+      { fingerprint: 'v1-aaa', scope: { 'clock.iso': ['screen.**'] } },
+      { fingerprint: 'v1-aaa', scope: {} },
+    );
+    assert.equal(change.same, true, 'less normalisation can only show differences that were hidden, which is the safe direction');
+  });
+
+  test('a record written before the scope stamp says so instead of inventing a diff', () => {
+    const change = describeRuleChange({ fingerprint: 'v1-aaa' }, { fingerprint: 'v1-bbb', scope: { 'clock.iso': ['screen.**'] } });
+    assert.equal(change.scopeChanged, false, 'everything would look new, and none of it would be true');
+    assert.match(change.say, /predates the scope stamp/);
+  });
+
+  test('an unstamped capture is not accused of anything', () => {
+    assert.equal(describeRuleChange({}, { fingerprint: 'v1-bbb' }).same, true);
   });
 });

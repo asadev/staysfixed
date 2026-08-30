@@ -34,8 +34,8 @@ export default {
 ```
 
 They run inside `staysfixed check`, in the same real app the pictures are taken
-from. `staysfixed check --guards-only` runs just the guards, which is much faster
-and is what you want when your edit could not possibly change how anything looks.
+from. `staysfixed check --guards` runs just the guards, which is much faster and
+is what you want when your edit could not possibly change how anything looks.
 
 ---
 

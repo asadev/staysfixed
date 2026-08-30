@@ -88,6 +88,7 @@ const run = promisify(execFile);
  *   candidate: BuildFingerprint,
  *   hunk?: ChangedHunk,
  *   changed?: Changed,
+ *   since?: string,
  *   normalise?: (capture: Capture) => Capture,
  *   events?: CheckEvents,
  *   signal?: AbortSignal,
@@ -102,7 +103,11 @@ export async function proveCause(finding, opts) {
     });
   }
 
-  const changed = opts.changed ?? (await whatChanged(opts.cwd));
+  // `since` is the reference build's commit, and without it this could only ever undo a
+  // change that was still uncommitted. An agent that committed its work before asking — which
+  // is the normal end of a task — got "nothing in the working tree has changed, so there is
+  // no change to undo" about a change sitting one commit back.
+  const changed = opts.changed ?? (await whatChanged(opts.cwd, { since: opts.since }));
   if (!changed.ok) return cannot(changed.why ?? 'The working tree could not be read.', null);
   // "git could not hand over the diff" and "there is no diff" both left `hunks` empty, and
   // the sentence below was said about both. Telling somebody their tree is clean when it is
@@ -114,7 +119,12 @@ export async function proveCause(finding, opts) {
     );
   }
   if (changed.hunks.length === 0 && changed.untracked.length === 0) {
-    return cannot('Nothing in the working tree has changed, so there is no change to undo.', null);
+    return cannot(
+      changed.committed
+        ? 'Nothing has changed between the build you were happy with and this one — not in a commit and not in the working tree — so there is no change to undo.'
+        : 'Nothing in the working tree has changed, so there is no change to undo. Nothing here looked at what may already be committed: name the commit the old build is at and a committed change can be undone the same way.',
+      null,
+    );
   }
 
   /** @type {{hunk: ChangedHunk|null, candidates: ChangedHunk[]}} */
@@ -137,6 +147,14 @@ export async function proveCause(finding, opts) {
   if (journeys.length === 0) {
     return cannot('None of the journeys this finding came from are available to walk again.', hunk);
   }
+  // SOME of them, and not all, is its own answer and it used to have none.
+  //
+  // A finding gathered from three journeys where only two can be walked again was walked
+  // twice, and the third journey's addresses were then read out of a map that has nothing in
+  // it for them. `gone` answers false for those — correctly, it will not call an absent
+  // journey a pass — and the arithmetic below turned that into "still here with that change
+  // undone, so it is not what caused it". A sentence about addresses nobody looked at.
+  const missing = names.filter((name) => !opts.journeys.some((j) => j.name === name));
 
   const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-cause-'));
   const tree = path.join(base, 'tree');
@@ -161,10 +179,14 @@ export async function proveCause(finding, opts) {
     return p;
   };
   try {
-    await gitOrThrow(['worktree', 'add', '--detach', tree, 'HEAD'], changed.root);
+    // The commit the patch was measured FROM, which is not always HEAD. A change that has
+    // been committed is in the patch and is also already in HEAD, so applying it on top of
+    // HEAD would try to add the same lines twice and fail — and before this travelled with
+    // the patch, that is exactly what would have happened.
+    await gitOrThrow(['worktree', 'add', '--detach', tree, changed.base], changed.root);
     checkedOut = true;
 
-    // Everything you changed, applied to a clean copy of the last commit.
+    // Everything you changed, applied to a clean copy of the build you were happy with.
     if (changed.patch.trim().length > 0) {
       const workingPatch = path.join(base, 'working.patch');
       await fsp.writeFile(workingPatch, endWithNewline(changed.patch), 'utf8');
@@ -238,27 +260,49 @@ export async function proveCause(finding, opts) {
     }
 
     const differences = finding.differences;
+    // An address whose journey was never walked again was not re-checked, and it is counted
+    // apart from the ones that were. Folding it in with the survivors is how "nobody looked"
+    // came out of here dressed as "it is still there".
+    const rechecked = differences.filter((d) => without.has(d.journey ?? ''));
+    const notRechecked = differences.length - rechecked.length;
     let disappeared = 0;
-    for (const d of differences) if (gone(d, without)) disappeared += 1;
+    for (const d of rechecked) if (gone(d, without)) disappeared += 1;
 
-    const proved = differences.length > 0 && disappeared === differences.length;
+    const unseen = notRechecked > 0
+      ? ` ${notRechecked} of the ${differences.length} ${differences.length === 1 ? 'address' : 'addresses'} in this finding ${notRechecked === 1 ? 'was' : 'were'} not re-checked at all, because ${missing.length === 1 ? `the journey "${missing[0]}" is` : `the journeys ${missing.map((n) => `"${n}"`).join(', ')} are`} not available to walk again. Nothing here says anything about ${notRechecked === 1 ? 'it' : 'them'} either way.`
+      : '';
+    const proved = rechecked.length > 0 && disappeared === rechecked.length && notRechecked === 0;
+    // Everything that could be re-walked went away, and something else could not be walked at
+    // all. That is not a proof: the part nobody saw may be the part that matters, and a
+    // stamped "caused by that change" over the top of it is the worst thing this file can
+    // produce — a machine-checked reason for an agent to stop looking.
+    const partly = rechecked.length > 0 && disappeared === rechecked.length && notRechecked > 0;
     /** @type {CauseProof} */
     const result = {
       verdict:
-        differences.length === 0 ? 'could not test' : proved ? 'caused by that change' : 'not caused by that change',
-      escalates: differences.length > 0 && !proved,
-      what:
-        differences.length === 0
-          ? 'This finding carries no differences, so there was nothing to re-check.'
+        rechecked.length === 0 || partly
+          ? 'could not test'
           : proved
-            ? `Undoing that one change in ${hunk.file} made this go away. It is yours, and it is explained.`
-            : disappeared > 0
-              ? `Undoing that change in ${hunk.file} took away ${disappeared} of the ${differences.length} addresses in this finding and left ${differences.length - disappeared} exactly as ${differences.length - disappeared === 1 ? 'it was' : 'they were'}. So that change explains part of this and not the rest, and the rest has another cause nothing has looked for yet. It is not covered by undoing that one change.`
-              : `This is still here with that change undone, so ${hunk.file} is not what caused it. Something else did, and nothing knows what yet.`,
+            ? 'caused by that change'
+            : 'not caused by that change',
+      escalates: rechecked.length > 0 && !proved && !partly,
+      what:
+        rechecked.length === 0
+          ? `Nothing in this finding could be re-checked.${unseen || ' It carries no differences, so there was nothing to re-check.'}`
+          : partly
+            ? `Undoing that one change in ${hunk.file} took away every address that could be re-walked.${unseen} So this is not proved: what was not walked may be the half that matters.`
+            : proved
+              ? `Undoing that one change in ${hunk.file} made this go away. It is yours, and it is explained.`
+              : disappeared > 0
+                ? `Undoing that change in ${hunk.file} took away ${disappeared} of the ${rechecked.length} addresses that were re-checked and left ${rechecked.length - disappeared} exactly as ${rechecked.length - disappeared === 1 ? 'it was' : 'they were'}. So that change explains part of this and not the rest, and the rest has another cause nothing has looked for yet. It is not covered by undoing that one change.${unseen}`
+                : `This is still here with that change undone, so ${hunk.file} is not what caused it. Something else did, and nothing knows what yet.${unseen}`,
       hunk: { file: hunk.file, header: hunk.header },
-      checked: differences.length,
+      // What was actually re-walked. It used to be every difference in the finding, including
+      // the ones no journey ever went near, so the number said the work had been done.
+      checked: rechecked.length,
       disappeared,
     };
+    if (notRechecked > 0) result.why = unseen.trim();
     if (opts.keep === true) result.worktree = tree;
     if (events) events.emit({ type: 'proof:done', at: events.elapsed(), message: result.what });
     return done(result);

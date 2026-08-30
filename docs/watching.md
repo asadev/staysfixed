@@ -76,13 +76,18 @@ and both windows open exactly where they would have anyway.
 | --- | --- |
 | `--watch` | Open the panel. |
 | `--watch-side left` | Push the app to the left edge and put the panel on its right. The default is `right`. |
-| `--watch-width 520` | How wide the panel is, in pixels. The default is 480; anything under 240 or over 900 is brought back to the nearest of the two. |
+| `--watch-width 520` | How wide the panel is, in pixels. The default is 480 on `check` and 460 on `walk` — two panels, two defaults. Anything under 240 is **refused** with a message, because a panel narrower than that cannot show a before and an after side by side — which is the only reason to open one. Anything over 900 is brought down to 900. |
 | `--no-snap` | Leave both windows exactly where they are. Nothing is moved. |
 | `--no-keep-open` | Close the panel the moment the run ends. By default it stays up so you can look at what changed. |
 | `--watch-front` | Bring the panel to the front. See below for why that is not the default. |
 | `--profile` | Nothing to do with the panel: prints where the seconds went after the run. |
 
-Both `staysfixed check` and `staysfixed walk` take all of them.
+Both `staysfixed check` and `staysfixed walk` take all of them, with one gap that
+is worth knowing about rather than finding out: **`--profile` prints nothing on a
+difference-engine check.** It works on `staysfixed walk`, and on the version 1
+picture check — `staysfixed check --pictures --profile` or `--guards --profile`.
+The difference engine accepts the flag and does not yet keep the timings, so a
+plain `staysfixed check --profile` runs the check and prints no timing table.
 
 `--watch` and `--json` ask for opposite things — a window to look at, and output
 for a script to read. Ask for both and the tool says so in one line and carries
@@ -167,10 +172,11 @@ gets compared.
 
 ## Where the time went
 
-`--profile` is the other half of this work and needs no window:
+`--profile` is the other half of this work and needs no window. On `walk`, and on
+the version 1 picture check:
 
 ```
-$ staysfixed check --profile
+$ staysfixed check --pictures --profile
 
 ...
 
