@@ -8,6 +8,93 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.9.0] — 2026-08-30
+
+Found the same way as 0.8.0 and one better: the published build was installed as a stranger
+installs it and used on real throwaway products — a café API, a static site, a library, a
+server that spawns its own child — until it said something untrue. And this time the repo's
+own CI was read, which had been **red for ten releases** while every summary said the tests
+passed. It was red for two real reasons, both below.
+
+**The tool was breaking the products it was sent to protect**, and on some shapes it never
+came back at all. Those two are why this release exists.
+
+### Fixed — it broke the product, or itself
+
+- **Refusing a connection killed the program that made it.** The refusal was delivered by
+  emitting `'error'` on the socket; at that instant nothing is listening, and in Node an
+  `'error'` with no listener is a thrown exception. `http.get` on Node 22 — the floor this
+  package declares — and a bare `net.connect` on every version died with exit 1, and the run
+  then reported the user's product as broken. The refusal is real now rather than simulated,
+  so the operating system produces it through Node's own plumbing.
+- **`check` printed its whole answer and never exited.** A start command runs through a
+  shell, so the server is a grandchild; killing the shell left it alive holding the output
+  pipe, so the event loop never emptied. It also orphaned the server. The shell is started as
+  its own process group now and the whole group is signalled.
+- **Two agents shipping at once lost what "working" means.** Six ships, all reporting
+  success, four records, and the "already the reference" path never firing. The whole cut is
+  one at a time per product now.
+- **Every killed run left a whole copy of the project in the temporary folder, for ever** —
+  777 MB of them on an ordinary machine. Abandoned copies are reclaimed; a copy a live run
+  owns is never touched.
+
+### Fixed — it said things that were not true
+
+- **The agent was told "everything that worked before still works"** about a run that
+  compared nothing at all, while the terminal correctly called it no answer. The engine's
+  verdict is the floor for the machine surface now, so this class cannot come back one reason
+  at a time.
+- **A sealed money change reached the agent labelled `"ordinary"`** — the human text said
+  sealed, `waive` refused it, and the JSON said it was waivable.
+- **The seal that exists because somebody was burned before could never fire.** Guard names
+  were never passed to the decision, so that class was empty on every run this tool has ever
+  done. And a check on a project with a guard in `.staysfixed/guards` printed the word
+  "guard" zero times: not run, not counted, not mentioned.
+- **A guard that asks nothing was reported as holding.** An empty `run()` came back as
+  "still holds", and would have said so every day for ever.
+- **The library journey never imported anything.** `init` writes `module: "index.js"`; the
+  probe treated that as a package name, failed identically on both builds, and the check said
+  "Nothing that worked has changed" for ever.
+- **`ship` blessed a build nothing had looked at.** It matched by git commit, so an
+  uncommitted edit resolved to an earlier build that had been checked and was clean.
+- **`doctor` said a check "here" covers things in a folder where a check cannot run at all.**
+- **`--only` printed "everything that worked still works"** about a slice.
+- **`init` and `doctor` both offered `check --paired` as the way to record a reference.** It
+  cannot; only shipping cuts one, on purpose. `doctor` also marked it as something the agent
+  could do — the single thing an agent must never do.
+- **`status` said nothing had happened** one command after a check and a ship.
+- **It called the person's own browser "a separate application from the browser you use"**,
+  which is the one case where that sentence matters and the one case it was false.
+
+### Fixed — it could not see, or would not run
+
+- **Full Chrome was invisible on Linux and Windows.** Playwright and Puppeteer both unpack
+  into `chrome-linux64` and `chrome-win64`; only macOS uses the names this looked for. On
+  Linux, the very command this tool tells people to run left a browser it could not find.
+- **`status`, `walk`, `flake`, `approve`, `mark` and `trace` told a website it had no
+  screen** — they only knew version 1's `app:`, and `init` writes version 2's `web:`.
+- **The sign-in example `init` writes used two words the tool does not know**, and a step made
+  only of unknown words was skipped in silence — so the form was never filled, every page
+  behind the login photographed the login page, and the run came back clean.
+- **A browser's throwaway profile outlived an interrupted run.**
+
+### Fixed — it was noisy or unhelpful
+
+- **Renaming one heading came back as five findings**, none of them saying "renamed". A thing
+  addressed by its own words is now recognised when it is renamed, and its children travel
+  with it.
+- **`doctor` connected to every machine in your ssh config, unasked, on the first run.** Nine
+  connections on a brand-new scratch project. It is asked for now, and the machines are still
+  listed either way.
+- **Every command-line check wrote two rows** to the log `ship` reads.
+- **The `.gitignore` lines `init` writes matched nothing version 2 writes** — 151 untracked
+  files and 1.9 MB of run evidence in `git status` after nine checks.
+- `check --json` now carries `notChecked` and `doorsNeverOpened`, which the README had
+  promised and only the MCP reply had.
+- `init` no longer names `staysfixed check --product <name>`, which is not an option.
+- The docs said the self-check builds seventeen products; it builds twenty.
+- `process.alsoWatch` is documented.
+
 ## [0.8.0] — 2026-08-30
 
 The night this was pointed at itself. Everything below was found the same way:
