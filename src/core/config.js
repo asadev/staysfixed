@@ -146,6 +146,27 @@ export function resolveConfig(raw, file = '(inline)') {
   }
   const c = /** @type {import('../types.js').StaysFixedConfig} */ (raw);
 
+  // Version 2's settings describe a website under `web:` and a desktop app under
+  // `electron:`. These commands are version 1's and only ever knew about `app:` — so on the
+  // settings file `staysfixed init` writes for a website, `status`, `walk` and `flake` all
+  // answered "these settings do not name anything to open", and then listed `process,
+  // source` as the shape of the project. `init` had said, one command earlier, "The website
+  // can be checked here now ... watched by opening it in a throwaway browser". Both about
+  // the same file, seconds apart, and `status` is the command whose whole promise is to say
+  // instantly what is set up here.
+  //
+  // Where the address is actually knowable, take it and let the command work. Booting is
+  // version 2's job and these commands cannot do it, so `web.start` alone is not enough —
+  // that case falls through to the message below, which now says so honestly.
+  if ((!c.app || typeof c.app !== 'object')) {
+    const v2 = /** @type {Record<string, any>} */ (/** @type {unknown} */ (c));
+    if (v2.web && typeof v2.web === 'object' && typeof v2.web.url === 'string' && v2.web.url) {
+      c.app = { kind: 'web', url: v2.web.url };
+    } else if (v2.electron && typeof v2.electron === 'object' && typeof v2.electron.binary === 'string' && v2.electron.binary) {
+      c.app = { kind: 'electron', binary: v2.electron.binary };
+    }
+  }
+
   if (!c.app || typeof c.app !== 'object') {
     // Every command that lands here — status, walk, approve, mark, trace, flake, and
     // `check --pictures` — works by OPENING something and photographing it. A settings
@@ -155,6 +176,16 @@ export function resolveConfig(raw, file = '(inline)') {
     // half of the tool needs it, and names the half that does not.
     const anything = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (c));
     const notVisual = ['process', 'http', 'source', 'android', 'ios', 'windows'].filter((k) => anything[k] && typeof anything[k] === 'object');
+    // A project that DOES have a screen, described the version 2 way, must never be told it
+    // has none. It is told the true thing instead: this half of the tool photographs an
+    // address you can point it at, and version 2 finds the address by booting the product,
+    // which is why `check` covers it and these do not.
+    const started = anything.web && typeof anything.web === 'object' && typeof (/** @type {any} */ (anything.web).start) === 'string';
+    if (started) {
+      throw new StaysFixedError('This project has a website, but these settings start it rather than name an address, and this command photographs an address.', {
+        hint: "`staysfixed check` covers it exactly as it is — it boots `web.start` and finds the address itself. These picture commands need one they can point at, so add `url: 'http://localhost:3000'` beside `start` in the `web` block if you want them too.",
+      });
+    }
     throw new StaysFixedError('These settings do not name anything to open, and this command works by opening your product and photographing it.', {
       hint: notVisual.length
         ? `That is the right shape for what this project is — ${notVisual.join(', ')} settings need nothing to open. Run \`staysfixed check\`, which covers it without a picture. If there IS a screen here too, add \`app: { kind: 'web', url: 'http://localhost:3000' }\` or \`app: { kind: 'electron', binary: '...' }\`.`

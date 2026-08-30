@@ -316,6 +316,35 @@ describe('loading a config from disk', () => {
     });
   });
 
+  test('a website described the version 2 way is never told it has no screen', () => {
+    // `staysfixed init` writes `web: { start: 'npm run dev' }` for a website and says out
+    // loud "The website can be checked here now ... opened in a throwaway browser". Seconds
+    // later `status`, `walk` and `flake` all answered "these settings do not name anything
+    // to open" and listed the project as `process, source` — about the same file. `status`
+    // is the command whose entire promise is to say instantly what is set up here.
+    assert.throws(
+      () => resolveConfig({ product: 'website', web: { start: 'npm run dev' } }),
+      (error) => {
+        assert.ok(error instanceof StaysFixedError);
+        assert.doesNotMatch(error.message, /do not name anything to open/, 'it has a website; saying it has nothing is the lie');
+        assert.match(error.message, /website/i);
+        assert.match(String(error.hint), /staysfixed check/, 'and it has to name the command that does cover it');
+        return true;
+      },
+    );
+  });
+
+  test('a version 2 website that names its address just works', () => {
+    // Where the address is knowable there is nothing to explain and nothing to refuse.
+    const web = resolveConfig({ product: 'website', web: { start: 'npm run dev', url: 'http://localhost:4321' } });
+    assert.equal(web.app.kind, 'web');
+    assert.equal(web.app.url, 'http://localhost:4321');
+
+    const desktop = resolveConfig({ product: 'desk', electron: { binary: '/tmp/Some.app/Contents/MacOS/Some' } });
+    assert.equal(desktop.app.kind, 'electron');
+    assert.equal(desktop.app.binary, '/tmp/Some.app/Contents/MacOS/Some');
+  });
+
   test('a config named on the command line is used instead of searching', async () => {
     const dir = await scratchDir('staysfixed-named');
     await fsp.writeFile(
