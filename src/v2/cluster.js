@@ -186,18 +186,73 @@ export function findRenames(differences) {
 
   /** @type {Map<Difference, {from: string, to: string}>} */
   const found = new Map();
+  /** @type {{was: string, now: string, from: string, to: string}[]} */
+  const moves = [];
   for (const place of places.values()) {
     if (place.gone.length !== 1 || place.came.length !== 1) continue;
     const gone = place.gone[0];
     const came = place.came[0];
-    if (!sameValue(gone.reference, came.candidate)) continue;
     const from = leafOf(gone.path);
     const to = leafOf(came.path);
     if (from === to) continue;
+    // "The values must match" is right for a thing addressed by its position, and wrong for
+    // one addressed by its own words. A heading lives at `heading:Nine Bakers` and its value
+    // reads `a heading called "Nine Bakers"` — rename it and BOTH move, so the values never
+    // match and the rename was never spotted. Measured 2026-08-30: renaming one heading on a
+    // page came back as five separate findings, one thing vanishing and a different thing
+    // appearing, with nothing anywhere saying "renamed". So a value that changed in exactly
+    // the same way the name did counts as the same value. Anything else is still two edits
+    // that happened to land side by side, which is what this test exists to keep out.
+    if (!sameValue(gone.reference, came.candidate) && !movedWithItsName(gone.reference, came.candidate, from, to)) continue;
     found.set(gone, { from, to });
     found.set(came, { from, to });
+    moves.push({ was: gone.path, now: came.path, from, to });
+  }
+
+  // A rename takes its children with it. Everything under the old address goes away and the
+  // same things arrive under the new one — true, and not a second piece of news. Renaming one
+  // heading on a page reported the heading AND the two halves of its own `level`, so one edit
+  // a person would describe in four words arrived as four findings. Anything that moved with
+  // it, unchanged, belongs to the rename that moved it.
+  for (const move of moves) {
+    for (const gone of differences) {
+      if (gone.kind !== 'vanished' || found.has(gone)) continue;
+      if (!gone.path.startsWith(`${move.was}.`)) continue;
+      const wanted = move.now + gone.path.slice(move.was.length);
+      const came = differences.find(
+        (d) => d.kind === 'appeared' && !found.has(d) && d.path === wanted && d.channel === gone.channel && sameValue(gone.reference, d.candidate),
+      );
+      if (!came) continue;
+      found.set(gone, { from: move.from, to: move.to });
+      found.set(came, { from: move.from, to: move.to });
+    }
   }
   return found;
+}
+
+/**
+ * Did the value change in exactly the way the name did?
+ *
+ * Only for two addresses naming the same KIND of thing — `heading:X` and `heading:Y`, never
+ * `heading:X` and `button:Y` — because the part before the colon is what the thing IS, and a
+ * heading becoming a button is not a rename.
+ *
+ * @param {unknown} before
+ * @param {unknown} after
+ * @param {string} from
+ * @param {string} to
+ * @returns {boolean}
+ */
+function movedWithItsName(before, after, from, to) {
+  if (typeof before !== 'string' || typeof after !== 'string') return false;
+  const wasNamed = /^([^:]+):(.+)$/.exec(from);
+  const nowNamed = /^([^:]+):(.+)$/.exec(to);
+  if (!wasNamed || !nowNamed) return false;
+  if (wasNamed[1] !== nowNamed[1]) return false;
+  const was = wasNamed[2];
+  const now = nowNamed[2];
+  if (!was || was === now) return false;
+  return before.split(was).join(now) === after;
 }
 
 /**

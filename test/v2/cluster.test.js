@@ -289,3 +289,50 @@ describe('the grouping key', () => {
     assert.match(sentence, /button:Save/);
   });
 });
+
+describe('a thing addressed by its own words, renamed', () => {
+  const P = 'screen.the front page.end.tree';
+
+  test('the heading and everything under it is one rename, not four findings', () => {
+    // Measured on 2026-08-30 on a real page: renaming ONE heading came back as five separate
+    // findings — the old name vanishing, the new one appearing, and both halves of the
+    // heading's own `level` — with nothing anywhere saying "renamed". The rename test was
+    // "the values must match", which is right for a thing addressed by its position and
+    // wrong for one addressed by its own words: a heading lives at `heading:Nine Bakers` and
+    // its value reads `a heading called "Nine Bakers"`, so a rename moves BOTH and they can
+    // never match.
+    const differences = [
+      difference(`${P}.heading:Nine Bakers`, 'meaning', 'vanished', 'a heading called "Nine Bakers"', undefined),
+      difference(`${P}.heading:Nine Bakers Bakery`, 'meaning', 'appeared', undefined, 'a heading called "Nine Bakers Bakery"'),
+      difference(`${P}.heading:Nine Bakers.level`, 'meaning', 'vanished', 1, undefined),
+      difference(`${P}.heading:Nine Bakers Bakery.level`, 'meaning', 'appeared', undefined, 1),
+    ];
+
+    const renames = findRenames(differences);
+    assert.equal(renames.size, 4, 'the heading and the child that moved with it are all halves of one rename');
+
+    const findings = clusterDifferences(differences);
+    assert.equal(findings.length, 1, 'one edit a person would describe in four words is one finding');
+    assert.match(findings[0].title, /is now called/);
+    assert.match(findings[0].title, /Nine Bakers Bakery/);
+  });
+
+  test('two unrelated edits side by side are still two things, not an invented rename', () => {
+    // The guard this must not lose: a value that did NOT move the way the name did is two
+    // edits that happened to land in the same place, and pairing them would be a fiction.
+    const differences = [
+      difference(`${P}.heading:Prices`, 'meaning', 'vanished', 'a heading called "Prices"', undefined),
+      difference(`${P}.heading:Menu`, 'meaning', 'appeared', undefined, 'a heading called "Something Else Entirely"'),
+    ];
+    assert.equal(findRenames(differences).size, 0);
+  });
+
+  test('a heading that became a button is not a rename', () => {
+    // The part before the colon is what the thing IS.
+    const differences = [
+      difference(`${P}.heading:Order`, 'meaning', 'vanished', 'a heading called "Order"', undefined),
+      difference(`${P}.button:Order now`, 'meaning', 'appeared', undefined, 'a heading called "Order now"'),
+    ];
+    assert.equal(findRenames(differences).size, 0);
+  });
+});

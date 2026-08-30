@@ -405,7 +405,7 @@ describe('importing the package entry a project actually has', () => {
     await fsp.writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', type: 'module' }));
     await fsp.writeFile(path.join(dir, 'index.js'), 'export const add = (a, b) => a + b\nexport const title = "x"\n');
 
-    const ran = await runCommand(importProbeCommand('index.js'), { cwd: dir, timeoutMs: 60000 });
+    const ran = await runCommand(importProbeCommand('index.js'), { cwd: dir, env: /** @type {any} */ (process.env), timeoutMs: 60000 });
     assert.equal(ran.code, 0, `the entry could not be imported at all: ${ran.stderr}`);
     assert.doesNotMatch(String(ran.stderr), /ERR_MODULE_NOT_FOUND/);
     assert.match(ran.stdout, /add/, 'and what it exports has to come back');
@@ -417,7 +417,7 @@ describe('importing the package entry a project actually has', () => {
     // installed dependency both still have to resolve the way they always did.
     const dir = await scratchDir('staysfixed-import-pkg');
     await fsp.writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: 'y', type: 'module' }));
-    const ran = await runCommand(importProbeCommand('node:path'), { cwd: dir, timeoutMs: 60000 });
+    const ran = await runCommand(importProbeCommand('node:path'), { cwd: dir, env: /** @type {any} */ (process.env), timeoutMs: 60000 });
     assert.equal(ran.code, 0, ran.stderr);
     assert.match(ran.stdout, /join/, 'node:path exports join, so the package route still works');
   });
