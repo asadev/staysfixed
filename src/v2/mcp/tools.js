@@ -828,7 +828,7 @@ async function toolCheck(ctx, input) {
   // ever counted differences, so a project with nothing on record produced zero differences,
   // counted as clean, and the agent was told everything still works.
   const comparedNothing = typeof result?.comparedNothing === 'string' && result.comparedNothing.length > 0;
-  const clean = unaccounted.length === 0 && newlyUnstable.length === 0 && result?.blocked !== true && !comparedNothing;
+  const clean = cleanForAgent(result, unaccounted.length, newlyUnstable.length);
 
   // What this run did not look at, in the engine's own words. It rides in every reply,
   // clean ones included: a green result on a product with three hundred unopened doors is
@@ -932,6 +932,31 @@ async function toolCheck(ctx, input) {
   // agent, and an agent that skims past a real regression is exactly the failure
   // this whole tool exists to prevent.
   return { content: [{ type: 'text', text: body + tail }], isError: !clean };
+}
+
+/**
+ * Is this a clean run, as far as the machine asking is concerned?
+ *
+ * The last line is the one that matters and it is the one that was missing. This surface
+ * used to work "clean" out from the difference count ALONE, and a product with nothing on
+ * record produces no differences — so zero differences counted as a pass, and an agent was
+ * told "everything that worked before still works" about a run that compared nothing at all.
+ * The engine had already decided; nobody asked it.
+ *
+ * So the engine's own verdict is the floor. Whatever else is true, this can never answer
+ * clean about a run the engine called not-ok. Counting reasons here will always be a list
+ * somebody forgets to add to; deferring to the decision already made cannot be.
+ *
+ * @param {any} result            What `check` returned.
+ * @param {number} unaccounted    Differences nobody has accounted for.
+ * @param {number} newlyUnstable  Addresses that were steady and are not any more.
+ * @returns {boolean}
+ */
+export function cleanForAgent(result, unaccounted, newlyUnstable) {
+  if (result && result.ok === false) return false;
+  if (result && result.blocked === true) return false;
+  if (result && typeof result.comparedNothing === 'string' && result.comparedNothing.length > 0) return false;
+  return unaccounted === 0 && newlyUnstable === 0;
 }
 
 /**

@@ -28,7 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { cliPath, repoRoot, scratchDir, cleanUp } from '../support.mjs';
-import { renderCheck, findingForAgent } from '../../src/v2/mcp/tools.js';
+import { renderCheck, findingForAgent, cleanForAgent } from '../../src/v2/mcp/tools.js';
 
 /** The revision an agent asks for. */
 const PROTOCOL = '2025-06-18';
@@ -156,6 +156,25 @@ function jsonFrom(result) {
   }
   return null;
 }
+
+describe('the machine and the person are never told different things', () => {
+  test('the engine saying not-ok is the floor, whatever else is counted here', () => {
+    // The defect this replaces counted differences and nothing else, so a run that compared
+    // NOTHING produced zero differences and was reported to an agent as clean. Counting
+    // reasons will always be a list somebody forgets to add to; deferring to the verdict
+    // already made cannot be. So: engine says not-ok, this can never say clean.
+    assert.equal(cleanForAgent({ ok: false }, 0, 0), false, 'the engine already decided');
+    assert.equal(cleanForAgent({ ok: false, comparedNothing: null }, 0, 0), false);
+    assert.equal(cleanForAgent({ ok: true, blocked: true }, 0, 0), false, 'a blocked run is no answer');
+    assert.equal(cleanForAgent({ ok: true, comparedNothing: 'no reference' }, 0, 0), false, 'nothing compared is no answer');
+  });
+
+  test('a genuinely clean run is still clean, or nothing could ever pass', () => {
+    assert.equal(cleanForAgent({ ok: true }, 0, 0), true);
+    assert.equal(cleanForAgent({ ok: true }, 1, 0), false, 'a difference nobody accounted for is not clean');
+    assert.equal(cleanForAgent({ ok: true }, 0, 1), false, 'nor is something that has become unpredictable');
+  });
+});
 
 describe('the class an agent reads is the class that decides', () => {
   test('a sealed money difference never reaches an agent as ordinary', () => {
