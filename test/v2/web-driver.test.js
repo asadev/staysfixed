@@ -22,10 +22,61 @@ import assert from 'node:assert/strict';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadPlaywright } from '../../src/v2/adapters/web-driver.js';
+import { loadPlaywright, runStep } from '../../src/v2/adapters/web-driver.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
+
+describe('a step that does nothing says so', () => {
+  /** Enough of a page to prove which calls were made, and no more. */
+  const stubPage = () => {
+    const did = [];
+    return {
+      did,
+      async goto(u) { did.push(`goto ${u}`); },
+      async click(w) { did.push(`click ${w}`); },
+      async type(w, t) { did.push(`type ${w} ${t}`); },
+      async press(k) { did.push(`press ${k}`); },
+      async hover(w) { did.push(`hover ${w}`); },
+      async scrollTo(w) { did.push(`scrollTo ${w}`); },
+      async waitFor(w) { did.push(`waitFor ${w}`); },
+      async waitForGone(w) { did.push(`waitForGone ${w}`); },
+      async wait(ms) { did.push(`wait ${ms}`); },
+      async evaluate(x) { did.push(`evaluate ${x}`); },
+    };
+  };
+
+  test('a word the tool does not know is refused, not skipped in silence', async () => {
+    // `staysfixed init` shipped exactly this as its sign-in example: `fill` and `with`,
+    // neither of which is in the vocabulary. The step was skipped without a word, so the
+    // form was never filled, Sign in was clicked on an empty form, and every screen behind
+    // the login wall photographed the login page — and the run came back clean.
+    const page = stubPage();
+    await assert.rejects(
+      () => runStep(/** @type {any} */ (page), { fill: '#email', with: 'a@b.c' }),
+      (error) => {
+        assert.match(String(error.message), /does nothing/);
+        assert.match(String(error.message), /`fill`/, 'it has to name the word it did not know');
+        assert.match(String(error.message), /type/, 'and the word it should have been');
+        return true;
+      },
+    );
+    assert.deepEqual(page.did, [], 'and nothing was done to the page');
+  });
+
+  test('the vocabulary it does know still works, and typing carries its text', async () => {
+    const page = stubPage();
+    const did = await runStep(/** @type {any} */ (page), { type: '#email', text: 'a@b.c' });
+    assert.deepEqual(page.did, ['type #email a@b.c']);
+    assert.equal(did.length, 1);
+  });
+
+  test('a step carrying only a note is not an error', async () => {
+    const page = stubPage();
+    const did = await runStep(/** @type {any} */ (page), { name: 'just a label' });
+    assert.deepEqual(did, []);
+  });
+});
 
 describe('the browser driver', () => {
   test('a driver is a real dependency of this package, not something a stranger has to know to install', async () => {

@@ -1489,6 +1489,20 @@ export async function runStep(page, step, opts = {}) {
         break;
     }
   }
+  // A step that did nothing at all is almost always a word this tool does not know, and
+  // saying nothing about it is the worst outcome available: the journey walks on, the sign-in
+  // never happens, every page behind the login wall photographs the login page, and the run
+  // comes back clean. `staysfixed init` itself shipped `{ fill: '#email', with: 'a@b.c' }`
+  // as its sign-in example, and neither word is in the vocabulary.
+  if (did.length === 0) {
+    const known = new Set([...ACTION_ORDER, 'text', 'timeoutMs', 'name', 'note', 'act', 'checkpoint', 'describe']);
+    const unknown = Object.keys(step).filter((k) => !known.has(k));
+    if (unknown.length > 0) {
+      throw new Error(
+        `This step does nothing: ${unknown.map((k) => `\`${k}\``).join(', ')} ${unknown.length === 1 ? 'is not a word' : 'are not words'} this tool knows, so the step was skipped and whatever it was meant to do did not happen. The steps it understands are: ${ACTION_ORDER.join(', ')} — with \`text\` beside \`type\`. To type into a field: { type: '#email', text: 'a@b.c' }.`,
+      );
+    }
+  }
   return did;
 }
 

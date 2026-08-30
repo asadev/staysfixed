@@ -1345,7 +1345,12 @@ export function configText(project) {
   } else if (project.pages.length > 0) {
     w(`${webOn}// ${project.pages.length} page address${project.pages.length === 1 ? '' : 'es'} are read out of your folder names automatically — nothing to list here.`);
     w(`${webOn}// Add a screen only for something a walk has to DO rather than just open:`);
-    w(`${webOn}// screens: [{ name: 'signing in', url: '/login', steps: [{ fill: '#email', with: 'a@b.c' }, { click: 'Sign in' }] }],`);
+    // `fill:` and `with:` are not words this tool knows — the verb is `type:` and the value
+    // is `text:`. An unknown key used to be skipped in silence, so this example, handed to
+    // every stranger with a sign-in, filled nothing, clicked Sign in on an empty form, and
+    // then photographed the login page for every screen behind the wall while reporting a
+    // clean run. The example that teaches the vocabulary has to be IN the vocabulary.
+    w(`${webOn}// screens: [{ name: 'signing in', url: '/login', steps: [{ type: '#email', text: 'a@b.c' }, { type: '#password', text: 'secret' }, { click: 'Sign in' }] }],`);
   } else {
     w(`${webOn}// screens: [{ name: 'the front page', url: '/' }],`);
   }
