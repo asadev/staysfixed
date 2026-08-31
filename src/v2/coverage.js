@@ -48,7 +48,7 @@
 import { asAddress } from './adapters/electron.js';
 import { readContract, readFileRoutes, readPackageCommands } from './adapters/source.js';
 import { familyOf, irreversibility, isRunnable } from './journeys/from-routes.js';
-import { joinPath, splitPath } from './observation.js';
+import { CHANNELS, joinPath, splitPath } from './observation.js';
 import { listBuilds, listCaptures, loadCapture, referencePointer } from './store.js';
 
 /** @typedef {import('./types.js').Channel} Channel */
@@ -109,6 +109,10 @@ import { listBuilds, listCaptures, loadCapture, referencePointer } from './store
  *                                            Doors a step knocked on where the running build
  *                                            answered that they are not there. Knocking is not
  *                                            walking, and these have proved nothing.
+ * @property {string[]} [notTried]            Doors this journey's steps name, on a walk that
+ *                                            never happened — the adapter refused it and wrote
+ *                                            down only that. Nobody knocked, so nothing here
+ *                                            is walked.
  * @property {string[]} [doorAddresses]       Full door addresses, for steps that were specific
  *                                            enough to build one. A route step knows its verb,
  *                                            and GET /x and POST /x are two doors that share a
@@ -392,6 +396,14 @@ function asDoor(door) {
  * file: reading a door out of the source is how we know it exists, never evidence that
  * anybody opened it.
  *
+ * A refusal is dropped for the same reason. When an adapter cannot look at something it
+ * writes that down at the address it would have looked at, marked `refused` — a payment it
+ * would not make, a server that never started, a route with a parameter nobody supplied.
+ * Left in, the note saying "we did not look here" became the evidence that we did.
+ *
+ * Both still count in `byChannel`: they were written down, and the tallies say how much was
+ * written down. It is only the "somebody opened this door" set they are kept out of.
+ *
  * @param {Observation[]} observations
  * @returns {{paths: string[], byChannel: Partial<Record<Channel, number>>}}
  */
@@ -403,6 +415,7 @@ export function addressesTouched(observations) {
   for (const o of observations) {
     byChannel[o.channel] = (byChannel[o.channel] ?? 0) + 1;
     if (o.channel === 'contract') continue;
+    if (o.meta?.refused === true) continue;
     const parts = String(o.path).split('.');
     for (let i = 1; i <= parts.length; i++) paths.add(parts.slice(0, i).join('.'));
   }
@@ -435,6 +448,26 @@ export function walkFromCapture(capture, journey) {
     buildId: capture.build?.id,
     paths: touched.paths,
   };
+  // NOTHING WAS TRIED IS NOT A WALK.
+  //
+  // Every adapter has branches where it runs nothing and says so: the server never came up,
+  // the route has a `:id` nobody supplied a value for, the command spends money and there is
+  // nothing watching to stop it. Each one writes a single observation marked `refused` and
+  // returns. No `api.<door>.status` comes back, because no request went out.
+  //
+  // The status rule below reads a missing status as "it answered something we are happy
+  // with", so every one of those doors counted as walked. Measured 2026-08-31 with the HTTP
+  // adapter's own output: one route, one journey, the server never started, and the ledger
+  // came back doorsWalked 1 of 1 — full coverage of a product that had not been run — in the
+  // same report whose only line read "was not tried: It never started."
+  //
+  // A capture whose entire non-contract record is refusals is a walk that did nothing. Its
+  // steps opened nothing, and the doors they name are listed rather than dropped.
+  const seen = capture.observations ?? [];
+  const refusals = seen.filter((o) => o?.meta?.refused === true);
+  const anythingHappened = seen.some((o) => o?.channel !== 'contract' && o?.meta?.refused !== true);
+  const nothingWasTried = refusals.length > 0 && !anythingHappened;
+
   if (journey?.steps) {
     // Two lists, because a doorKey is kind and name only. That is right for an IPC channel or
     // an exported name, where the name IS the door; it is wrong for a route, where GET /basket
@@ -464,6 +497,8 @@ export function walkFromCapture(capture, journey) {
     const shut = [];
     /** @type {{door: string, status: number}[]} */
     const bounced = [];
+    /** @type {string[]} */
+    const untried = [];
     /** @param {any} s @returns {boolean} */
     const reallyWalked = (s) => {
       // The door is the ROUTE (`/reports`); the observation is addressed by method and route
@@ -474,6 +509,10 @@ export function walkFromCapture(capture, journey) {
         typeof s.method === 'string' && s.method ? `${s.method} ${s.door}` : null,
         String(s.door),
       ].filter(Boolean);
+      if (nothingWasTried) {
+        untried.push(String(keys[0] ?? s.door));
+        return false;
+      }
       const key = keys.find((k) => answered.has(/** @type {string} */ (k)));
       const code = key === undefined ? undefined : answered.get(/** @type {string} */ (key));
       // A redirect is real behaviour and it IS walked — but what you saw is the bounce, not the
@@ -492,6 +531,7 @@ export function walkFromCapture(capture, journey) {
     const byName = named.filter((s) => typeof s.doorDetail !== 'string' || s.doorDetail === '').filter(reallyWalked);
     if (shut.length > 0) walk.knockedShut = shut;
     if (bounced.length > 0) walk.onlyRedirected = bounced;
+    if (untried.length > 0) walk.notTried = untried;
     if (byName.length > 0) walk.doors = byName.map((s) => doorKey({ kind: String(s.kind), name: String(s.door) }));
     if (exact.length > 0) {
       walk.doorAddresses = exact.map((s) =>
@@ -562,6 +602,138 @@ function trimmedAddress(door) {
 }
 
 // ---------------------------------------------------------------------------
+// One order, every time
+// ---------------------------------------------------------------------------
+
+/**
+ * TWO IDENTICAL RUNS HAVE TO SAY THE SAME THING.
+ *
+ * This tool's whole method is running the same thing twice and subtracting what disagrees.
+ * A report that disagrees with itself between two identical runs is not untidy — it is the
+ * measurement contradicting the method, and a reader who spots it has no reason to believe
+ * the rest.
+ *
+ * It was doing exactly that. A capture id ends in three random bytes, deliberately, so two
+ * captures written inside the same second do not overwrite each other — and the store hands
+ * captures back in id order, so those random bytes decide which walk is read first. Measured
+ * 2026-08-31 on one unchanged product, three runs: help, the-code, the-code, help; then
+ * the-code, help, the-code, help; then help, the-code, the-code, help.
+ *
+ * Everything the ledger built in that order came out shuffled with it — which of two
+ * journeys got named as the evidence for a door, which six of eight shut doors got listed by
+ * name in the caveat, the order of the gaps, the key order of the tallies. So the walks are
+ * put in an order of the ledger's own before anything reads them, and that order is a
+ * function of what is IN each walk, never of when it arrived.
+ *
+ * @param {Walk[]} walks
+ * @returns {Walk[]}
+ */
+function inWalkOrder(walks) {
+  return [...walks]
+    .map((walk) => ({ walk, key: walkOrderKey(walk) }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map(({ walk }) => walk);
+}
+
+/**
+ * The whole of one walk, squeezed into a single sortable string.
+ *
+ * Every field that can reach the report is in here, so two walks only ever tie when they
+ * would produce the same words either way round. The addresses are the exception: a walk on
+ * a big product carries tens of thousands of them, and holding all of that in a sort key
+ * costs more than the ordering is worth. How many there are, plus a fingerprint of them,
+ * tells two walks apart just as well and stays one short string.
+ *
+ * @param {Walk} walk
+ * @returns {string}
+ */
+function walkOrderKey(walk) {
+  return [
+    walk.journey ?? '',
+    walk.at ?? '',
+    walk.buildId ?? '',
+    walk.source ?? '',
+    String((walk.paths ?? []).length),
+    digestOf(walk.paths ?? []),
+    (walk.doors ?? []).join('\u0001'),
+    (walk.doorAddresses ?? []).join('\u0001'),
+    (walk.knockedShut ?? []).map((d) => `${d.door}=${d.status}`).join('\u0001'),
+    (walk.onlyRedirected ?? []).map((d) => `${d.door}=${d.status}`).join('\u0001'),
+    (walk.notTried ?? []).join('\u0001'),
+    (walk.touchedFiles ?? []).join('\u0001'),
+    (walk.touchedFunctions ?? []).join('\u0001'),
+    String(walk.functionsNotListed ?? 0),
+  ].join('\u0000');
+}
+
+/**
+ * A short fingerprint of a list of strings. FNV-1a, written out rather than imported,
+ * because this file has no business opening a crypto library to decide a sort order.
+ *
+ * @param {string[]} items
+ * @returns {string}
+ */
+function digestOf(items) {
+  let hash = 0x811c9dc5;
+  for (const item of items) {
+    for (let i = 0; i < item.length; i++) {
+      hash ^= item.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    hash ^= 0x0a;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * Sort a list of pairs by the first of the two. Used wherever a caveat names only the first
+ * few of something: which few get named has to be decided by their names.
+ *
+ * @param {[string, unknown]} a
+ * @param {[string, unknown]} b
+ * @returns {number}
+ */
+function byFirst(a, b) {
+  return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+}
+
+/**
+ * The channel tallies written out in one fixed order — the channel list's own, not the order
+ * the observations happened to arrive in. Same reason as {@link inWalkOrder}: this object is
+ * printed by `--json`, and JSON keeps the order keys were added in.
+ *
+ * @param {Partial<Record<Channel, number>>} byChannel
+ * @returns {Partial<Record<Channel, number>>}
+ */
+function inChannelOrder(byChannel) {
+  /** @type {Record<string, number>} */
+  const out = {};
+  const held = /** @type {Record<string, number>} */ (byChannel);
+  for (const channel of CHANNELS) if (held[channel] !== undefined) out[channel] = held[channel];
+  // A channel this build of the tool has never heard of is still evidence somebody wrote
+  // down, and dropping it would make the report smaller than the run was.
+  for (const channel of Object.keys(held).sort()) if (out[channel] === undefined) out[channel] = held[channel];
+  return out;
+}
+
+/**
+ * Sort gaps into an order of their own. Only for gaps whose order carries no meaning — the
+ * ones read back out of stored captures, which arrive in whatever order the disk listed
+ * them. The gaps `toCoverage` builds are in rank order and are left exactly as they are.
+ *
+ * @param {CoverageGap[]} list
+ * @returns {CoverageGap[]}
+ */
+function inGapOrder(list) {
+  return [...list].sort((a, b) => {
+    const left = `${a.what}\u0000${a.why}\u0000${a.unlockedBy ?? ''}`;
+    const right = `${b.what}\u0000${b.why}\u0000${b.unlockedBy ?? ''}`;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // The ledger
 // ---------------------------------------------------------------------------
 
@@ -589,7 +761,7 @@ function trimmedAddress(door) {
 export function buildLedger(input) {
   /** @type {DoorEntry[]} */
   const entries = [];
-  const walks = input.walks.map((walk) => ({ walk, paths: new Set(walk.paths) }));
+  const walks = inWalkOrder(input.walks).map((walk) => ({ walk, paths: new Set(walk.paths) }));
 
   /** @type {Record<string, KindTally>} */
   const byKind = {};
@@ -684,7 +856,9 @@ export function buildLedger(input) {
   const shutDoors = new Map();
   for (const { walk } of walks) for (const d of walk.knockedShut ?? []) shutDoors.set(d.door, d.status);
   if (shutDoors.size > 0) {
-    const listed = [...shutDoors.entries()].slice(0, 6).map(([door, code]) => `${door} answered ${code}`).join(', ');
+    // Sorted, so which six get named is decided by their names and not by which capture the
+    // disk happened to hand back first. See `inWalkOrder` for why that was ever in doubt.
+    const listed = [...shutDoors.entries()].sort(byFirst).slice(0, 6).map(([door, code]) => `${door} answered ${code}`).join(', ');
     caveats.push(
       `${shutDoors.size} ${shutDoors.size === 1 ? 'door the code declares was' : 'doors the code declares were'} knocked on and answered as not being there (${listed}${shutDoors.size > 6 ? ', and more' : ''}). Knocking is not walking: nothing has been proved about ${shutDoors.size === 1 ? 'it' : 'them'}, and the source and the build that ran disagree about whether ${shutDoors.size === 1 ? 'it exists' : 'they exist'}.`,
     );
@@ -695,7 +869,20 @@ export function buildLedger(input) {
   if (bouncedDoors.size > 0) {
     const all = bouncedDoors.size >= Math.max(1, opened);
     caveats.push(
-      `${bouncedDoors.size} ${bouncedDoors.size === 1 ? 'door' : 'doors'} answered with a redirect rather than with ${bouncedDoors.size === 1 ? 'a page' : 'pages'} — ${[...bouncedDoors.entries()].slice(0, 5).map(([door, code]) => `${door} answered ${code}`).join(', ')}${bouncedDoors.size > 5 ? ', and more' : ''}. What was seen is the bounce, not what is behind it.${all ? ' EVERY door that answered did this, which is what a sign-in wall looks like from out here: this run has not been inside the product at all.' : ''}`,
+      `${bouncedDoors.size} ${bouncedDoors.size === 1 ? 'door' : 'doors'} answered with a redirect rather than with ${bouncedDoors.size === 1 ? 'a page' : 'pages'} — ${[...bouncedDoors.entries()].sort(byFirst).slice(0, 5).map(([door, code]) => `${door} answered ${code}`).join(', ')}${bouncedDoors.size > 5 ? ', and more' : ''}. What was seen is the bounce, not what is behind it.${all ? ' EVERY door that answered did this, which is what a sign-in wall looks like from out here: this run has not been inside the product at all.' : ''}`,
+    );
+  }
+  // A door whose journey was refused before anything ran. Nobody knocked on it, so it is not
+  // shut and it is not bounced — it is untouched, and the only wrong answer is to leave it
+  // out. This says the number out loud so nobody has to notice a door that quietly stopped
+  // being counted as walked.
+  /** @type {Set<string>} */
+  const untriedDoors = new Set();
+  for (const { walk } of walks) for (const door of walk.notTried ?? []) untriedDoors.add(door);
+  if (untriedDoors.size > 0) {
+    const listed = [...untriedDoors].sort().slice(0, 6).join(', ');
+    caveats.push(
+      `${untriedDoors.size} ${untriedDoors.size === 1 ? 'door was' : 'doors were'} never tried at all (${listed}${untriedDoors.size > 6 ? ', and more' : ''}). The journey that would have opened ${untriedDoors.size === 1 ? 'it' : 'them'} was refused before anything ran — the thing it needed did not start, or a value it needed was never supplied — and the reason is on the record beside it. ${untriedDoors.size === 1 ? 'It is' : 'They are'} counted here as never opened, because nothing knocked.`,
     );
   }
   if (input.doors.length === 0) {
@@ -719,8 +906,11 @@ export function buildLedger(input) {
     entries,
     byKind,
     journeys: new Set(walks.map(({ walk }) => walk.journey)).size,
-    byJourneySource,
-    byChannel: input.byChannel ?? {},
+    // Both of these are printed by `--json`, and JSON keeps the order keys were added in.
+    // Added in the order the walks arrived, they came out shuffled between two identical
+    // runs — see `inWalkOrder`. Written out in an order of their own, they do not.
+    byJourneySource: Object.fromEntries(Object.entries(byJourneySource).sort(byFirst)),
+    byChannel: inChannelOrder(input.byChannel ?? {}),
     captures: input.captures ?? walks.length,
     builds: input.builds ?? 0,
     caveats,
@@ -883,7 +1073,11 @@ export async function ledger(store, product, opts = {}) {
     captures,
     builds: wanted.length,
     caveats,
-    gaps: dedupeGaps(holes),
+    // These holes were collected build by build and capture by capture, in the order the
+    // store listed them — which is the order the random end of a capture id put them in.
+    // Nothing about one unreadable record makes it more urgent than another, so they go in
+    // an order of their own and two identical runs list them the same way round.
+    gaps: inGapOrder(dedupeGaps(holes)),
   });
 }
 
@@ -975,7 +1169,13 @@ export function gaps(led, opts = {}) {
     });
   }
 
-  const ranked = jobs.sort((a, b) => (b.rank === a.rank ? b.doors - a.doors : b.rank - a.rank));
+  // Whole families tie here routinely — ten folders of four unopened exports each score the
+  // same and hold the same number of doors — and a tie used to be settled by whichever came
+  // out of the map first. The family's own name settles it instead, so the list this file
+  // hands back is the same list every time and the cut at the end falls in the same place.
+  const ranked = jobs.sort(
+    (a, b) => b.rank - a.rank || b.doors - a.doors || (a.group < b.group ? -1 : a.group > b.group ? 1 : 0),
+  );
   if (ranked.length <= worst) return ranked;
 
   // The cut is real and it used to be invisible. `toCoverage` asks for eight jobs; a product
