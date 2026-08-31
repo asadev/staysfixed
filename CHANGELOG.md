@@ -86,6 +86,21 @@ adapter and tests turned out to hold at least one defect that only running it co
 - **Reclaiming a scratch folder now stops what is still running inside it.** Four servers from
   the previous day were still up on this machine, out of folders that had already been deleted.
 
+### The measurement no longer measures itself
+
+- **With nothing edited, a check compared the build against the same build** — and called
+  whatever flickered between two runs minutes apart a change nobody made. On a stock Next.js
+  app with a link between two pages, four runs in five reported a difference, and one claimed
+  the change "made something non-deterministic". Two runs of one build are a wobble
+  measurement, which is this tool's own word for it, and it now says so.
+- **The record of what "working" means moved on its own.** The store keeps every capture a
+  build ever produced and the reader took the newest, so anybody checking out the old commit
+  and running a check quietly replaced the standard. Only `ship` decides what working means.
+- **A request cancelled by our own teardown was reported as the product complaining.** Next.js
+  starts a prefetch behind every internal link; closing the page aborts it, and the browser
+  reports that exactly like a real failure. It is recorded as a hole now — louder than a
+  complaint, never quieter.
+
 ### The report no longer disagrees with itself
 
 - **A renamed field was described only as the field that appeared**, never the one that
