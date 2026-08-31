@@ -22,6 +22,12 @@ rather than by reading the code.
   its own process group and the group is what gets signalled. (`exec` does not document
   `detached`; `spawn` does, so this moved to `spawn` rather than resting on behaviour that
   happens to work.)
+- **The ordinary way of closing a browser left its throwaway profile behind.** One `rm` is a
+  snapshot, and a browser is not one process: the parent exiting says nothing about its
+  renderers, which are still writing into the profile while they are reaped. The last-resort
+  path had learned this; the polite path — the one every ordinary run uses — swallowed the
+  failure with a bare catch. It passes on macOS and on an idle Linux box and fails on a loaded
+  one, which is exactly how a race behaves.
 - **`doctor` asked the machine before it asked the project.** For iPhone and Windows apps the
   platform test came first, so on Linux a project containing no iPhone app was told its
   non-existent app could not be reached from this machine — a machine reason given for a

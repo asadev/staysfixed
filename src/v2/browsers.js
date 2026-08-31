@@ -533,6 +533,37 @@ function installGuards() {
 }
 
 /**
+ * Take the throwaway profile away, and keep taking it away until it stays gone.
+ *
+ * One `rm` is a snapshot. A browser is not one process: the parent exiting says nothing about
+ * its renderers, and while they are being reaped they are still writing into the profile — so
+ * the sweep starts, a file appears behind it, the folder is not empty, and the profile
+ * outlives the run. That is the one thing "nothing it opened outlives the run" promises.
+ *
+ * The last-resort path (`killNow`) learned this and this one did not, so the polite close —
+ * which is the one every ordinary run uses — swallowed the failure with a bare `.catch()` and
+ * left the folder behind. It passed on macOS and on an idle Linux box, and failed on a loaded
+ * CI runner, which is exactly how a race behaves. Measured 2026-08-31.
+ *
+ * @param {string} home
+ * @returns {Promise<void>}
+ */
+async function removeStubbornly(home) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await fsp.rm(home, { recursive: true, force: true });
+      if (!fs.existsSync(home)) return;
+    } catch {
+      // A file recreated a millisecond after the sweep began. Wait for whoever wrote it to
+      // finish dying, and go round again.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  // Still there. Untidy rather than harmful, and exactly what `staysfixed browsers --clean`
+  // is for — but never reported as success.
+}
+
+/**
  * The last-resort cleanup: no promises, no awaiting, no politeness.
  * @param {number|null} pid
  * @param {string} home
@@ -900,7 +931,7 @@ export async function openBrowser(opts = {}) {
     closing ??= (async () => {
       live.delete(id);
       await stopProcess(child, GRACE_MS);
-      await fsp.rm(home, { recursive: true, force: true }).catch(() => {});
+      await removeStubbornly(home);
     })();
     return closing;
   };
