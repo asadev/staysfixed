@@ -684,7 +684,7 @@ export async function pushBuild(host, localDir, remoteDir) {
 let link = /** @type {import('../remote.js').RemoteRunner|null} */ (null);
 
 /** Everything this run started over there, so teardown can put it back and nothing else. */
-/** @type {{pid: number, run: string, exitFile: string}[]} */
+/** @type {{pid: number, run: string, exitFile: string, folder: string}[]} */
 let startedHere = [];
 
 /**
@@ -1054,7 +1054,10 @@ export const linuxAdapter = defineAdapter({
           says: `The app would not start on ${host}: ${launched.error}.`,
         })];
       }
-      startedHere.push({ pid: Number(launched.pid), run: runId, exitFile: String(launched.exitFile) });
+      startedHere.push({
+        pid: Number(launched.pid), run: runId,
+        exitFile: String(launched.exitFile), folder: String(launched.folder),
+      });
 
       // Wait for a window rather than sleeping a fixed time. A machine under load takes longer,
       // and a fixed sleep would turn that into a difference in the report.
@@ -1234,7 +1237,9 @@ export const linuxAdapter = defineAdapter({
       if (launched?.ok && link && link.alive) {
         const pid = Number(launched.pid);
         try {
-          await askLinux(link, 'stop', { ...session, run: runId, pid, exitFile: launched.exitFile }, { timeoutMs: 30_000 });
+          await askLinux(link, 'stop', {
+            ...session, run: runId, pid, exitFile: launched.exitFile, folder: launched.folder,
+          }, { timeoutMs: 30_000 });
         } catch { /* the link is gone; teardown says so */ }
         startedHere = startedHere.filter((p) => p.pid !== pid);
       }
@@ -1252,7 +1257,9 @@ export const linuxAdapter = defineAdapter({
     if (link) {
       for (const started of startedHere.slice()) {
         try {
-          await askLinux(link, 'stop', { run: started.run, pid: started.pid, exitFile: started.exitFile }, { timeoutMs: 15_000 });
+          await askLinux(link, 'stop', {
+            run: started.run, pid: started.pid, exitFile: started.exitFile, folder: started.folder,
+          }, { timeoutMs: 15_000 });
         } catch { /* going away anyway */ }
       }
       startedHere = [];

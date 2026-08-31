@@ -304,6 +304,14 @@ export function readDesktopProbe(stdout, stderr = '') {
  * its environment. Not "should not" — it reads `/proc/<pid>/environ` and returns a refusal.
  * That desktop belongs to somebody.
  *
+ * THE ONE THING IT DOES WRITE, AND WHY, AND WHERE IT GOES. The probe itself is never on that
+ * machine's disk. But the app it starts has to outlive it, and a program whose parent has gone
+ * is reparented to init — which takes its exit code with it, and "did it fall over" is one of
+ * the questions this adapter exists to answer. So the app runs under a four-word shell that
+ * records its exit code, and its output goes to two files beside it, in one folder under
+ * `/tmp`. Those three files are read when the app is closed and the folder is REMOVED in the
+ * same breath. Nothing this tool does is still on somebody's disk tomorrow.
+ *
  * Written with `String.raw` so the backslashes in it are the ones Python sees.
  *
  * @returns {string} Python 3, ready to be base64ed onto the wire.
@@ -902,7 +910,21 @@ def main():
             exit_code = open(req['exitFile']).read().strip()
         except Exception:
             pass
-        return emit({'ok': True, 'op': op, 'forced': forced, 'exit': exit_code, 'ms': took()})
+        # AND TAKE THE THREE FILES BACK OFF THAT MACHINE. They exist only so the exit code and
+        # the output survive the probe exiting - see the note on the launch operation - and
+        # once they have been read there is no reason for them to outlive the run. Nothing this
+        # tool does should still be on somebody's disk tomorrow.
+        folder = req.get('folder')
+        removed = False
+        if folder and str(folder).startswith('/tmp/staysfixed-linux-'):
+            try:
+                import shutil
+                shutil.rmtree(folder)
+                removed = True
+            except Exception:
+                pass
+        return emit({'ok': True, 'op': op, 'forced': forced, 'exit': exit_code,
+                     'tidied': removed, 'ms': took()})
 
     emit({'ok': False, 'op': op, 'error': 'nothing here knows how to do ' + str(op)})
 
