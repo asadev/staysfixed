@@ -327,6 +327,45 @@ export function doorsFromObservations(observations) {
 }
 
 /**
+ * The parts of a door's name that are a placeholder rather than a real address.
+ *
+ * Every page framework spells this differently and they all mean the same thing: this
+ * address cannot be asked for until somebody says what goes in the gap. Next.js and
+ * SvelteKit and Astro write `[slug]`, Next also writes `[...slug]` and `[[...slug]]`, Nuxt
+ * and Express write `:slug`, Remix writes `$slug`, and a few write `{slug}`.
+ */
+const A_PLACEHOLDER = /\[\[?\.{0,3}([^\]]+)\]?\]|:([A-Za-z0-9_]+)|\$([A-Za-z0-9_]+)|\{([^}]+)\}/g;
+
+/**
+ * The placeholders in a door's name, in the order they appear, or an empty list.
+ *
+ * WHY THE LEDGER CARES. A page at `/blog/[slug]` is a door like any other, and it is the one
+ * kind that cannot be opened by asking for it: without a value there is no address to
+ * request. Left with the ledger's ordinary sentence it reads "Nothing has ever opened it",
+ * which is true and tells the owner nothing about what to do — and a job nobody knows how to
+ * start is a job that stays on the list for ever. Named, it becomes one line of settings.
+ *
+ * Said here, in the ledger, rather than only in the adapter that would have walked it. An
+ * adapter only ever reports the doors it FOUND: a framework this tool cannot read pages out
+ * of contributes no journey at all, so its refusal never happens and nothing downstream ever
+ * hears about it. The door itself still reaches the ledger from the code reader, and this is
+ * the last place the reason can still be attached. Written 2026-08-31.
+ *
+ * @param {DoorFact} door
+ * @returns {string[]}
+ */
+export function placeholdersIn(door) {
+  if (door.kind !== 'route') return [];
+  /** @type {string[]} */
+  const found = [];
+  for (const match of String(door.name).matchAll(A_PLACEHOLDER)) {
+    const name = match[1] ?? match[2] ?? match[3] ?? match[4];
+    if (name) found.push(name.replace(/^\.{3}/, ''));
+  }
+  return found;
+}
+
+/**
  * Could anything here ever open this door, and if not, why not?
  *
  * Kept apart from "has it been opened" on purpose. A door nobody has walked is work; a door
@@ -572,8 +611,29 @@ export function whatTheWalkDid(door, walk, paths) {
     if (paths.has(door.address) || paths.has(trimmedAddress(door))) {
       return { state: 'opened', how: `"${walk.journey}" saw the product answer at its own address.` };
     }
+    // READING THE SIGN ON A DOOR IS NOT WALKING THROUGH IT.
+    //
+    // This branch used to answer 'opened', and that single word was the worst false all-clear
+    // this tool has ever produced. The import journey imports a module and writes down what it
+    // exports — "slug: a function taking 1 argument". Nothing calls it. So an exported name
+    // counted as covered on the strength of its own label, `init` and `doctor` both told the
+    // owner that libraries were covered "in full", and a check said so on every run.
+    //
+    // Measured 2026-08-31 on a four-line library: the separator inside `slug` was changed from
+    // "-" to "_", so every web address the product makes came out different, and
+    // `isReserved('admin')` went from true to false. Both names still existed and both still
+    // took one argument, so every address agreed and the run answered "Nothing that worked has
+    // changed" and exited 0.
+    //
+    // It is 'reached' now, which is what it always was: the code is there, something looked at
+    // it, and nothing exercised it. An export that was really CALLED is opened by the branch
+    // above this one — the answers journey writes each call at this same address — or by the
+    // test suite's own coverage below. This one is the label, and it says so.
     if (door.kind === 'export' && paths.has(joinPath(['export', walk.journey, door.name]))) {
-      return { state: 'opened', how: `"${walk.journey}" read it off the module's exported surface.` };
+      return {
+        state: 'reached',
+        how: `"${walk.journey}" imported the module and read this name off it. That its name and its shape are still there is compared; nothing called it, so a version of it that returns a different answer would look identical.`,
+      };
     }
   }
   if (door.kind === 'export' && door.file && walk.touchedFunctions?.includes(`${door.file}:${door.name}`)) {
@@ -751,6 +811,30 @@ function inGapOrder(list) {
  */
 
 /**
+ * What to say about a door nothing has opened, when opening it is possible.
+ *
+ * One sentence, and it has to be the sentence that names the next move. "Nothing has ever
+ * opened it" is where every unopened door used to land, including a page at `/blog/[slug]`
+ * that nothing CAN open until somebody supplies a slug — so the one door with a concrete,
+ * one-line fix read exactly like the ones with no fix at all.
+ *
+ * @param {DoorFact} door
+ * @returns {string}
+ */
+function whyItIsStillShut(door) {
+  const gaps = placeholdersIn(door);
+  if (gaps.length > 0) {
+    return (
+      `Nothing has ever opened it, and nothing can until somebody says what ${gaps.map((g) => `"${g}"`).join(' and ')} ` +
+      `should be — the address has a gap in it, so there is nothing to ask for. Put a real value under "http.samples" ` +
+      `(or "web.samples" for a page) in the settings and this ${KIND_ONE[door.kind] ?? 'door'} starts being checked. ` +
+      `Until then a break behind it would not be seen.`
+    );
+  }
+  return `Nothing has ever opened it, so a break behind this ${KIND_ONE[door.kind] ?? 'door'} would not be seen.`;
+}
+
+/**
  * Draw up the ledger. Pure: hand it doors and walks, get the answer — no disk, and no clock
  * beyond the one stamp saying when. Everything that touches a store lives in {@link ledger},
  * so this half can be tested with lists written by hand.
@@ -800,7 +884,7 @@ export function buildLedger(input) {
       how: best
         ? best.how
         : can.walkable
-          ? `Nothing has ever opened it, so a break behind this ${KIND_ONE[door.kind] ?? 'door'} would not be seen.`
+          ? whyItIsStillShut(door)
           : /** @type {string} */ (can.whyNot),
       journeys: [...new Set(evidence.map((h) => h.journey))],
       lastWalkedAt: stamps.length > 0 ? /** @type {string} */ (stamps[stamps.length - 1]) : null,
@@ -883,6 +967,20 @@ export function buildLedger(input) {
     const listed = [...untriedDoors].sort().slice(0, 6).join(', ');
     caveats.push(
       `${untriedDoors.size} ${untriedDoors.size === 1 ? 'door was' : 'doors were'} never tried at all (${listed}${untriedDoors.size > 6 ? ', and more' : ''}). The journey that would have opened ${untriedDoors.size === 1 ? 'it' : 'them'} was refused before anything ran — the thing it needed did not start, or a value it needed was never supplied — and the reason is on the record beside it. ${untriedDoors.size === 1 ? 'It is' : 'They are'} counted here as never opened, because nothing knocked.`,
+    );
+  }
+  // WHAT AN EXPORTED NAME BEING "REACHED" REALLY MEANS, said in the report rather than left
+  // for somebody to infer from a word. An export lands here when something imported the module
+  // and read the name off it, or ran the file it lives in, and nothing ever called it. The
+  // count is small and the consequence is not: on a library, the names are the packaging and
+  // the answers are the product, and this is the line that says the product was not compared.
+  const labelOnly = entries.filter((e) => e.kind === 'export' && e.state === 'reached');
+  if (labelOnly.length > 0) {
+    const listed = labelOnly.slice(0, 6).map((e) => e.name).join(', ');
+    caveats.push(
+      `${labelOnly.length} exported ${labelOnly.length === 1 ? 'name was' : 'names were'} read but never called (${listed}${labelOnly.length > 6 ? ', and more' : ''}). ` +
+      `What is compared about ${labelOnly.length === 1 ? 'it' : 'them'} is that the name is still there and still takes the same number of arguments. ` +
+      `A version that returns a DIFFERENT ANSWER would look identical, so a clean run says nothing about what ${labelOnly.length === 1 ? 'it does' : 'they do'}.`,
     );
   }
   if (input.doors.length === 0) {

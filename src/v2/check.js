@@ -51,6 +51,7 @@ import {
 } from './watch/window.js';
 import { onAppStarted, stillOpen } from './adapters/isolate.js';
 
+import { isAnAnswerJourney, journeysFromExports, splitAnswerSheet } from './journeys/from-exports.js';
 import { processAdapter } from './adapters/process.js';
 import { sourceAdapter } from './adapters/source.js';
 import { httpAdapter } from './adapters/http.js';
@@ -1801,6 +1802,112 @@ export function suiteBudgetFrom(config) {
 }
 
 /**
+ * How long the harvest gets when NOBODY asked for it.
+ *
+ * A quarter of what somebody who typed `--journeys suite` gets, and that gap is the whole
+ * design. Measured on this machine on 2026-08-31: twelve near-empty test files harvested in
+ * 3.1 seconds. Twenty seconds therefore covers a small suite outright and takes a useful bite
+ * out of a large one, and every file it does not reach is named in the coverage list with the
+ * command that would reach it. The alternative — deciding from a file count whether to run at
+ * all — guesses at how slow somebody's tests are and is wrong in both directions.
+ */
+const AUTO_HARVEST_BUDGET_MS = 20_000;
+
+/**
+ * How many harvested test files an unasked-for run will then WALK.
+ *
+ * The harvest budget bounds the harvest and not what comes after it: each harvested journey
+ * is walked twice on the new build and again on the old one. Measured on this machine on
+ * 2026-08-31, twelve harvested journeys took a check from 1.4 seconds to 8.2. Twelve is
+ * therefore the cap, and the files past it are named rather than dropped in silence.
+ */
+const AUTO_HARVEST_JOURNEY_CAP = 12;
+
+/**
+ * How long ONE test file gets on an unasked-for run, harvesting and walking alike.
+ *
+ * The budget above is checked before a file STARTS, never in the middle of one, so without
+ * this a single slow test file could walk straight through a twenty-second budget and spend
+ * the runner's default two minutes doing it — turning a bounded default into an unbounded
+ * one on exactly the projects where that hurts most. Thirty seconds is generous for one file
+ * of a suite somebody runs on every change, and a file that needs longer is named as a hole
+ * with the reason, which is the honest outcome rather than a silent wait.
+ */
+const AUTO_FILE_TIMEOUT_MS = 30_000;
+
+/**
+ * Should this run harvest the project's own tests without being asked?
+ *
+ * The question is only ever "can this be done at all", never "is this project's suite worth
+ * it" — a suite that is too slow is handled by the budget and the cap above, not by refusing
+ * to look. Everything here is cheap: package.json is read, a few filenames are tested for
+ * existence, and nothing is run.
+ *
+ * IT CAN BE SWITCHED OFF, in two ways, because a default that cannot be turned off is a
+ * default somebody works around by uninstalling. `--journeys code` says "read the source and
+ * nothing else" for one run; `suite: { auto: false }` in the settings says it for good. Both
+ * are reported as a hole in that run's coverage, so switching it off never quietly turns into
+ * believing a check that no longer looks.
+ *
+ * @param {string} root
+ * @param {Record<string, any>} config
+ * @returns {Promise<{run: boolean, gap?: CoverageGap}>}
+ */
+async function suiteWorthRunningByDefault(root, config) {
+  if (config?.suite?.auto === false) {
+    return {
+      run: false,
+      gap: {
+        what: "This project's own tests were not run, because the settings switch that off.",
+        why: 'suite: { auto: false } in your settings file. Nothing your tests can see is being compared on this run, which on a library is most of what there is to see.',
+        unlockedBy: 'Remove that line, or run `staysfixed check --journeys suite` once to see what it would find.',
+      },
+    };
+  }
+  try {
+    const { detectRunner } = await import('./journeys/from-suite.js');
+    const found = await detectRunner(root);
+    if (found.runner === 'none') {
+      // Said out loud, on every run, rather than passed over as "there was nothing to do".
+      // A project with no tests is not a project where the tests are fine — it is a project
+      // where a whole channel is empty, and on a library that channel is most of what there
+      // is to look at. The reader is told which it is.
+      return {
+        run: false,
+        gap: {
+          what: "None of this project's own tests were run, because there are none this tool can find.",
+          why: `${found.why} A test suite is the only source that walks this product with the arguments somebody actually thought about, so without one the check compares what it can read and call for itself, and no more.`,
+          unlockedBy: "Point the project at vitest or Node's own test runner and every test file becomes a journey, run twice on each build and compared.",
+        },
+      };
+    }
+    const blocking = (found.missing ?? []).filter((m) => m.blocking);
+    if (blocking.length > 0) {
+      return {
+        run: false,
+        gap: {
+          what: "This project has a test suite and none of it was run, so nothing here says anything about what those tests cover.",
+          why: `${blocking.map((m) => m.what).join(', ')} ${blocking.length === 1 ? 'is' : 'are'} missing, and the harvest cannot run one test file at a time without ${blocking.length === 1 ? 'it' : 'them'}.`,
+          unlockedBy: blocking.map((m) => m.howToGet).join(' '),
+        },
+      };
+    }
+    return { run: true };
+  } catch (e) {
+    // Being unable to work out whether a suite exists is a hole like any other. It must never
+    // read as "this project has no tests", which is the same silence wearing a different hat.
+    return {
+      run: false,
+      gap: {
+        what: "Nothing could work out whether this project has a test suite, so none of it was run.",
+        why: messageOf(e),
+        unlockedBy: 'Run `staysfixed check --journeys suite` to see what it says, or `staysfixed doctor` for what this folder is missing.',
+      },
+    };
+  }
+}
+
+/**
  * Thin out the record of builds nobody is going to ask about again.
  *
  * WHY THIS EXISTS AT ALL. `.staysfixed/` is deliberately kept in git — the record of what
@@ -2340,6 +2447,14 @@ async function walkOne(req, where) {
         ctx,
       );
       observations = await adapter.run(req.journey, prepared, ctx);
+      // An answer sheet arrives as one wall of text at one address, because that is what the
+      // process adapter does with anything a command prints. Left that way, a library whose
+      // every return value changed produced ONE finding, worded as a window onto the middle of
+      // a string: "…eserved(\"admin\") -> false…" where it read "…eserved(\"admin\") -> true…".
+      // True, and useless to the person who has to decide whether to ship. Taken apart, every
+      // call gets the exported name's own address and the finding names the function, the
+      // input and both answers. Measured 2026-08-31 — see `splitAnswerSheet`.
+      if (isAnAnswerJourney(req.journey)) observations = splitAnswerSheet(observations, req.journey);
     } catch (e) {
       // A journey that fell over is a hole in the coverage, never a silent pass and never
       // the end of the run — the other journeys' work is worth keeping.
@@ -2540,29 +2655,64 @@ async function gatherJourneys({ root, config, options }) {
 
   if (named) journeys.push(...(await readJourneyFile(path.resolve(root, named))));
 
-  // The project's own test suite, when somebody asked for it in those words and never
-  // otherwise. This RUNS their tests — twice each, inside the same scratch clone everything
-  // else uses, under a time budget — and that is a cost nobody gets charged by accident, so
-  // it is off unless `--journeys suite` says so.
+  // ---- The project's own test suite.
   //
-  // It is worth switching on because it sees what walking a product cannot. On the fixture
-  // where a total quietly stops rounding pennies, and the command line only ever adds whole
-  // pounds, the discovered journeys produce nothing at all — the output does not move by one
-  // character — and the harvested ones produce five findings.
+  // WHY THIS USED TO BE OFF BY DEFAULT, and the reasoning was right as far as it went: this
+  // RUNS somebody else's tests — every file twice to harvest, and then every harvested
+  // journey twice more on each build — and charging a stranger for that on a command they
+  // ran to get a fast answer is how a tool gets uninstalled. So it waited for
+  // `--journeys suite`.
+  //
+  // WHY IT IS NOW ON BY DEFAULT ANYWAY. The cost was measured against the wrong thing. It was
+  // weighed against a slower check; it should have been weighed against a WRONG one. Measured
+  // 2026-08-31 on a four-line library: two exported functions were rewritten so that every
+  // web address the product produces came out different, and the default check answered
+  // "Nothing that worked has changed" and exited 0, because no default channel had ever
+  // called a function. A flag that is off by default cannot save anybody, and a false
+  // all-clear is not a cheaper answer than a slow one — it is the one answer this tool may
+  // never give.
+  //
+  // WHERE THE LINE IS DRAWN, and the measurement that drew it. Default-on is held to a
+  // TIGHTER budget than an explicit `--journeys suite`, and to a cap on how many harvested
+  // journeys are then walked, so the cost of a check nobody asked to slow down is bounded by
+  // construction instead of by a guess about somebody's suite. Measured on this machine on
+  // 2026-08-31, with twelve near-empty test files: harvesting them took 3.1 seconds, and the
+  // whole check went from 1.4 seconds to 8.2 — about 570ms per test file, and that is the
+  // FLOOR, because those tests did nothing. So the automatic path gets 20 seconds of harvest
+  // and walks at most 12 of what comes out, which lands a default check at well under half a
+  // minute on a project of that shape. Everything the budget or the cap left out is named as
+  // a hole with the command that would reach it — never dropped quietly.
+  //
+  // Asking for it by name still gets the full, uncapped ninety seconds, because somebody who
+  // typed `--journeys suite` has said what they are willing to wait for.
   //
   // Loaded here rather than at the top of the file: a copy of this tool without the harvest
   // in it still runs every other kind of check, and saying so is better than failing to start.
-  if (options.journeys === 'suite') {
+  const askedForTheSuite = options.journeys === 'suite';
+  let autoSuite = null;
+  if (!askedForTheSuite && !named && options.journeys !== 'recorded' && options.journeys !== 'code') {
+    autoSuite = await suiteWorthRunningByDefault(root, config);
+    if (autoSuite.gap) gaps.push(autoSuite.gap);
+  }
+  if (askedForTheSuite || autoSuite?.run) {
+    const automatic = !askedForTheSuite;
     try {
       const { journeysFromSuite, DEFAULT_HARVEST_BUDGET_MS } = await import('./journeys/index.js');
       // The settings file gets a say in how long this is allowed to take. Left out, the
       // harvest applies its own default, which is why nothing is passed rather than the
-      // default being copied to here — see `suiteBudgetFrom`.
-      const budgetMs = suiteBudgetFrom(config);
+      // default being copied to here — see `suiteBudgetFrom`. On the automatic path the
+      // tighter budget is used unless the settings ask for something of their own, because a
+      // number somebody wrote down beats a number this file guessed.
+      const asked = suiteBudgetFrom(config);
+      const budgetMs = asked ?? (automatic ? AUTO_HARVEST_BUDGET_MS : null);
+      const suiteOptions = {
+        ...(budgetMs === null ? {} : { budgetMs }),
+        ...(automatic ? { timeoutMs: AUTO_FILE_TIMEOUT_MS } : {}),
+      };
       const suite = await journeysFromSuite({
         root,
         surface: options.surface === 'auto' ? undefined : options.surface,
-        ...(budgetMs === null ? {} : { suite: { budgetMs } }),
+        ...(Object.keys(suiteOptions).length === 0 ? {} : { suite: suiteOptions }),
         // The harvest talks while it works, and it can take most of a minute. Its sentences
         // go into the same stream as everything else rather than nowhere.
         log: (message) => options.events?.emit({ type: 'note', at: options.events.elapsed(), message }),
@@ -2578,9 +2728,24 @@ async function gatherJourneys({ root, config, options }) {
         message:
           applied === 0
             ? 'The test-suite harvest was given no time budget at all, so every test file was run however long it took. Your settings asked for that with suite.budgetMs: 0.'
-            : `The test-suite harvest was held to ${Math.round(applied / 1000)} seconds${budgetMs === null ? ', which is the default' : ', which your settings asked for'}. Anything it did not reach in that time is named below rather than skipped quietly; change it with suite.budgetMs.`,
+            : `The test-suite harvest was held to ${Math.round(applied / 1000)} seconds${
+                asked !== null ? ', which your settings asked for' : automatic ? ', which is what an automatic run gets' : ', which is the default'
+              }. Anything it did not reach in that time is named below rather than skipped quietly; change it with suite.budgetMs.`,
       });
-      journeys.push(...suite.journeys);
+      // The cap, and only on the automatic path. Somebody who typed the flag gets everything
+      // their suite produced. Whoever did not type anything gets a bounded run and a list of
+      // exactly which of their test files are therefore not being watched.
+      let kept = suite.journeys;
+      if (automatic && kept.length > AUTO_HARVEST_JOURNEY_CAP) {
+        const dropped = kept.slice(AUTO_HARVEST_JOURNEY_CAP);
+        kept = kept.slice(0, AUTO_HARVEST_JOURNEY_CAP);
+        gaps.push({
+          what: `${dropped.length} of this project's test files were harvested and then not walked, so nothing here says anything about what they cover: ${dropped.map((j) => j.name).join(', ')}.`,
+          why: `A check nobody asked to slow down walks at most ${AUTO_HARVEST_JOURNEY_CAP} harvested test files, because each one is run twice on every build and the bill for a big suite would land on somebody who only wanted a quick answer.`,
+          unlockedBy: 'Run `staysfixed check --journeys suite` to walk all of them, or narrow the suite to the files that matter.',
+        });
+      }
+      journeys.push(...kept);
       gaps.push(...suite.gaps);
     } catch (e) {
       // A harvest that fell over is a hole, never a pass. Everything else this project has is
@@ -2591,6 +2756,22 @@ async function gatherJourneys({ root, config, options }) {
         unlockedBy: 'Run the suite yourself to see what it does, or point the check at a journeys file instead. Nothing your tests can see is being watched until this works.',
       });
     }
+  }
+
+  // ---- Calling what a library exports, rather than only reading its labels.
+  //
+  // See `from-exports.js` for the false all-clear that put this here. In one sentence: a
+  // library was checked, shipped, rewritten so that every value it returns came out
+  // different, and checked again — and the check passed, because every channel in the tool
+  // compared the NAMES and SHAPES of the exports and none of them had ever called one.
+  //
+  // It costs one extra process per configured module per build, which is the cheapest thing
+  // on this page, and it needs nothing configured that is not configured already: `init`
+  // writes `process.imports` for every library it sets up.
+  if (!named && options.journeys !== 'recorded') {
+    const answers = journeysFromExports({ config: config.process });
+    journeys.push(...answers.journeys);
+    gaps.push(...answers.gaps);
   }
 
   for (const adapter of ADAPTERS) {
