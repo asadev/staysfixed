@@ -1456,6 +1456,12 @@ const SCRIPT = `
     if (kind === 'guard') {
       if (status === 'passed') return 'still holds';
       if (status === 'skipped') return 'left out on purpose';
+      // Three different things wear the status 'failed', and calling all three "broken
+      // again" states as a fact something nobody knows. A guard that ran out of time did
+      // not answer the question, and a guard that asserted nothing never asked it. Saying
+      // a bug is back on a healthy tree is how a person learns to stop reading this panel.
+      if (ev.timedOut) return 'ran out of time, so nobody knows whether that bug is back';
+      if (ev.assertedNothing) return 'asked nothing, so it proved nothing';
       return ev.message || 'this one is broken again';
     }
     switch (status) {
@@ -1484,6 +1490,8 @@ const SCRIPT = `
     if (kind === 'guard') {
       if (status === 'passed') return 'still holds';
       if (status === 'skipped') return 'left out';
+      if (ev.timedOut) return 'no answer';
+      if (ev.assertedNothing) return 'asked nothing';
       return 'broken again';
     }
     switch (status) {
@@ -3109,7 +3117,10 @@ const SCRIPT = `
     entry.outText = outcomeText(kind, ev);
     if (entry.verdict) entry.verdict.textContent = shortOutcome(kind, ev);
     entry.failedAt = (kind === 'guard' && ev.status === 'failed' && ev.failedAt) ? ev.failedAt : '';
-    entry.story = (kind === 'guard' && ev.status === 'failed' && ev.because) ? ev.because : '';
+    // The story is the story of the BUG this guard exists to catch, and printing it under a
+    // guard that never got an answer says that bug is back. It only belongs under a guard
+    // that actually failed its own claim.
+    entry.story = (kind === 'guard' && ev.status === 'failed' && ev.because && !ev.timedOut && !ev.assertedNothing) ? ev.because : '';
     if (typeof ev.durationMs === 'number') tweenTo(entry.time, ev.durationMs, fmt);
     entry.tone = tone;
     redraw(entry);
