@@ -45,6 +45,10 @@
  * watched at the call and refused at the effect, permanently and on purpose.
  */
 
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+
+import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { asAddress } from './adapters/electron.js';
 import { readContract, readFileRoutes, readPackageCommands } from './adapters/source.js';
 import { familyOf, irreversibility, isRunnable } from './journeys/from-routes.js';
@@ -118,6 +122,13 @@ import { listBuilds, listCaptures, loadCapture, referencePointer } from './store
  *                                            and GET /x and POST /x are two doors that share a
  *                                            doorKey — so a step that knows which one it knocked
  *                                            on lands here instead, and the other stays shut.
+ * @property {{door: string, at: string}[]} [sampledAt]
+ *                                            Doors whose address has a changing part in it,
+ *                                            and the ONE address the walk actually asked for
+ *                                            after a sample value was put in the gap. Opening
+ *                                            `/blog/[slug]` at `/blog/hello-world` is one page
+ *                                            opened, never the family covered, and this is the
+ *                                            only record of which of the two happened.
  * @property {string[]} [touchedFiles]
  * @property {string[]} [touchedFunctions]    'file:name', from the suite's own coverage.
  * @property {number} [functionsNotListed]    Functions that ran and were cut from the list to
@@ -138,6 +149,10 @@ import { listBuilds, listCaptures, loadCapture, referencePointer } from './store
  * @property {string[]} journeys              Journeys that opened it.
  * @property {string|null} lastWalkedAt       ISO, or null.
  * @property {boolean} walkable               False when nothing here could ever open it.
+ * @property {boolean} [sampled]              Opened at ONE address of a family, because its own
+ *                                            address has a changing part and one sample value
+ *                                            was supplied. One page opened, not a family covered.
+ * @property {string} [openedAt]              That one address, when `sampled` is true.
  * @property {string} [whyNot]                Why not, in plain English. Set when walkable is false.
  * @property {boolean} [irreversible]         Opening it for real cannot be undone. Watched at
  *                                            the call, refused at the effect, forever.
@@ -157,6 +172,9 @@ import { listBuilds, listCaptures, loadCapture, referencePointer } from './store
  *                                            the ledger only had totals to work from.
  * @property {number} doors                   Doors the code reader knows about.
  * @property {number} opened
+ * @property {number} sampled                 Of `opened`, the ones opened at a single address of
+ *                                            a family. Counted apart because one value is not
+ *                                            coverage of everything behind a changing address.
  * @property {number} reached                 Code ran; the door itself was never addressed.
  * @property {number} never
  * @property {number} unwalkable              Of `never`, the ones nothing here could ever open.
@@ -366,6 +384,89 @@ export function placeholdersIn(door) {
 }
 
 /**
+ * Files that hold markup and styling rather than a program somebody can run.
+ *
+ * Used for one job: telling a command-line flag apart from a CSS custom property. Nobody
+ * declares the flags of a command-line program inside a React component or a stylesheet, and
+ * everybody writes `--px` and `--gap` in exactly those files.
+ */
+const A_COMPONENT_FILE = new Set([
+  '.tsx', '.jsx', '.vue', '.svelte', '.astro', '.css', '.scss', '.sass', '.less', '.styl',
+]);
+
+/**
+ * Is this "command" really a CSS custom property, and so not a door at all?
+ *
+ * WHAT WAS MEASURED, 2026-08-31, on a Next.js website. The code reader turns every string
+ * that looks like `--something` into a command-line flag, because in a command-line tool
+ * that is what it is. On a website it is a style value: `style={{ '--px': '1.5rem' }}`.
+ * Eleven of them were read out of five component files on the reproduction, and every one
+ * landed in the ledger's door count. The total then said the product had more ways into it
+ * than it has, and a total that counts things that are not doors is not a total of doors.
+ *
+ * The test is the FILE, not the name, and that is deliberate: `--dry-run` and `--px` look
+ * exactly alike, so guessing from the name would start dropping real flags. A component or a
+ * stylesheet is a place where a program's flags are never declared, and that is provable
+ * without guessing. Anything in a `.ts` or `.js` file is kept, because there the two really
+ * cannot be told apart from here — and keeping a thing that is not a door costs a line of
+ * noise, while dropping a door that is real is the silence this whole file exists to prevent.
+ *
+ * The real fix is one line further up, in the code reader, which can see that the string is
+ * an object KEY with a style value beside it rather than an argument. That lives in
+ * `src/v2/adapters/source.js` and is written up in this lane's report.
+ *
+ * @param {DoorFact} door
+ * @returns {boolean}
+ */
+export function isAStyleValue(door) {
+  if (door.kind !== 'command') return false;
+  if (!/^--/.test(String(door.name))) return false;
+  const where = String(door.file ?? '');
+  const dot = where.lastIndexOf('.');
+  return dot > 0 && A_COMPONENT_FILE.has(where.slice(dot).toLowerCase());
+}
+
+/**
+ * The door list with everything that is not a door taken out, and every door counted once.
+ *
+ * THE DENOMINATOR IS THE PROMISE. Every reassuring number this tool prints is a fraction of
+ * this list, so anything wrong in here is wrong in all of them. Two things were wrong on
+ * 2026-08-31, both of them making the list longer than the product is:
+ *
+ *   - style values counted as commands, which {@link isAStyleValue} explains;
+ *   - the same door counted once per file that mentions it. A setting read in nine files is
+ *     one setting; a flag written in four is one flag. The contract channel has folded those
+ *     since it was written, and the ledger — reading the same source with the same reader —
+ *     did not, so the two halves of one tool disagreed about how many doors a project has.
+ *
+ * Folding is by ADDRESS rather than by name, because the address is what carries the parts
+ * that make two doors different: `GET /basket` and `POST /basket` keep their own entries, and
+ * `parse` exported from two files stays two doors. Only genuinely identical doors fold.
+ *
+ * @param {DoorFact[]} doors
+ * @returns {{doors: DoorFact[], styleValues: DoorFact[], folded: number}}
+ */
+export function justTheDoors(doors) {
+  /** @type {DoorFact[]} */
+  const styleValues = [];
+  /** @type {Map<string, DoorFact>} */
+  const kept = new Map();
+  let folded = 0;
+  for (const door of doors) {
+    if (isAStyleValue(door)) {
+      styleValues.push(door);
+      continue;
+    }
+    if (kept.has(door.address)) {
+      folded++;
+      continue;
+    }
+    kept.set(door.address, door);
+  }
+  return { doors: [...kept.values()], styleValues, folded };
+}
+
+/**
  * Could anything here ever open this door, and if not, why not?
  *
  * Kept apart from "has it been opened" on purpose. A door nobody has walked is work; a door
@@ -475,9 +576,14 @@ const NOTHING_THERE = new Set([404, 405, 410, 501]);
  *
  * @param {Capture} capture
  * @param {JourneyWithTouch} [journey]
+ * @param {Map<string, {url: string, needs: string[]}>} [pages]
+ *   The page addresses read out of the folder names, keyed by the file each was read from.
+ *   A page journey names no door on its step — see {@link pageWalked} — so this is what lets
+ *   a walked page be matched to the page door in the list. Left out, pages read as unopened,
+ *   which is the safe direction and not the true one.
  * @returns {Walk}
  */
-export function walkFromCapture(capture, journey) {
+export function walkFromCapture(capture, journey, pages) {
   const touched = addressesTouched(capture.observations);
   /** @type {Walk} */
   const walk = {
@@ -577,11 +683,99 @@ export function walkFromCapture(capture, journey) {
         doorAddress({ kind: String(s.kind), name: String(s.door), detail: String(s.doorDetail), file: typeof s.doorFile === 'string' ? s.doorFile : undefined }),
       );
     }
+
+    // ONE VALUE IS ONE ADDRESS, NOT A FAMILY.
+    //
+    // A step on `/blog/[slug]` carries the address it really asked for — `/blog/hello-world`,
+    // built out of the one sample value the settings supply. The door it names is the whole
+    // family. Until 2026-08-31 the two were the same thing here, so a site with five blog
+    // posts and six product pages behind two changing addresses reported both families
+    // covered on the strength of two pages, and the eleven that were never opened were never
+    // mentioned anywhere. Written down, the ledger can say which of the two really happened.
+    for (const step of [...exact, ...byName]) {
+      const at = oneAddressAsked(step);
+      if (at === null) continue;
+      (walk.sampledAt ??= []).push({
+        door: typeof step.doorDetail === 'string' && step.doorDetail !== ''
+          ? doorAddress({ kind: String(step.kind), name: String(step.door), detail: String(step.doorDetail) })
+          : doorKey({ kind: String(step.kind), name: String(step.door) }),
+        at,
+      });
+    }
+  }
+
+  // A PAGE IS A DOOR AND IT HAS NO NAME ON ITS STEP.
+  //
+  // The route adapter writes `door` on every step it makes, so a walked route finds its way
+  // to the door list. The page adapter does not: its step says `open /blog/hello-world` and
+  // nothing else, so every page on every website read as never opened — on runs that had just
+  // opened them. Matched here by the FILE the page was read out of, which is the same file
+  // the page list carries, so the two cannot drift apart the way matching on a printed
+  // sentence would. The proper fix is the adapter naming the door, and it is in this lane's
+  // report; this makes the ledger right in the meantime.
+  const page = pageWalked(journey, pages);
+  if (page) {
+    const address = doorAddress({ kind: 'route', name: page.url, detail: 'GET' });
+    if (nothingWasTried || page.unfilled) {
+      // The page adapter refuses a page whose address still has a gap in it, and it refuses
+      // one it could not open at all. Both write a single refusal and nothing else, and both
+      // must read here as a door nobody knocked on — never as one that was walked.
+      (walk.notTried ??= []).push(`GET ${page.url}`);
+    } else {
+      (walk.doorAddresses ??= []).push(address);
+      if (page.at !== null) (walk.sampledAt ??= []).push({ door: address, at: page.at });
+    }
   }
   if (journey?.touched?.files) walk.touchedFiles = journey.touched.files;
   if (journey?.touched?.functions) walk.touchedFunctions = journey.touched.functions;
   if (journey?.touched?.ranButNotListed) walk.functionsNotListed = journey.touched.ranButNotListed;
   return walk;
+}
+
+/**
+ * The one address a step really asked for, when the door it names is a whole family.
+ *
+ * Null when the door has no changing part in it, when nothing filled the gap in, or when the
+ * step never said which address it used — in every one of those the step opened the door it
+ * named and there is nothing extra to say about it.
+ *
+ * @param {any} step
+ * @returns {string|null}
+ */
+function oneAddressAsked(step) {
+  const name = String(step?.door ?? '');
+  if (step?.kind !== 'route') return null;   // only an address has a changing part in it
+  if (placeholdersIn({ kind: 'route', name, address: '' }).length === 0) return null;
+  if (Array.isArray(step?.unfilled) && step.unfilled.length > 0) return null;   // nothing was asked for
+  const asked = typeof step?.url === 'string' ? step.url : typeof step?.goto === 'string' ? step.goto : '';
+  return asked === '' || asked === name ? null : asked;
+}
+
+/**
+ * The page a journey walked, if it walked one.
+ *
+ * A page journey is recognised by the file it was read out of, never by its name or by the
+ * words in its step. Both of those are sentences an adapter writes for a person to read, and
+ * matching on a sentence is how a rename turns coverage silently into zero. The file comes
+ * from the page list, and the journey's `from` is set to that same value by the adapter that
+ * made it, so a match here means the same page and cannot mean anything else.
+ *
+ * @param {JourneyWithTouch} [journey]
+ * @param {Map<string, {url: string, needs: string[]}>} [pages]
+ * @returns {{url: string, at: string|null, unfilled: boolean}|null}
+ */
+function pageWalked(journey, pages) {
+  if (!pages || !journey || typeof journey.from !== 'string') return null;
+  const page = pages.get(journey.from);
+  if (!page) return null;
+  const step = (journey.steps ?? []).find((s) => /** @type {any} */ (s)?.act === 'open');
+  const asked = typeof (/** @type {any} */ (step)?.goto) === 'string' ? String(/** @type {any} */ (step).goto) : null;
+  const unfilled = Array.isArray(/** @type {any} */ (step)?.unfilled) && /** @type {any} */ (step).unfilled.length > 0;
+  return {
+    url: page.url,
+    at: page.needs.length > 0 && asked !== null && asked !== page.url ? asked : null,
+    unfilled,
+  };
 }
 
 /**
@@ -601,10 +795,24 @@ const ADDRESS_RULE = new Set(['ipc', 'route', 'export', 'env']);
  * @param {DoorFact} door
  * @param {Walk} walk
  * @param {Set<string>} paths      walk.paths, as a set.
- * @returns {{state: 'opened'|'reached', how: string}|null}
+ * @returns {{state: 'opened'|'reached', how: string, at?: string}|null}
  */
 export function whatTheWalkDid(door, walk, paths) {
   if (walk.doorAddresses?.includes(door.address) || walk.doors?.includes(doorKey(door))) {
+    const at = (walk.sampledAt ?? []).find((s) => s.door === door.address || s.door === doorKey(door));
+    if (at) {
+      // Said in the door's own sentence rather than only in a caveat at the bottom, because
+      // this is the line somebody reads when they ask what was proved about this page.
+      const gaps = placeholdersIn(door);
+      return {
+        state: 'opened',
+        at: at.at,
+        how:
+          `"${walk.journey}" opened it at one address, ${at.at}. The address has a changing part in it, so what was ` +
+          `walked is that one ${KIND_ONE[door.kind] ?? 'door'} and not the family behind it: every other value of ` +
+          `${gaps.map((g) => `"${g}"`).join(' and ')} is unwalked, and a break behind one of those would not be seen.`,
+      };
+    }
     return { state: 'opened', how: `"${walk.journey}" has a step that knocks on it directly.` };
   }
   if (ADDRESS_RULE.has(door.kind)) {
@@ -717,6 +925,7 @@ function walkOrderKey(walk) {
     digestOf(walk.paths ?? []),
     (walk.doors ?? []).join('\u0001'),
     (walk.doorAddresses ?? []).join('\u0001'),
+    (walk.sampledAt ?? []).map((d) => `${d.door}=${d.at}`).join('\u0001'),
     (walk.knockedShut ?? []).map((d) => `${d.door}=${d.status}`).join('\u0001'),
     (walk.onlyRedirected ?? []).map((d) => `${d.door}=${d.status}`).join('\u0001'),
     (walk.notTried ?? []).join('\u0001'),
@@ -852,6 +1061,7 @@ export function buildLedger(input) {
   /** @type {Record<string, number>} */
   const byJourneySource = {};
   let opened = 0;
+  let sampled = 0;
   let reached = 0;
   let never = 0;
   let unwalkable = 0;
@@ -859,11 +1069,11 @@ export function buildLedger(input) {
 
   for (const door of input.doors) {
     const can = walkability(door);
-    /** @type {{journey: string, at?: string, how: string, state: 'opened'|'reached'}[]} */
+    /** @type {{journey: string, at?: string, how: string, state: 'opened'|'reached', only?: string}[]} */
     const hits = [];
     for (const { walk, paths } of walks) {
       const did = whatTheWalkDid(door, walk, paths);
-      if (did) hits.push({ journey: walk.journey, at: walk.at, how: did.how, state: did.state });
+      if (did) hits.push({ journey: walk.journey, at: walk.at, how: did.how, state: did.state, only: did.at });
     }
     const openedBy = hits.filter((h) => h.state === 'opened');
     const reachedBy = hits.filter((h) => h.state === 'reached');
@@ -892,8 +1102,17 @@ export function buildLedger(input) {
       group: family.group,
       groupLabel: family.label,
     };
+    // Opened at ONE address of a family only counts as that, and only when NOTHING opened it
+    // properly. A door walked once with a sample value and once for real is covered; a door
+    // walked only with a sample value is one address of an unknown number, and the difference
+    // has to survive all the way to the report or the number goes back to flattering itself.
+    const onlySampled = state === 'opened' && openedBy.length > 0 && openedBy.every((h) => typeof h.only === 'string');
     if (!can.walkable) entry.whyNot = can.whyNot;
     if (can.irreversible) entry.irreversible = true;
+    if (onlySampled) {
+      entry.sampled = true;
+      entry.openedAt = /** @type {string} */ (openedBy[0].only);
+    }
     if (door.file) entry.file = door.file;
     if (door.line !== undefined) entry.line = door.line;
     entries.push(entry);
@@ -901,6 +1120,7 @@ export function buildLedger(input) {
     const tally = byKind[door.kind] ?? { doors: 0, opened: 0, reached: 0, never: 0 };
     byKind[door.kind] = tally;
     tally.doors++;
+    if (onlySampled) sampled++;
     if (state === 'opened') { opened++; tally.opened++; }
     else if (state === 'reached') { reached++; tally.reached++; }
     else { never++; tally.never++; }
@@ -931,6 +1151,29 @@ export function buildLedger(input) {
   if (cutFunctions > 0) {
     caveats.push(
       `${cutFunctions} functions that really did run were cut from the coverage lists to keep them readable, so up to that many of the doors counted as never opened were in fact opened. This ledger undercounts, and it undercounts by no more than ${cutFunctions}.`,
+    );
+  }
+  // ONE VALUE IS NOT A FAMILY, SAID OUT LOUD.
+  //
+  // A page at `/blog/[slug]` opened at `/blog/hello-world` used to be indistinguishable, in
+  // every number this file produces, from a door with a fixed address that was walked. On a
+  // real Next.js site on 2026-08-31 that meant two families of eleven pages between them read
+  // as covered on the strength of two, and nothing anywhere said so. This is the sentence
+  // that says so, and it is deliberately in the caveats rather than only on the door: the
+  // caveats are what the check prints, and the door entry is what somebody has to go and ask
+  // for.
+  const sampledDoors = entries.filter((e) => e.sampled === true);
+  if (sampledDoors.length > 0) {
+    const listed = sampledDoors
+      .slice(0, 5)
+      .map((e) => `${e.name} was opened only at ${e.openedAt}`)
+      .join(', ');
+    caveats.push(
+      `${sampledDoors.length} ${sampledDoors.length === 1 ? 'door has' : 'doors have'} a changing part in the address and ` +
+      `${sampledDoors.length === 1 ? 'was' : 'were'} opened at ONE address each (${listed}${sampledDoors.length > 5 ? ', and more' : ''}). ` +
+      `That is ${sampledDoors.length === 1 ? 'one page' : 'one page each'} opened, never the family behind it: how many addresses are really there is not ` +
+      `something this tool can know, and every one of them other than the ${sampledDoors.length === 1 ? 'address' : 'addresses'} named here is unwalked. ` +
+      `Put more values under "http.samples" (or "web.samples" for a page) in the settings and more of the family starts being checked.`,
     );
   }
   // Named, never silently dropped. A route the code declares and the build answers 404 to is
@@ -996,6 +1239,7 @@ export function buildLedger(input) {
     knows: 'per door',
     doors: input.doors.length,
     opened,
+    sampled,
     reached,
     never,
     unwalkable,
@@ -1020,6 +1264,10 @@ export function buildLedger(input) {
  * @typedef {object} LedgerOptions
  * @property {Door[]} [doors]           The code reader's own output. The best answer there is.
  * @property {string} [root]            Read the code now to get the doors. Reads, runs nothing.
+ * @property {string[]} [folders]       Which folders of `root` hold this project's code. Left
+ *                                      out, the settings file at `root` is asked — which is
+ *                                      the same answer the run itself uses, and the whole
+ *                                      point: one answer to "what is in this project".
  * @property {JourneyWithTouch[]} [journeys]
  *                                      The journeys behind the captures. With these, a door
  *                                      is matched by the step that knocks on it, which is
@@ -1031,6 +1279,118 @@ export function buildLedger(input) {
  *                                      registration in a test is not a door the product answers on.
  * @property {(message: string) => void} [log]
  */
+
+/**
+ * Which folders of this project hold its code — the settings' answer, not this file's guess.
+ *
+ * The settings are read here rather than handed in, and that is deliberate. The one caller
+ * that draws up a ledger during a check had the settings in its hand and did not pass them,
+ * which is how the ledger came to be measuring a third of a website. A default that has to be
+ * remembered is a default that will be forgotten again, so the answer is fetched from the one
+ * place that holds it.
+ *
+ * When the settings cannot be read at all, the reader's own list of usual folders is used and
+ * the ledger SAYS SO. Reading fewer folders than the product has is the failure this whole
+ * lane is about, and it must never happen again without a sentence beside it.
+ *
+ * @param {string} root
+ * @param {string[]} [given]   Folders the caller already knows. Believed without a second read.
+ * @returns {Promise<{folders: string[]|undefined, why: string}>}
+ */
+export async function sourceFoldersFor(root, given) {
+  if (Array.isArray(given) && given.length > 0) return { folders: given, why: '' };
+  // The settings file search walks UPWARDS, so a project with none of its own can be handed
+  // its parent's. The folder names in that file are relative to the parent, so reading them
+  // here would point the reader at folders that are not in this project at all — which is the
+  // same failure this function exists to fix, wearing a different hat. Only this project's own
+  // settings count.
+  const found = findConfigFile(root);
+  const file = found !== null && path.resolve(rootForConfig(found)) === path.resolve(root) ? found : null;
+  if (!file) {
+    return {
+      folders: undefined,
+      why:
+        'There is no Stays Fixed settings file here, so the code was read from the folders the reader guesses at — ' +
+        'src, lib, app and the rest. A project that keeps code anywhere else has doors that are not in this ledger at all. ' +
+        'Run `staysfixed init` and the folders are named once and read the same way every time.',
+    };
+  }
+  try {
+    /** @type {Record<string, any>} */
+    let settings;
+    if (file.endsWith('.json')) settings = JSON.parse(await fsp.readFile(file, 'utf8'));
+    else {
+      const loaded = await import(`file://${path.resolve(file)}`);
+      settings = loaded.default ?? loaded.config ?? loaded;
+    }
+    const folders = settings?.source?.folders;
+    if (Array.isArray(folders) && folders.length > 0) return { folders: folders.map(String), why: '' };
+    return { folders: undefined, why: '' };
+  } catch (e) {
+    return {
+      folders: undefined,
+      why:
+        `The settings at ${path.basename(file)} could not be read (${e instanceof Error ? e.message : String(e)}), so the code was read from ` +
+        'the folders the reader guesses at rather than the ones this project names. Any door outside those folders is missing from this ledger.',
+    };
+  }
+}
+
+/**
+ * The page addresses this website has, keyed by the file each was read out of.
+ *
+ * Every failure is a hole rather than an exception: a ledger that cannot list the pages is
+ * worse than one that can, and it is far better than no ledger at all. Empty for anything
+ * that is not a website, which is the right answer there.
+ *
+ * @param {string} root
+ * @param {CoverageGap[]} holes
+ * @returns {Promise<Map<string, {url: string, needs: string[]}>>}
+ */
+async function readThePages(root, holes) {
+  /** @type {Map<string, {url: string, needs: string[]}>} */
+  const found = new Map();
+  try {
+    const { readPageRoutes } = await import('./adapters/web.js');
+    for (const page of await readPageRoutes(root)) found.set(page.file, { url: page.url, needs: page.needs });
+  } catch (e) {
+    holes.push({
+      what: `The pages of this project could not be listed (${e instanceof Error ? e.message : String(e)}).`,
+      why: 'A page is a way into a website, so every page is missing from the door count in this ledger and nothing here says anything about any of them.',
+      unlockedBy: 'Run `staysfixed doctor` — it says what this copy of the tool can and cannot read.',
+    });
+  }
+  return found;
+}
+
+/**
+ * Say what was taken OUT of the door list, and why, every time anything was.
+ *
+ * A denominator that quietly shrinks is as bad as one that quietly grows, so nothing is ever
+ * dropped in silence. Both of these make the count smaller, and both make it more true.
+ *
+ * @param {string[]} caveats
+ * @param {{styleValues: DoorFact[], folded: number}} only
+ * @returns {void}
+ */
+function sayWhatWasNotADoor(caveats, only) {
+  if (only.styleValues.length > 0) {
+    const names = [...new Set(only.styleValues.map((d) => d.name))].sort().slice(0, 5).join(', ');
+    caveats.push(
+      `${only.styleValues.length} ${only.styleValues.length === 1 ? 'name that looks like a command-line flag was' : 'names that look like command-line flags were'} ` +
+      `left out of the door count (${names}${only.styleValues.length > 5 ? ', and more' : ''}): ${only.styleValues.length === 1 ? 'it is' : 'they are'} written in a ` +
+      `component or a stylesheet, where a name of that shape is a CSS custom property and not a way into the product. ` +
+      `Counting ${only.styleValues.length === 1 ? 'it' : 'them'} made this product look bigger than it is, and every fraction of that total wrong.`,
+    );
+  }
+  if (only.folded > 0) {
+    caveats.push(
+      `${only.folded} repeated ${only.folded === 1 ? 'mention was' : 'mentions were'} counted once rather than once per file. ` +
+      'A setting read in nine files is one setting and a flag written in four is one flag — the same folding the contract channel has always done, ' +
+      'so the two halves of this tool now agree about how many doors this project has.',
+    );
+  }
+}
 
 /**
  * Everything this tool has ever managed to walk of one product, door by door.
@@ -1077,6 +1437,12 @@ export async function ledger(store, product, opts = {}) {
   const byName = new Map();
   for (const journey of opts.journeys ?? []) byName.set(journey.name, journey);
 
+  // The pages, read before anything else needs them, because both halves of this function
+  // want the same list: the walks want it to match a walked page to the page it walked, and
+  // the door list wants it because a page IS a door and until 2026-08-31 not one of them was
+  // in the count. Read once, so the two halves cannot answer differently.
+  const pages = opts.root ? await readThePages(opts.root, holes) : new Map();
+
   /** @type {Walk[]} */
   const walks = [];
   /** @type {Observation[]} */
@@ -1120,7 +1486,7 @@ export async function ledger(store, product, opts = {}) {
         const key = /** @type {Channel} */ (channel);
         byChannel[key] = (byChannel[key] ?? 0) + n;
       }
-      walks.push(walkFromCapture(capture, byName.get(capture.journey)));
+      walks.push(walkFromCapture(capture, byName.get(capture.journey), pages));
       for (const gap of capture.coverage?.gaps ?? []) holes.push(gap);
     }
   }
@@ -1128,10 +1494,29 @@ export async function ledger(store, product, opts = {}) {
   /** @type {DoorFact[]} */
   let doors;
   if (opts.doors) {
-    doors = opts.doors.map(doorFact);
+    // The same filter as the other two branches, and for the same reason: what counts as a
+    // door has to be one answer, whoever produced the list. A caller handing in the reader's
+    // raw output hands in its style values and its repeats along with it.
+    const only = justTheDoors(opts.doors.map(doorFact));
+    doors = only.doors;
     caveats.push('The doors were handed in by the code reader as this ledger was drawn up, so it knows about doors added since the last run.');
+    sayWhatWasNotADoor(caveats, only);
   } else if (opts.root) {
-    const reading = await readContract({ root: opts.root });
+    // THE SOURCE THE LEDGER READS AND THE SOURCE THE RUN READS ARE ONE SOURCE.
+    //
+    // This call used to be `readContract({ root })` and nothing else, so it read the code
+    // reader's OWN list of usual folders — src, lib, app, bin and the rest — while the run it
+    // is reporting on read the folders the settings name. Measured 2026-08-31 on a Next.js
+    // website whose settings say `source: { folders: ['.'] }`: the ledger read 8 of the
+    // project's 20 source files and 25 of its doors, and then printed "25 of the 25 doors
+    // this product has have never been walked" — a total drawn from a third of the product,
+    // presented as the whole of it. Every fraction underneath was a fraction of the wrong
+    // thing.
+    //
+    // So the folders are settled once, from the same settings file the run reads, and both
+    // halves of the tool now answer the same question the same way.
+    const asked = await sourceFoldersFor(opts.root, opts.folders);
+    const reading = await readContract({ root: opts.root, folders: asked.folders });
     const fileRoutes = await readFileRoutes(opts.root);
     reading.doors.push(...fileRoutes.doors);
     reading.doors.push(...(await readPackageCommands(opts.root)));
@@ -1142,13 +1527,29 @@ export async function ledger(store, product, opts = {}) {
         unlockedBy: 'Make that folder readable by whoever runs the check.',
       });
     }
-    doors = reading.doors.map(doorFact);
-    caveats.push(`The code was read as this ledger was drawn up: ${reading.report.filesRead} files, ${reading.doors.length} doors, and nothing was run.`);
+    // A page is a way into a website, so a page is a door. The code reader cannot see one —
+    // it reads calls, and a Next.js page is a folder name — so the page list is added here
+    // from the same reader the page adapter walks with.
+    const pageDoors = [...pages.entries()].map(([file, page]) => ({
+      kind: /** @type {const} */ ('route'), name: page.url, detail: 'GET', file, line: 1,
+      inTest: false, named: true, via: 'the folder it lives in',
+    }));
+    const only = justTheDoors([...reading.doors, ...pageDoors].map(doorFact));
+    doors = only.doors;
+    caveats.push(
+      `The code was read as this ledger was drawn up: ${reading.report.filesRead} files in ${(asked.folders ?? ['the folders it looks in by default']).join(', ')}, ` +
+      `${doors.length} doors, and nothing was run.`,
+    );
+    if (asked.why !== '') caveats.push(asked.why);
+    sayWhatWasNotADoor(caveats, only);
   } else {
     doors = doorsFromObservations(contractSeen);
     caveats.push(
       'The door list came from what previous runs wrote down, not from the code as it stands now, so a door added since the last run is not in this ledger at all. Pass `root` and it reads the source instead.',
     );
+    const only = justTheDoors(doors);
+    doors = only.doors;
+    sayWhatWasNotADoor(caveats, only);
   }
   if (!opts.includeTests) {
     const before = doors.length;
@@ -1212,7 +1613,7 @@ export function gaps(led, opts = {}) {
   const worst = opts.worst ?? 12;
   const minDoors = opts.minDoors ?? 1;
 
-  /** @type {Map<string, {label: string, kind: string, never: DoorEntry[], opened: number, reached: number, files: Map<string, number>}>} */
+  /** @type {Map<string, {label: string, kind: string, never: DoorEntry[], opened: number, sampled: number, reached: number, files: Map<string, number>}>} */
   const families = new Map();
   for (const entry of led.entries) {
     if (!opts.includeUnwalkable && !entry.walkable) continue;
@@ -1222,10 +1623,16 @@ export function gaps(led, opts = {}) {
       kind: entry.kind,
       never: /** @type {DoorEntry[]} */ ([]),
       opened: 0,
+      sampled: 0,
       reached: 0,
       files: /** @type {Map<string, number>} */ (new Map()),
     };
-    if (entry.state === 'opened') family.opened++;
+    // A door opened at one address of a family is counted apart from one that was really
+    // opened. It used to be counted as opened, so a family of pages behind a changing address
+    // read as covered the moment a single sample value existed, and the job of covering the
+    // rest never appeared on the queue at all.
+    if (entry.sampled === true) family.sampled++;
+    else if (entry.state === 'opened') family.opened++;
     else if (entry.state === 'reached') family.reached++;
     else family.never.push(entry);
     if (entry.file) family.files.set(entry.file, (family.files.get(entry.file) ?? 0) + 1);
@@ -1240,8 +1647,11 @@ export function gaps(led, opts = {}) {
   const jobs = [];
   for (const [group, family] of families) {
     if (family.never.length < minDoors) continue;
-    const total = family.never.length + family.opened + family.reached;
+    const total = family.never.length + family.opened + family.sampled + family.reached;
     const allDark = family.opened === 0;
+    const sampledHere = family.sampled > 0
+      ? ` ${family.sampled} more ${family.sampled === 1 ? 'was' : 'were'} opened at a single address each, which is one page apiece rather than the family behind it.`
+      : '';
     const weight = KIND_WEIGHT[family.kind] ?? 3;
     // Size counts, but under a square root, so one family of four hundred cannot bury twenty
     // families of ten that between them cover far more of the product.
@@ -1256,8 +1666,8 @@ export function gaps(led, opts = {}) {
             family.reached > 0
               ? ` ${family.reached} of them sit in code the tests do run, so the break would be right beside a path that looks covered.`
               : ''
-          }`
-        : `${family.opened} of them are covered and ${family.never.length} are not, so a clean run here means less than it looks like it does.`,
+          }${sampledHere}`
+        : `${family.opened} of them are covered and ${family.never.length} are not, so a clean run here means less than it looks like it does.${sampledHere}`,
       howTo: howToCover(family.kind, family.never, harvested),
       doors: family.never.length,
       openedHere: family.opened,
@@ -1342,6 +1752,31 @@ function howToCover(kind, never, harvested = false) {
 export function toCoverage(led, opts = {}) {
   /** @type {CoverageGap[]} */
   const out = [...led.gaps];
+  // A door opened at one address of a family is its own hole, and it is the one hole the
+  // reader is most likely to read as coverage: the run really did open that page, so nothing
+  // in the report looks wrong. It goes at the FRONT of the list, because the summary sentence
+  // names only the first hole it finds by way of an example, and this is the one somebody
+  // would otherwise never think to ask about.
+  if (led.sampled > 0) {
+    const which = led.entries.filter((e) => e.sampled === true).slice(0, 4);
+    out.unshift({
+      what: led.sampled === 1
+        ? '1 address with a changing part in it was opened at one value only.'
+        : `${led.sampled} addresses with a changing part in them were opened at one value each.`,
+      why:
+        `${which.map((e) => `${e.name} was opened at ${e.openedAt}`).join(', ')}${led.sampled > which.length ? ', and more' : ''}. ` +
+        `That is ${led.sampled === 1 ? 'one page' : 'one page each'} opened and not the family behind it — how many addresses are really there is not something ` +
+        'this tool can know from the outside, and a break at any of the others would not be seen.',
+      unlockedBy: 'Put more values under "http.samples", or "web.samples" for a page, in the settings — one per value worth checking.',
+      channel: 'contract',
+      // No `doors` count on purpose, and it is not an oversight. A gap carrying a door count
+      // is folded into the "N of the M doors were never walked" sentence and then dropped
+      // from the list of other things that were not looked at — so a count here would delete
+      // this line from the only sentence a person reads. These doors WERE walked, at one
+      // address each, so they belong in the other half of that sentence rather than in the
+      // door arithmetic.
+    });
+  }
   if (led.doors > 0 && led.never > 0) {
     out.push({
       // A product with one door read "1 of this product's 1 doors have never been opened",

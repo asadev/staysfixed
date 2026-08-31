@@ -512,6 +512,44 @@ describe('what reaches a person, and nothing else', () => {
     assert.match(escalations.items[0].what, /same answer every single run/);
   });
 
+  test('a real difference is never crowded out by a measurement of how steady the product is', async () => {
+    // WHAT WENT WRONG, 2026-08-31. One run caught a real change correctly AND measured 242
+    // addresses as newly unsteady. Only the second reached this block, because an ordinary
+    // difference is the agent\'s problem and has never had an item of its own — so the one
+    // paragraph the owner reads told him to hold the release over a wobble, and never once
+    // mentioned the change the tool had actually found. A wobble is not a difference: nothing
+    // in it has a wrong value. It can never be the only thing said.
+    const { store } = await project();
+    await runCheckOver(
+      store,
+      [finding({ title: 'The orders page shows an empty basket where it showed three items', path: 'screen.orders.basket' })],
+      { unstable: Array.from({ length: 242 }, (_, i) => `api.page.body.${i}`) },
+    );
+
+    const escalations = await escalationsFor(store, PRODUCT);
+    assert.equal(escalations.items.length, 2, 'the real change reached him as well as the wobble');
+    assert.equal(escalations.items[0].kind, 'difference', 'and it is FIRST — a wobble may never push a real change down the page');
+    assert.equal(escalations.items[1].kind, 'unpredictable');
+    assert.match(escalations.items[0].what, /empty basket/);
+
+    const block = escalationBlock(escalations);
+    assert.ok(
+      block.indexOf('empty basket') < block.indexOf('same answer every single run'),
+      `the wobble is printed before the real change:\n${block}`,
+    );
+  });
+
+  test('a run with differences and nothing needing a person never reads as an all-clear', async () => {
+    // The other half of the same worry. "Nothing needs your word" is true about who has to
+    // decide and reads, to anybody skimming, as "nothing is wrong".
+    const { store } = await project();
+    await runCheckOver(store, [finding({ title: 'The help text lost a line', path: 'cli.help.body' })]);
+    const escalations = await escalationsFor(store, PRODUCT);
+    assert.deepEqual(escalations.items, [], 'an ordinary difference on its own is still the agent\'s problem');
+    assert.match(escalations.note, /nothing on demo needs your word/i);
+    assert.match(escalations.note, /1 difference of its own/);
+  });
+
   test('the block can be written to a file for a release script to pick up', async () => {
     const { store, root } = await project();
     await runCheckOver(store, [finding({ title: 'Signing out no longer clears the session', cls: 'sign-in', path: 'api.POST./logout.body' })]);

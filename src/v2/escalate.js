@@ -437,7 +437,7 @@ export async function rememberCheck(store, what) {
  *
  * @typedef {object} Escalation
  * @property {string} id
- * @property {'sealed'|'budget'|'unpredictable'|'blocked'|'no-reference'} kind
+ * @property {'sealed'|'difference'|'budget'|'unpredictable'|'blocked'|'no-reference'} kind
  * @property {string} what   What changed.
  * @property {string} why    Why no agent could wave it through.
  * @property {string} todo   What to do about it.
@@ -500,11 +500,26 @@ export async function escalationsFor(store, product) {
  * @returns {Escalations}
  */
 function buildEscalations(product, record, verdict) {
+  // TWO PILES, AND THE ORDER BETWEEN THEM IS THE FIX.
+  //
+  // `real` is everything that is the product behaving differently, or the check not having
+  // happened at all. `steadiness` is the one item that is neither: addresses that used to
+  // give the same answer every run and now do not. That is worth a person's attention and it
+  // is NOT a difference — nothing in it has a wrong value.
+  //
+  // WHAT WENT WRONG, 2026-08-31. A run caught one real change correctly and also measured 242
+  // addresses as newly unsteady. Only the second reached this block, because an ordinary
+  // difference has never been put in here at all — so the only sentence the owner read told
+  // him to hold the release over a wobble measurement, and never mentioned the change the
+  // tool had actually found. Piling them separately makes that ordering structural instead of
+  // accidental, and `crowdedOut` below makes sure a real change is never the thing left out.
   /** @type {Escalation[]} */
-  const items = [];
+  const real = [];
+  /** @type {Escalation[]} */
+  const steadiness = [];
 
   if (verdict.blocked === true) {
-    items.push({
+    real.push({
       id: 'blocked',
       kind: 'blocked',
       what: `Stays Fixed could not check ${product} at all on this run, so nothing about it has been proved either way.`,
@@ -512,7 +527,7 @@ function buildEscalations(product, record, verdict) {
       todo: `Something is in the way and it needs clearing — the run said: ${oneLine(verdict.summary, 200)}`,
     });
   } else if (!verdict.reference || verdict.reference.id === '') {
-    items.push({
+    real.push({
       id: 'no-reference',
       kind: 'no-reference',
       what: `There is no build of ${product} on record as working yet, so this run had nothing to compare against.`,
@@ -527,7 +542,7 @@ function buildEscalations(product, record, verdict) {
 
   for (const f of record.findings) {
     if (f.unwaivable !== true) continue;
-    items.push({
+    real.push({
       id: f.id,
       kind: 'sealed',
       what: oneLine(f.title, 220),
@@ -542,7 +557,7 @@ function buildEscalations(product, record, verdict) {
   }
 
   if (record.accounting.left === 0 && record.accounting.reported > record.accounting.unwaivable) {
-    items.push({
+    real.push({
       id: 'budget',
       kind: 'budget',
       what: `The agent has used all ${record.accounting.budget} of the differences it is allowed to record as intended on ${product}, and there are still differences left over.`,
@@ -553,7 +568,7 @@ function buildEscalations(product, record, verdict) {
 
   if (record.newlyUnstable.length > 0) {
     const n = record.newlyUnstable.length;
-    items.push({
+    steadiness.push({
       id: 'unpredictable',
       kind: 'unpredictable',
       what: `${n} ${n === 1 ? 'thing in' : 'things in'} ${product} used to give the same answer every single run and now ${n === 1 ? 'does' : 'do'} not: ${record.newlyUnstable.slice(0, 3).join(', ')}${n > 3 ? ', and more' : ''}.`,
@@ -561,15 +576,36 @@ function buildEscalations(product, record, verdict) {
       todo: 'Have it looked into before shipping. Something in the change made the product unpredictable.',
       paths: record.newlyUnstable.slice(0, 6),
     });
+    // A REAL CHANGE IS NEVER THE THING LEFT OUT.
+    //
+    // An ordinary difference is the agent's problem and does not get its own item — that is
+    // deliberate, and it stops a handful of items a month becoming a feed nobody reads. But it
+    // stops being right the moment the ONLY thing in this block is a wobble measurement,
+    // because then the sentence a person reads is an alarm about a non-difference with no
+    // mention of the difference the tool did find. So a real change gets one line here, and it
+    // goes first, exactly when it would otherwise have been the thing crowded out.
+    const crowdedOut = record.findings.filter((f) => f.waivedBy === undefined && f.unwaivable !== true);
+    if (real.length === 0 && crowdedOut.length > 0) {
+      const worst = crowdedOut[0];
+      real.push({
+        id: 'differences',
+        kind: 'difference',
+        what: `${product} behaves differently from the build you were happy with in ${crowdedOut.length} ${crowdedOut.length === 1 ? 'place' : 'places'}: ${oneLine(worst.title, 180)}${crowdedOut.length > 1 ? ', and more' : ''}.`,
+        why: 'This is a real change in the product, which is what the check is for — it is named before the steadiness note below so it cannot be read past.',
+        todo: 'The agent has to deal with each one: fix it, or record it as intended and say why. Nothing is the new normal until you ship.',
+        paths: (worst.paths ?? []).slice(0, 6),
+      });
+    }
   }
 
+  const all = [...real, ...steadiness];
   return {
     product,
     at: record.at,
-    items,
+    items: all,
     waived: record.accounting.waived,
     expiredWaivers: record.accounting.expiredWaivers,
-    note: summaryNote(product, items, record),
+    note: summaryNote(product, all, record),
   };
 }
 
@@ -595,11 +631,21 @@ function sealedTodo(f) {
  * @returns {string}
  */
 function summaryNote(product, items, record) {
+  // NOTHING NEEDING YOUR WORD IS NOT THE SAME AS NOTHING BEING WRONG.
+  //
+  // This line used to read "nothing on X needs your word" on a run that had found real
+  // differences the agent had not dealt with — true about who has to decide, and read by
+  // anybody skimming as an all-clear. One clause fixes it, and it is added rather than the
+  // sentence replaced, because who has to decide is still the thing this block is about.
+  const left = record.accounting.reported;
+  const outstanding = left > 0
+    ? ` The agent still has ${left} ${left === 1 ? 'difference' : 'differences'} of its own to deal with on this build.`
+    : '';
   if (items.length === 0) {
     const waived = record.accounting.waived;
     return waived > 0
-      ? `Stays Fixed: nothing on ${product} needs your word. ${waived} ${waived === 1 ? 'difference was' : 'differences were'} recorded as intended by the agent and ${waived === 1 ? 'is' : 'are'} waiting on your next ship.`
-      : `Stays Fixed: nothing on ${product} needs your word.`;
+      ? `Stays Fixed: nothing on ${product} needs your word.${outstanding} ${waived} ${waived === 1 ? 'difference was' : 'differences were'} recorded as intended by the agent and ${waived === 1 ? 'is' : 'are'} waiting on your next ship.`
+      : `Stays Fixed: nothing on ${product} needs your word.${outstanding}`;
   }
   return `Stays Fixed: ${items.length} ${items.length === 1 ? 'thing needs' : 'things need'} your word on ${product}.`;
 }
