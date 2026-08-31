@@ -40,7 +40,7 @@
 
 import path from 'node:path';
 import fsp from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 import { EXIT, messageOf } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, mark, shortPath, setLogLevel } from '../core/log.js';
@@ -573,9 +573,32 @@ function productNeeds(product, project) {
   // adapter refuses outright in that state, and nothing here said so: doctor's answer for
   // this surface is hardcoded to an empty list, so an empty needs list met an empty machine
   // list and the product read as ready over an adapter that would not start.
-  const somethingToRun = (Array.isArray(suggest.commands) ? suggest.commands.length : 0)
+  // Counted from the commands that will really RUN, not from the commands that were proposed.
+  // A product whose every command answers "command not found" has nothing to run, and reading
+  // the proposed list instead let a Python tool with two unrunnable console scripts report as
+  // ready and covered in full. Measured 2026-08-31.
+  const judged = product.kind === 'cli' ? commandsThatRun(project, product) : { ready: [], unsure: [] };
+  const somethingToRun = (product.kind === 'cli' ? judged.ready.length : (Array.isArray(suggest.commands) ? suggest.commands.length : 0))
     + (Array.isArray(suggest.imports) ? suggest.imports.length : 0);
-  if ((product.kind === 'cli' || product.kind === 'library') && somethingToRun === 0) {
+
+  // Some commands were found and none of them can be run as they stand. That is a different
+  // situation from finding none at all, and it is owed a different sentence: the work is not
+  // "think of a command", it is "write down the one you already type", and the blanks are
+  // sitting in the settings file with a line each saying what goes in them.
+  if (product.kind === 'cli' && judged.unsure.length > 0 && judged.ready.length === 0) {
+    const one = judged.unsure.length === 1;
+    needs.push({
+      what: `a command for ${plainList(judged.unsure.map((u) => u.name.replace(/\s+--help$/, '')))} that runs without installing anything first`,
+      why: `${one ? 'It is' : 'They are'} declared in this project, but what ${one ? 'it names is' : 'they name are'} only there after somebody installs the package — so on a fresh clone ${one ? 'it' : 'each of them'} answers "command not found". Writing ${one ? 'it' : 'them'} down anyway would make your first check red about nothing, so ${one ? 'it is' : 'they are'} left blank instead.`,
+      unlocks: 'every word of what the command prints, what it exits with, and every file it touches',
+      fix: `Open the settings file and fill in the commented-out ${one ? 'command' : 'commands'} under "process" — each one has a line above it saying what to put there. It is the command you type yourself when you run this from the source.`,
+      who: 'a person',
+      product: product.name,
+      topic: 'commands',
+    });
+  }
+
+  if ((product.kind === 'cli' || product.kind === 'library') && somethingToRun === 0 && judged.unsure.length === 0) {
     needs.push({
       what: product.kind === 'library' ? 'something to import and compare' : 'a list of commands worth running',
       why: 'Nothing was worked out here that this could actually run or import, and a run with nothing to do proves nothing about anything.',
@@ -638,11 +661,11 @@ function productNeeds(product, project) {
     const build = typeof suggest.buildWith === 'string' ? String(suggest.buildWith) : null;
     needs.push({
       what: `${product.name}, built`,
-      why: 'It is built into a folder that is not committed, so on a fresh copy of this repository there is nothing to run yet. Nothing in package.json names it either, which is why it is easy to miss entirely.',
+      why: `It is built into a folder that is not committed, so on a fresh copy of this repository there is nothing to run yet. Nothing in ${manifestBehind(project, product)} names it either, which is why it is easy to miss entirely.`,
       unlocks: 'every word of its help, what it exits with, and every file it touches',
       fix: build
         ? `${build}, then \`staysfixed init --force\` — the commands are filled in exactly from what the build wrote, and nothing has been edited by hand yet.`
-        : `Nothing in package.json says how to build it. Name the command that builds it and the command that runs the result under "process" in the settings.`,
+        : `Nothing in ${manifestBehind(project, product)} says how to build it. Name the command that builds it and the command that runs the result under "process" in the settings.`,
       who: build ? 'the agent' : 'a person',
       product: product.name,
       topic: 'app',
@@ -852,7 +875,11 @@ function topicOf(text) {
   // code.
   if (/built (?:[a-z]+ )?(?:app|bundle|package|program)|built as a (?:package|bundle)|app\.binary|electron\.binary|android\.apk|\bapk\b|windows\.exe|remoteexe/.test(words)) return 'app';
   if (/machine with a windows desktop|windows machine|ssh host|"host":/.test(words)) return 'host';
-  if (/commands worth running|to import and compare|process\.commands/.test(words)) return 'commands';
+  // "a command to run, or something to import" is doctor's spelling of the same missing
+  // thing, and it was not matching — so a Python project was told, in one breath, to fill in
+  // the blanks in its settings and to add `run: "node bin/cli.js --help"`, which is not a
+  // command that exists in a Python project at all.
+  if (/commands worth running|to import and compare|process\.commands|process: \{ commands|a command to run/.test(words)) return 'commands';
   if (/device id|identity|identityenv/.test(words)) return 'identity';
   if (/sample|real value/.test(words)) return 'samples';
   if (/browser|playwright|chromium/.test(words)) return 'browser';
@@ -959,6 +986,463 @@ function dedupeNeeds(needs) {
 }
 
 // ---------------------------------------------------------------------------
+// What a project calls itself, and where that answer came from
+// ---------------------------------------------------------------------------
+
+/*
+ * Two small lies were coming out of this command, and both were about a file.
+ *
+ * Run on a real Python command-line tool on 2026-08-31, `init` called the product after the
+ * FOLDER it happened to be checked out into, and said — twice — that it had read the commands
+ * "from package.json". There is no package.json in a Python project. The project said its own
+ * name in `pyproject.toml`, in the line every Python tool reads, and nothing here looked.
+ *
+ * A name taken from a folder is a small wrongness; a source named that does not exist is a
+ * different thing entirely. Everything else on that page — what is covered, what is missing,
+ * what a check will walk — is a claim about somebody's project that they cannot check for
+ * themselves in the moment they read it. The one claim they CAN check is the file name, and
+ * getting that wrong is how a page stops being believed.
+ *
+ * So: read the manifest that is really there, and when this command says where a value came
+ * from, name the file it really came from.
+ */
+
+/**
+ * How a project declares its own name, in the order the answer should be trusted.
+ *
+ * package.json is first only because it is first in this tool's own world; a repository with
+ * both a package.json and a pyproject.toml is a JavaScript project with Python in it far more
+ * often than the other way round.
+ *
+ * @type {{file: string, read: (text: string) => string|null}[]}
+ */
+const NAME_DECLARATIONS = [
+  { file: 'package.json', read: (text) => { try { const j = JSON.parse(text); return typeof j?.name === 'string' && j.name ? j.name : null; } catch { return null; } } },
+  { file: 'pyproject.toml', read: (text) => tomlValue(text, 'project', 'name') ?? tomlValue(text, 'tool.poetry', 'name') },
+  { file: 'setup.cfg', read: (text) => tomlValue(text, 'metadata', 'name') },
+  { file: 'setup.py', read: (text) => /\bname\s*=\s*['"]([^'"]+)['"]/.exec(text)?.[1] ?? null },
+  { file: 'Cargo.toml', read: (text) => tomlValue(text, 'package', 'name') },
+  { file: 'composer.json', read: (text) => { try { const j = JSON.parse(text); return typeof j?.name === 'string' && j.name ? j.name.split('/').pop() : null; } catch { return null; } } },
+  { file: 'go.mod', read: (text) => /^\s*module\s+(\S+)/m.exec(text)?.[1]?.split('/').pop() ?? null },
+];
+
+/**
+ * The name a project gives itself, and the file it gave it in.
+ *
+ * `from` is never guessed. When nothing on disk declares a name the answer is the folder, and
+ * it says so — "the folder name" is an honest source, and a person reading it knows at once
+ * that nothing was found and can put one in if they want a better one.
+ *
+ * Exported so a test can ask about one folder without building a whole project.
+ *
+ * @param {string} root
+ * @returns {{name: string, from: string}}
+ */
+export function whatItCallsItself(root) {
+  for (const declaration of NAME_DECLARATIONS) {
+    const text = readTextIfThere(path.join(root, declaration.file));
+    if (text === null) continue;
+    const found = declaration.read(text);
+    if (found) return { name: found, from: declaration.file };
+  }
+  return { name: path.basename(root), from: 'the folder name' };
+}
+
+/**
+ * The manifest one product's facts were read out of.
+ *
+ * Detect already records the file it recognised the project by, in the product's own
+ * evidence, so this reads that rather than guessing a second time. Where a product has no
+ * manifest behind it at all — a program found by reading the source — the answer is "the
+ * source", which is the truth and is also more useful than naming a file.
+ *
+ * @param {ProjectShape} project
+ * @param {Product} product
+ * @returns {string}
+ */
+export function manifestBehind(project, product) {
+  const named = (product.evidence ?? [])
+    .map((clue) => String(clue.where ?? '').split('/').pop() ?? '')
+    .find((file) => NAME_DECLARATIONS.some((d) => d.file === file) || file === 'requirements.txt' || file === 'Pipfile' || file === 'Gemfile' || file === 'pubspec.yaml');
+  if (named) return named;
+  return existsSync(path.join(project.root, product.where === '.' ? '' : product.where, 'package.json')) ? 'package.json' : 'the source';
+}
+
+/**
+ * One `key = "value"` out of one `[table]` of a TOML or INI file.
+ *
+ * Deliberately not a TOML parser. Everything read here is a single quoted string on its own
+ * line at the top level of a named table — `[project] name`, `[tool.poetry] name`, and the
+ * entry-point tables below — and pulling in a parser to read seven of those would be a
+ * dependency in a tool whose whole promise is that nothing changes underneath you.
+ *
+ * @param {string} text
+ * @param {string} table   'project', 'tool.poetry', 'metadata'.
+ * @param {string} key
+ * @returns {string|null}
+ */
+function tomlValue(text, table, key) {
+  const body = tomlTable(text, table);
+  if (body === null) return null;
+  // Quoted OR bare, because setup.cfg is an INI file and writes `name = old-style` with no
+  // quotes at all. Insisting on quotes read every setup.cfg as declaring nothing, and the
+  // project fell back to being named after its folder — the exact wrongness being fixed here.
+  const found = new RegExp(`^\\s*${key}\\s*=\\s*(?:['"]([^'"]*)['"]|([^\\s#'"][^#\\n]*?))\\s*(?:#.*)?$`, 'm').exec(body);
+  return (found?.[1] ?? found?.[2])?.trim() || null;
+}
+
+/**
+ * Everything under one `[table]` heading, up to the next heading.
+ * @param {string} text
+ * @param {string} table
+ * @returns {string|null}
+ */
+function tomlTable(text, table) {
+  const heading = new RegExp(`^\\s*\\[${table.replace(/\./g, '\\.')}\\]\\s*$`, 'm').exec(text);
+  if (!heading) return null;
+  const after = text.slice(heading.index + heading[0].length);
+  const next = /^\s*\[/m.exec(after);
+  return next ? after.slice(0, next.index) : after;
+}
+
+/**
+ * A file's text, or null if it is not there or cannot be read.
+ * @param {string} file
+ * @returns {string|null}
+ */
+function readTextIfThere(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Commands that actually run
+// ---------------------------------------------------------------------------
+
+/**
+ * A command that has been checked and will run on a fresh clone.
+ *
+ * @typedef {object} SoundCommand
+ * @property {string} name
+ * @property {string} run
+ * @property {string} describe
+ * @property {Record<string,string>} [env]  Only when the command needs one, e.g. PYTHONPATH.
+ * @property {boolean} [repaired]           True when this is not what was first proposed.
+ */
+
+/**
+ * A command that could not be worked out with confidence, and what to say about it.
+ *
+ * @typedef {object} UnsureCommand
+ * @property {string} name
+ * @property {string} why        Why the obvious command would not run. One sentence.
+ * @property {string} whatToPut  What to write instead. One sentence, addressed to a person.
+ */
+
+/*
+ * Why this exists at all.
+ *
+ * On a real Python command-line tool on 2026-08-31, `init` wrote three commands into the
+ * settings and two of them could not run. `[project.scripts]` in pyproject.toml declares
+ * `lint-lens` and `lenscheck`, so both were written down as `lint-lens --help` and
+ * `lenscheck --help` — and a console script is a file pip WRITES when somebody installs the
+ * package. On a fresh clone neither name exists. Both answered "command not found", exit 127.
+ *
+ * So the very first `staysfixed check` a person ran came back red, about their own project,
+ * over two commands this tool had invented for them thirty seconds earlier. A tool whose one
+ * promise is that a red result means something real cannot open by handing somebody a red
+ * result that means nothing.
+ *
+ * The rule this file now follows: write a command down only when it will run on a clone of
+ * this repository with nothing installed. Where the manifest says enough to build one that
+ * will, build that one. Where it does not, write the command COMMENTED OUT with a sentence
+ * saying what to put there — an honest blank is worth more than a broken default, because a
+ * person can fill in a blank and cannot tell a broken default from a broken product.
+ */
+
+/** Programs that take a file or a module and run it, so what matters is the argument. */
+const INTERPRETERS = /^(python3?|node|ruby|perl|php|deno|bun)$/;
+
+/**
+ * Every command that will really run, and every one that could not be worked out.
+ *
+ * @param {ProjectShape} project
+ * @param {Product} product
+ * @returns {{ready: SoundCommand[], unsure: UnsureCommand[]}}
+ */
+export function commandsThatRun(project, product) {
+  const dir = path.join(project.root, product.where === '.' ? '' : product.where);
+  const proposed = Array.isArray(product.suggest?.commands) ? product.suggest.commands : [];
+  const entryPoints = pythonEntryPoints(dir);
+
+  /** @type {SoundCommand[]} */
+  const ready = [];
+  /** @type {UnsureCommand[]} */
+  const unsure = [];
+
+  for (const raw of proposed) {
+    const name = String(raw?.name ?? '').trim();
+    const run = String(raw?.run ?? '').trim();
+    const describe = String(raw?.describe ?? '');
+    if (!name || !run) continue;
+
+    const verdict = judgeCommand(dir, name, run, entryPoints);
+    if (verdict.ok) {
+      ready.push({ name, run: verdict.run, describe, ...(verdict.env ? { env: verdict.env } : {}), ...(verdict.run === run ? {} : { repaired: true }) });
+    } else {
+      unsure.push({ name, why: verdict.why, whatToPut: verdict.whatToPut });
+    }
+  }
+
+  // Two names for one command is one command. `cli --help` found by reading the folder and
+  // `lint-lens --help` read out of [project.scripts] are the same program on the same module,
+  // and once both are repaired they become the same line — so the settings would have carried
+  // it twice, and every check would have run it twice and compared it against itself. The
+  // name a person actually types wins, which is the one the manifest declared.
+  /** @type {Map<string, SoundCommand>} */
+  const byRun = new Map();
+  for (const command of ready) {
+    const already = byRun.get(command.run);
+    if (!already) { byRun.set(command.run, command); continue; }
+    const declared = entryPoints.has(command.name.replace(/\s+--help$/, ''));
+    if (declared) byRun.set(command.run, command);
+  }
+
+  return { ready: [...byRun.values()], unsure };
+}
+
+/**
+ * Will this one command run on a fresh clone, and if not, can a better one be worked out?
+ *
+ * @param {string} dir
+ * @param {string} name
+ * @param {string} run
+ * @param {Map<string,string>} entryPoints
+ * @returns {{ok: true, run: string, env?: Record<string,string>} | {ok: false, why: string, whatToPut: string}}
+ */
+function judgeCommand(dir, name, run, entryPoints) {
+  const words = run.split(/\s+/);
+  const program = words[0] ?? '';
+  const rest = words.slice(1).join(' ');
+
+  // An interpreter with a file after it. The file has to be there, and — for Python — it has
+  // to be a file that can be run by path at all.
+  if (INTERPRETERS.test(program) && words[1] && !words[1].startsWith('-')) {
+    const relative = words[1];
+    if (!existsSync(path.join(dir, relative))) {
+      return {
+        ok: false,
+        why: `${relative} is not in this repository, so this command cannot run on a fresh clone of it.`,
+        whatToPut: `The command somebody types to run ${name.replace(/\s+--help$/, '')}, as it would be typed in a clone of this repository with nothing installed.`,
+      };
+    }
+    // Everything after the FILE, never after the interpreter. Getting this wrong wrote
+    // `python3 -m lint_lens.cli src/lint_lens/cli.py --help` — the module form with the file
+    // path still stuck on the end of it, which argparse reads as an argument nobody asked for.
+    if (/^python3?$/.test(program)) return judgePythonFile(dir, relative, words.slice(2).join(' '), entryPoints);
+    return { ok: true, run };
+  }
+
+  // A bare name. It is either a program on the machine or a console script the manifest
+  // declares — and a console script is written by an INSTALL, so it is never there on a
+  // fresh clone however plainly it is declared. Whether this machine happens to have one
+  // installed is not the question being asked.
+  if (!program.includes('/') && !program.includes('.')) {
+    const target = entryPoints.get(program);
+    if (target) {
+      const built = pythonRunFor(dir, target);
+      if (built) return { ok: true, run: `${built.run}${rest ? ` ${rest}` : ''}`, ...(built.env ? { env: built.env } : {}) };
+      return {
+        ok: false,
+        why: `\`${program}\` is a console script — pyproject.toml declares it as ${target}, and the file with that name only exists after somebody installs this package. Nothing here could work out how to run ${target.split(':')[0]} straight from the source.`,
+        whatToPut: `Either \`pip install -e .\` in a way every check can rely on, or the command that runs ${target.split(':')[0]} from the source in this repository.`,
+      };
+    }
+    // Anything else with no path in it — `make help`, a program the project assumes — is
+    // left exactly as it was. This function repairs what it understands and never rewrites
+    // what it does not.
+    return { ok: true, run };
+  }
+
+  // A path. It only has to be there.
+  const first = program.replace(/^\.\//, '');
+  if (!existsSync(path.join(dir, first))) {
+    return {
+      ok: false,
+      why: `${program} is not in this repository, so this command cannot run on a fresh clone of it.`,
+      whatToPut: `The command somebody types to run ${name.replace(/\s+--help$/, '')}, as it would be typed in a clone of this repository with nothing installed.`,
+    };
+  }
+  return { ok: true, run };
+}
+
+/**
+ * A Python file named on the command line: can it be run that way, and if not, how?
+ *
+ * Running a file by its path puts that file's OWN folder on the import path and nothing
+ * above it, so a module that lives inside a package cannot import its neighbours. Measured
+ * 2026-08-31 on a src-layout project: `python3 src/deep_tool/cli.py --help` came back
+ * `ImportError: attempted relative import with no known parent package`, exit 1, before it
+ * printed a word. Nothing about the project was wrong. The command was.
+ *
+ * @param {string} dir
+ * @param {string} relative
+ * @param {string} rest
+ * @param {Map<string,string>} entryPoints
+ * @returns {{ok: true, run: string, env?: Record<string,string>} | {ok: false, why: string, whatToPut: string}}
+ */
+function judgePythonFile(dir, relative, rest, entryPoints) {
+  const file = path.join(dir, relative);
+  const insideAPackage = existsSync(path.join(path.dirname(file), '__init__.py'));
+  if (!insideAPackage) return { ok: true, run: `python3 ${relative}${rest ? ` ${rest}` : ''}` };
+
+  const module = pythonModuleName(dir, relative);
+  if (module) {
+    // What the manifest declares comes first, and that is a deduplication decision as much as
+    // a correctness one. This same module is usually also reachable as a console script, and
+    // if the two routes are written differently the settings carry the same program twice
+    // under two names — so every check runs it twice and compares it against itself.
+    for (const [, target] of entryPoints) {
+      if (target.split(':')[0] !== module.name) continue;
+      const viaEntry = pythonRunFor(dir, target);
+      if (viaEntry) return { ok: true, run: `${viaEntry.run}${rest ? ` ${rest}` : ''}`, ...(viaEntry.env ? { env: viaEntry.env } : {}) };
+    }
+    const built = pythonRunFor(dir, module.name);
+    if (built) return { ok: true, run: `${built.run}${rest ? ` ${rest}` : ''}`, ...(built.env ? { env: built.env } : {}) };
+  }
+
+  // It is inside a package, and nothing here could work out a way in. If it imports nothing
+  // of its own it still runs by path today, so that is what gets written — with no claim
+  // that it is the best way to run it.
+  const text = readTextIfThere(file) ?? '';
+  const top = module ? module.name.split('.')[0] : '';
+  const importsItsOwn = /^\s*from\s+\./m.test(text) || (top !== '' && new RegExp(`^\\s*(from|import)\\s+${top}\\b`, 'm').test(text));
+  if (!importsItsOwn) return { ok: true, run: `python3 ${relative}${rest ? ` ${rest}` : ''}` };
+
+  return {
+    ok: false,
+    why: `${relative} sits inside a Python package and imports from it, so running it by its path fails with "attempted relative import with no known parent package" before it prints anything. It has no \`if __name__ == "__main__"\` block either, so \`python3 -m\` would import it and do nothing at all.`,
+    whatToPut: `The command you type to run this yourself — usually the console script from pyproject.toml, or \`python3 -c "import sys; from ${module?.name ?? 'your.module'} import main; sys.exit(main())"\` with PYTHONPATH set to the folder the package sits in.`,
+  };
+}
+
+/**
+ * Every console script this project declares, whichever way it declares them.
+ *
+ * Three spellings, all of them ordinary and all of them meaning the same thing: PEP 621's
+ * `[project.scripts]`, Poetry's `[tool.poetry.scripts]`, and the older
+ * `[project.entry-points.console_scripts]`. Reading only the first was why a Poetry project
+ * had no commands worked out for it at all.
+ *
+ * @param {string} dir
+ * @returns {Map<string,string>}   command name -> 'module.path:function'
+ */
+export function pythonEntryPoints(dir) {
+  /** @type {Map<string,string>} */
+  const found = new Map();
+  const text = readTextIfThere(path.join(dir, 'pyproject.toml'));
+  if (text !== null) {
+    for (const table of ['project.scripts', 'tool.poetry.scripts', 'project.entry-points.console_scripts']) {
+      const body = tomlTable(text, table);
+      if (body === null) continue;
+      for (const line of body.split('\n')) {
+        const named = /^\s*['"]?([A-Za-z0-9_.-]+)['"]?\s*=\s*['"]([^'"]+)['"]/.exec(line);
+        if (named && !found.has(named[1])) found.set(named[1], named[2]);
+      }
+    }
+  }
+  // setup.cfg writes them as indented lines under a console_scripts key rather than as a
+  // table of their own, so it is read on its own terms rather than forced into the same shape.
+  const cfg = readTextIfThere(path.join(dir, 'setup.cfg'));
+  if (cfg !== null && /console_scripts\s*=/.test(cfg)) {
+    const after = cfg.slice(cfg.indexOf('console_scripts'));
+    for (const line of after.split('\n').slice(1)) {
+      if (/^\S/.test(line)) break;
+      const named = /^\s+([A-Za-z0-9_.-]+)\s*=\s*(\S+)/.exec(line);
+      if (named && !found.has(named[1])) found.set(named[1], named[2]);
+    }
+  }
+  return found;
+}
+
+/**
+ * A command that really runs one Python module or entry point, straight from the source.
+ *
+ * The ladder is in order of how exactly each form matches what a person gets when they
+ * install the package, and every rung of it was measured on 2026-08-31 rather than reasoned
+ * about:
+ *
+ *   1. `python3 -m the.module` — only when the module has an `if __name__ == "__main__"`
+ *      block. Without one this is the worst possible answer: python imports the module,
+ *      finds nothing to do, and exits 0 having printed nothing. A command that succeeds
+ *      silently is exactly the shape of thing this tool exists to catch, and writing one
+ *      into somebody's settings would have it comparing an empty string for ever.
+ *   2. `python3 -c "import sys; from the.module import main; sys.exit(main())"` — which is
+ *      what pip's own console script does, line for line, so it prints the same help and
+ *      exits the same way. Only written when that function really is defined in that file.
+ *
+ * `PYTHONPATH` is set only for a src layout, and it is carried as the command's environment
+ * rather than written in front of the command as `PYTHONPATH=src python3 ...`, because that
+ * spelling is a shell feature that Windows does not have.
+ *
+ * @param {string} dir
+ * @param {string} target   'the.module' or 'the.module:function'.
+ * @returns {{run: string, env?: Record<string,string>}|null}
+ */
+export function pythonRunFor(dir, target) {
+  const [module, func] = String(target).split(':');
+  if (!module) return null;
+  const parts = module.split('.');
+
+  for (const layout of ['', 'src']) {
+    const base = path.join(dir, layout);
+    const asFile = path.join(base, ...parts) + '.py';
+    const asPackage = path.join(base, ...parts, '__init__.py');
+    const file = existsSync(asFile) ? asFile : existsSync(asPackage) ? asPackage : null;
+    if (!file) continue;
+    const env = layout ? { PYTHONPATH: layout } : undefined;
+    const text = readTextIfThere(file) ?? '';
+    // A NAMED function wins over the module's `__main__` block, always. One module can hold
+    // two entry points — `lint_lens.cli:main` and `lint_lens.cli:check_main` — and its
+    // `__main__` block calls exactly one of them. Taking the block first wrote the same
+    // command down for both, so `lenscheck --help` ran `main` and compared the wrong
+    // program's help for ever. Measured 2026-08-31.
+    if (func && new RegExp(`^\\s*(async\\s+)?def\\s+${func.replace(/[^A-Za-z0-9_]/g, '')}\\s*\\(`, 'm').test(text)) {
+      return { run: `python3 -c "import sys; from ${module} import ${func}; sys.exit(${func}())"`, ...(env ? { env } : {}) };
+    }
+    if (!func && /^\s*if\s+__name__\s*==\s*['"]__main__['"]\s*:/m.test(text)) {
+      return { run: `python3 -m ${module}`, ...(env ? { env } : {}) };
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * The module name a Python file would be imported under, and the folder that has to be on
+ * the import path for that to work.
+ *
+ * @param {string} dir
+ * @param {string} relative
+ * @returns {{name: string, layout: string}|null}
+ */
+function pythonModuleName(dir, relative) {
+  const parts = relative.split(/[\\/]/).filter((one) => one !== '' && one !== '.');
+  if (parts.length === 0 || !parts[parts.length - 1].endsWith('.py')) return null;
+  parts[parts.length - 1] = parts[parts.length - 1].replace(/\.py$/, '');
+  // Walk up while each folder is a package, so the module name starts at the top-level
+  // package and never above it. `src/deep_tool/cli.py` is `deep_tool.cli`, mounted at `src`.
+  let start = parts.length - 1;
+  while (start > 0 && existsSync(path.join(dir, ...parts.slice(0, start), '__init__.py'))) start -= 1;
+  const layout = parts.slice(0, start).join('/');
+  if (layout !== '' && layout !== 'src') return null;
+  return { name: parts.slice(start).join('.'), layout };
+}
+
+// ---------------------------------------------------------------------------
 // Journeys, proposed rather than demanded
 // ---------------------------------------------------------------------------
 
@@ -991,12 +1475,19 @@ export function proposeJourneys(project) {
 
   for (const product of project.products) {
     const suggest = product.suggest ?? {};
+    // The file this product's facts really came from. It used to say "package.json" whatever
+    // the project was written in, so a Python tool was told twice on one screen that its
+    // commands had been read out of a file it does not have. See manifestBehind above.
+    const manifest = manifestBehind(project, product);
     if (product.kind === 'cli' && Array.isArray(suggest.commands)) {
-      for (const command of suggest.commands) {
+      // Only the commands that will really run are offered as journeys. One listed here is a
+      // promise that a check will walk it, and two of the three listed for a Python tool on
+      // 2026-08-31 could not run at all.
+      for (const command of commandsThatRun(project, product).ready) {
         out.push({
-          name: String(command.name),
-          what: `run \`${String(command.run)}\` and compare what it printed, what it exited with and every file it touched`,
-          from: product.where === '.' ? 'package.json' : `the program built in ${product.where}/`,
+          name: command.name,
+          what: `run \`${command.run}\` and compare what it printed, what it exited with and every file it touched`,
+          from: product.where === '.' ? manifest : `the program built in ${product.where}/`,
           surface: 'cli',
           automatic: false,
           ready: true,
@@ -1009,7 +1500,7 @@ export function proposeJourneys(project) {
         out.push({
           name: String(entry.name),
           what: `import ${module} and compare what it exports`,
-          from: 'package.json',
+          from: manifest,
           surface: 'library',
           automatic: false,
           // Only if the file is really there. package.json naming an entry does not put one
@@ -1182,8 +1673,13 @@ export function configText(project) {
   w('/**');
   w(' * Stays Fixed — settings for this project.');
   w(' *');
+  // What this project calls itself, and the file it said so in. Both are printed, and the
+  // file has to be the real one: saying "package.json" over a Python project — which this
+  // did, on 2026-08-31 — is a claim a person can check in one second and find false, in the
+  // header of a file that goes on to make thirty claims they cannot check as easily.
+  const called = whatItCallsItself(project.root);
   w(` * Written by \`staysfixed init\` on ${new Date().toISOString().slice(0, 10)}, from what is actually in this`);
-  w(' * repository. Everything below was read out of the code, the folder names and package.json;');
+  w(` * repository. Everything below was read out of the code, the folder names and ${called.from};`);
   w(' * nothing was guessed, and nothing was asked.');
   w(' *');
   w(` * WHAT THIS REPOSITORY MAKES: ${project.summary}`);
@@ -1228,7 +1724,11 @@ export function configText(project) {
     w('  // settings below describe. To check one of the others, run `staysfixed check` from');
     w('  // inside that package, or point at its settings with `--config <file>`.');
   }
-  w(`  product: ${JSON.stringify(project.name)},`);
+  // The name the project gives ITSELF, not the folder it happens to be checked out into.
+  // A Python tool that calls itself `lint-lens` in pyproject.toml was recorded here as
+  // "pytool", after the directory, on 2026-08-31. The record is kept under this name, so a
+  // wrong one quietly splits one product's history in two the day somebody renames a folder.
+  w(`  product: ${JSON.stringify(called.name)},`);
   w('');
 
   // ── source ────────────────────────────────────────────────────────────────
@@ -1267,14 +1767,36 @@ export function configText(project) {
   w('    // does safely — and its help text is a precise description of everything it offers, so');
   w('    // a command that quietly disappears is caught by comparing it.');
   const cliProducts = all('cli');
-  /** @type {any[]} */
+  // Every command is checked before it is written down, and the ones that cannot be worked
+  // out are written commented out with a sentence saying what to put there. Two commands
+  // that answered "command not found" went into a real project's settings on 2026-08-31, so
+  // the first check somebody ran was red about nothing. See commandsThatRun above.
+  /** @type {SoundCommand[]} */
   const commands = [];
-  for (const one of cliProducts) for (const command of /** @type {any[]} */ (one.suggest?.commands ?? [])) commands.push(command);
-  const unbuilt = cliProducts.filter((one) => !one.built.found);
+  /** @type {UnsureCommand[]} */
+  const unsure = [];
+  for (const one of cliProducts) {
+    const judged = commandsThatRun(project, one);
+    commands.push(...judged.ready);
+    unsure.push(...judged.unsure);
+  }
+  // A product that runs straight from the source is NOT an unbuilt one, and saying it is
+  // put a paragraph in the settings of a Python tool and of a plain Node one telling each of
+  // them to go and build something, over a program that was sitting right there and that the
+  // same run had already worked out how to run. It also said "nothing in package.json names
+  // it" about commands that package.json names in its own `bin` field. Two untrue sentences
+  // about somebody's project, in the file this tool wrote for them. Measured 2026-08-31.
+  //
+  // The same two signals the needs list uses, and either is enough: the detector saying there
+  // is nothing to build, and a command already worked out for it.
+  const unbuilt = cliProducts.filter((one) => !one.built.found
+    && !/nothing to build/i.test(String(one.built.how ?? ''))
+    && commandsThatRun(project, one).ready.length === 0);
   if (commands.length > 0) {
     w('    commands: [');
     for (const command of commands) {
-      w(`      { name: ${JSON.stringify(String(command.name))}, run: ${JSON.stringify(String(command.run))}, describe: ${JSON.stringify(String(command.describe ?? ''))} },`);
+      const env = command.env ? `, env: { ${Object.entries(command.env).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(', ')} }` : '';
+      w(`      { name: ${JSON.stringify(command.name)}, run: ${JSON.stringify(command.run)}, describe: ${JSON.stringify(command.describe ?? '')}${env} },`);
     }
     w('    ],');
     w('    // Add any other command whose output you would notice changing. Each entry also takes:');
@@ -1284,10 +1806,18 @@ export function configText(project) {
     w("    // commands: [{ name: 'help', run: 'node bin/cli.js --help', describe: 'print the help' }],");
     w('    commands: [],');
   }
+  for (const one of unsure) {
+    w('');
+    w(`    // \`${one.name}\` is left blank on purpose, because a command that does not run would`);
+    w('    // make your very first check red about nothing.');
+    for (const line of wrapProse(one.why, 88)) w(`    // ${line}`);
+    for (const line of wrapProse(`Fill this in and delete the comment: ${one.whatToPut}`, 88)) w(`    // ${line}`);
+    w(`    // { name: ${JSON.stringify(one.name)}, run: '...', describe: 'ask it to print its help, and compare every word of it' },`);
+  }
   for (const one of unbuilt) {
     const build = typeof one.suggest?.buildWith === 'string' ? String(one.suggest.buildWith) : null;
     w('');
-    w(`    // ${one.where}/ holds a real command-line program that nothing in package.json names, so it`);
+    w(`    // ${one.where}/ holds a real command-line program that nothing in ${manifestBehind(project, one)} names, so it`);
     w('    // was found by reading the code rather than the manifest — and it has not been built here');
     w(`    // yet${one.suggest?.outDir ? `, so ${String(one.suggest.outDir)}/ is empty` : ''}. There is nothing to run until it is:`);
     w(`    //     ${build ?? 'build it the way this project builds it'}`);

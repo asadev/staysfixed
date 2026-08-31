@@ -176,18 +176,36 @@ describe('init', () => {
     assert.match(kept, /a line somebody added by hand/, 'init overwrote settings somebody had already edited');
   });
 
-  test('the picture commands say plainly why they do not apply to a product with no screen', async () => {
-    // `status`, `walk`, `approve`, `mark`, `trace` and `check --pictures` all work by
-    // opening something and photographing it, and settings written for a command-line tool
-    // name nothing to open — which is correct, not a mistake. What they must never do is
-    // tell somebody to go and add a web address they do not have.
+  test('the commands that only read what is on disk work on a project with no screen', async () => {
+    // This test used to assert the opposite, and the opposite was the defect. `status`,
+    // `flake`, `mark`, `trace` and `approve` do their whole job by reading files this tool
+    // has already written; not one of them opens anything. All five were refused on the
+    // settings this tool's own `init` had just written for a command-line tool, with a
+    // paragraph about an `app` key version 2 never writes. Measured 2026-08-31, on a Python
+    // command-line tool and again on a plain Node one.
     const dir = await aTinyProject('staysfixed-status');
     await cli(['init'], { cwd: dir });
 
-    const { stdout, stderr } = await cli(['status'], { cwd: dir });
+    for (const args of [['status'], ['flake'], ['mark', 'v0.1.0'], ['trace'], ['approve']]) {
+      const { code, stdout, stderr } = await cli(args, { cwd: dir });
+      const said = stdout + stderr;
+      assert.equal(code, EXIT.ok, `\`staysfixed ${args.join(' ')}\` refused to run:\n${said}`);
+      assert.doesNotMatch(said, /do not name anything to open/);
+    }
+  });
+
+  test('and the one that really does open something refuses by naming this project', async () => {
+    // `walk` photographs a screen, so a command-line tool genuinely cannot be walked. What
+    // it must never do is tell somebody to go and add a web address they do not have, in a
+    // key their settings file has not got.
+    const dir = await aTinyProject('staysfixed-walk');
+    await cli(['init'], { cwd: dir });
+
+    const { stdout, stderr } = await cli(['walk'], { cwd: dir });
     const said = stdout + stderr;
-    assert.match(said, /do not name anything to open/);
+    assert.match(said, /photographs a screen, and this project has none/);
     assert.match(said, /staysfixed check/, 'it has to name the half of the tool that DOES cover this project');
+    assert.doesNotMatch(said, /app: \{ kind:/, 'never a key the person has never heard of');
   });
 
   test('status still works where there is something to open', async () => {

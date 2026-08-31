@@ -16,7 +16,10 @@ import { EXIT } from '../core/errors.js';
  * @returns {Promise<number>}
  */
 export async function run(ctx) {
-  const project = await loadProject({ cwd: ctx.cwd, configFile: ctx.configFile });
+  // `opening: false` — approving moves a picture the last check already took. It launches
+  // nothing. On a project with no screen there is simply never anything waiting, and saying
+  // that in one line is the true answer; refusing to load the settings at all was not.
+  const project = await loadProject({ cwd: ctx.cwd, configFile: ctx.configFile, opening: false });
   const all = ctx.bool('all');
   const names = ctx.args.filter((a) => a.trim() !== '');
 
