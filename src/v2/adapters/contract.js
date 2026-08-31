@@ -400,9 +400,19 @@ export function observation(spec) {
   if (spec.surface) meta.surface = spec.surface;
   if (spec.covered === false) {
     // The engine reads `refused` when it builds the coverage ledger. Everything an adapter
-    // could not look at lands here, whichever of the reasons it was — a payment it would not
-    // make, a runtime this machine does not have, a parameter nobody supplied. They are all
-    // the same thing to a reader: a hole, with the reason attached, and never a pass.
+    // could not look at IN FULL lands here, whichever of the reasons it was — a payment it
+    // would not make, a runtime this machine does not have, a parameter nobody supplied.
+    // They are all the same thing to the ledger: a hole, with the reason attached, and never
+    // a pass.
+    //
+    // IT DOES NOT MEAN "NOTHING ANSWERED", and reading it that way is wrong in one specific
+    // case that really happens: `too big` sets it on a REAL value that was only partly kept.
+    // A large log is a genuine observation of the product and has to go on being compared;
+    // treating it as a refusal would drop a real address out of the comparison and, worse,
+    // could block a healthy release. So anything deciding whether an address ANSWERED reads
+    // the value — see `src/v2/refusal.js`, which is the one place that question is answered
+    // — and never this flag. Written down on 2026-08-31 after the refusal lane found the two
+    // meanings sharing one field.
     meta.refused = true;
     meta.refusedWhy = `${NOT_COVERED_MEANING[spec.reason ?? 'refused']} (${spec.reason ?? 'refused'})`;
   }
