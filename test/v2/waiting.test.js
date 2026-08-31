@@ -92,8 +92,11 @@ async function hasIpv6Loopback() {
 
 describe('reading the address a server printed', () => {
   test('finds the one Vite prints, colour codes and all', () => {
-    const vite = '[32m  [39m[32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m\n';
-    const found = announcedAddresses(vite.replace('[1m5173[22m', '5173'));
+    // Written with escapes rather than the real control characters, because a raw escape
+    // byte in a source file is invisible to every person and every grep that goes looking
+    // for it later. This is byte-for-byte what `vite preview` prints on a colour terminal.
+    const vite = `\u001B[32m  \u001B[39m\u001B[32m\u279C\u001B[39m  \u001B[1mLocal\u001B[22m:   \u001B[36mhttp://localhost:\u001B[1m5173\u001B[22m/\u001B[39m`;
+    const found = announcedAddresses(vite);
     assert.deepEqual(found.map((one) => one.port), [5173]);
     assert.equal(found[0].host, 'localhost');
   });
