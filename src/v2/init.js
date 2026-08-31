@@ -1372,9 +1372,11 @@ export function configText(project) {
   w('  // ───────────────────────────────────────────────────────────────────────');
   w(web ? '  web: {' : '  // web: {');
   const webOn = web ? '    ' : '  //   ';
-  w(`${webOn}// The command that starts it, listening on the PORT it is given. Much better than`);
-  w(`${webOn}// an address: one address can only serve one build, so with an address alone both`);
-  w(`${webOn}// halves of the comparison read the same running copy and prove nothing.`);
+  w(`${webOn}// The command that starts it, listening on the PORT it is given and on 127.0.0.1.`);
+  w(`${webOn}// Much better than an address: one address can only serve one build, so with an`);
+  w(`${webOn}// address alone both halves of the comparison read the same running copy and prove`);
+  w(`${webOn}// nothing. A command that ignores the port it was handed is named within a second`);
+  w(`${webOn}// or two, by name, rather than after a minute and a half of waiting.`);
   const webStart = web?.suggest?.start;
   const flatSite = !webStart && Array.isArray(web?.suggest?.screens) && web.suggest.screens.length > 0;
   if (webStart) {
@@ -1391,7 +1393,11 @@ export function configText(project) {
     w(`${webOn}// package the first time it runs, and that is a decision rather than a default.`);
     w(`${webOn}// start: 'npx --yes serve -l $PORT .',`);
   } else {
-    w(`${webOn}// start: 'npm run dev',`);
+    w(`${webOn}// It has to listen on the PORT it is given AND on 127.0.0.1, and both halves`);
+    w(`${webOn}// matter: measured on 2026-08-31, Vite ignores the PORT and HOST it is handed`);
+    w(`${webOn}// in the environment and binds the name "localhost", which on a Mac is the IPv6`);
+    w(`${webOn}// loopback — so the site comes up somewhere these settings never said.`);
+    w(`${webOn}// start: 'npm run dev -- --port $PORT --strictPort --host 127.0.0.1',`);
   }
   w(`${webOn}// Or, if it is already running somewhere and you accept the weaker answer:`);
   w(`${webOn}// url: 'http://localhost:3000',`);

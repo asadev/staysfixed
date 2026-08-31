@@ -929,8 +929,58 @@ export async function sweepAbandonedScratch() {
       }
     }
     if (!abandoned) continue;
+    // The folder is not the whole of what was left behind. Four `vite preview` servers from
+    // the day before were still running on this machine on 2026-08-31, out of scratch folders
+    // that had already been deleted — started by a run that died before it could stop them.
+    // Deleting the folder and leaving its programs running is a tool quietly consuming
+    // somebody's machine, and this one is going to be installed on machines that are not its
+    // author's. So the programs go first, and only then the folder.
+    await stopWhateverIsStillRunningIn(dir);
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
     taken += 1;
+  }
+}
+
+/**
+ * Stop anything still running out of an abandoned scratch folder.
+ *
+ * Read from the process list rather than remembered, because the run that started these is
+ * gone — that is what made the folder abandoned. A program is only killed when the folder
+ * being reclaimed appears in its own command line, so nothing of anybody else's is touched.
+ *
+ * The whole group is signalled, not the one process: a server started through `npm run` is
+ * a shell that started Node, and killing the shell alone leaves the server holding its port.
+ *
+ * POSIX only. Windows needs a different question asked of the machine, and a wrong one there
+ * could kill something else, so it is left alone and said so rather than guessed at.
+ *
+ * @param {string} dir
+ * @returns {Promise<void>}
+ */
+async function stopWhateverIsStillRunningIn(dir) {
+  if (process.platform === 'win32') return;
+  /** @type {string} */
+  let listing = '';
+  try {
+    listing = (await exec('/bin/ps', ['-A', '-o', 'pid=,command='], { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 })).stdout;
+  } catch {
+    return;
+  }
+  for (const line of listing.split('\n')) {
+    if (!line.includes(dir)) continue;
+    const pid = Number.parseInt(line.trim().split(/\s+/)[0] ?? '', 10);
+    if (!Number.isFinite(pid) || pid <= 1 || pid === process.pid) continue;
+    for (const signal of /** @type {const} */ (['SIGTERM', 'SIGKILL'])) {
+      try {
+        process.kill(-pid, signal);
+      } catch {
+        try {
+          process.kill(pid, signal);
+        } catch {
+          // Already gone, or somebody else's to stop. Either way there is nothing to do.
+        }
+      }
+    }
   }
 }
 

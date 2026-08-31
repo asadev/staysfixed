@@ -2451,7 +2451,13 @@ function startCommandFor(input) {
   // build. It takes the port as a flag, so nothing has to be downloaded to serve the files.
   if (build && script('preview') && (has('vite') || has('astro') || has('@sveltejs/kit'))) {
     return {
-      command: `${build} && ${script('preview')} -- --port $PORT --strictPort`,
+      // `--host 127.0.0.1` is not decoration. Measured on 2026-08-31 on an app scaffolded a
+      // minute earlier with `npm create vite@latest -- --template react-ts`: Vite ignores both
+      // the PORT and the HOST it is handed in the environment and binds the NAME `localhost`,
+      // which macOS resolves to the IPv6 loopback — so the site came up on `[::1]` and nothing
+      // whatever was listening on `127.0.0.1`. Naming the address makes the command land where
+      // the settings say it will, instead of wherever name resolution happens to put it.
+      command: `${build} && ${script('preview')} -- --port $PORT --strictPort --host 127.0.0.1`,
       kind: 'build-and-serve',
       why: 'It is built, and then the build is served by the tool that made it. That is what ships — a dev server serves unbundled source with a live-reload connection in every page, which is a second thing moving under the comparison.',
     };
