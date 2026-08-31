@@ -1462,14 +1462,14 @@ function summarise(findings, subtraction, warning, notes, reference, provedLive,
     // paragraphs down in a list.
     const n = how.lost ?? 0;
     parts.push(
-      `Nothing that COULD be compared has changed — but ${n} ${plural(n, 'address', 'addresses')} the old build answers at could not be answered by this build at all, so ${plural(n, 'it was', 'they were')} not compared. That is coverage this build has taken away, and it is not a pass. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against}.${reach}`,
+      `THIS BUILD ANSWERS AT FEWER PLACES THAN THE LAST ONE. Nothing that could still be compared has changed — but ${n} ${plural(n, 'address', 'addresses')} the old build answers at could not be answered by this build at all, so ${plural(n, 'it was', 'they were')} not compared. That is coverage this build has taken away, and it is not a pass. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against}.${reach}`,
     );
   } else if (findings.length === 0 && dead.length > 0) {
     // "Nothing that worked has changed" is not available to a run that could not read part
     // of itself. What IS true is said instead, with the size of the hole beside it, so the
     // sentence cannot be quoted as an all-clear by anybody who reads only this far.
     parts.push(
-      `Nothing that COULD be compared has changed. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against} — and the ${plural(dead.length, 'journey', 'journeys')} named above ${plural(dead.length, 'is', 'are')} not among them, so a break inside ${plural(dead.length, 'it', 'them')} would look exactly like this.${reach}`,
+      `SOME OF THIS PRODUCT COULD NOT BE READ AT ALL. Nothing that could be compared has changed: ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against} — and the ${plural(dead.length, 'journey', 'journeys')} named above ${plural(dead.length, 'is', 'are')} not among them, so a break inside ${plural(dead.length, 'it', 'them')} would look exactly like this.${reach}`,
     );
   } else if (findings.length === 0) {
     // A WHOLE JOURNEY WITH NOTHING ON THE OTHER SIDE IS NOT A PASS, and the headline is the
@@ -1480,7 +1480,7 @@ function summarise(findings, subtraction, warning, notes, reference, provedLive,
     // changed". A broken library upgraded into this state read as clean. Measured 2026-08-31.
     if (missed > 0) {
       parts.push(
-        `Nothing that COULD be compared has changed — but ${missed} of ${how.asked} ${plural(how.asked, 'journey', 'journeys')} had nothing on the old build's side to be held against, so ${plural(missed, 'it was', 'they were')} not checked at all, and a break inside ${plural(missed, 'it', 'them')} would look exactly like this. That is missing coverage rather than a failure — it is what a journey the old build never had looks like, and it is what an upgrade that learned to watch something new looks like. Ship once from a build you are happy with, or run with --paired, and the next check covers ${plural(missed, 'it', 'them')} properly. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against}.${reach}`,
+        `PART OF THIS RUN HAD NOTHING TO BE COMPARED AGAINST. Nothing that could be compared has changed — but ${missed} of ${how.asked} ${plural(how.asked, 'journey', 'journeys')} had nothing on the old build's side to be held against, so ${plural(missed, 'it was', 'they were')} not checked at all, and a break inside ${plural(missed, 'it', 'them')} would look exactly like this. That is missing coverage rather than a failure — it is what a journey the old build never had looks like, and it is what an upgrade that learned to watch something new looks like. Ship once from a build you are happy with, or run with --paired, and the next check covers ${plural(missed, 'it', 'them')} properly. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against}.${reach}`,
       );
     } else {
       parts.push(`Nothing that worked has changed. ${how.addresses} ${plural(how.addresses, 'address', 'addresses')} checked against ${against}.${reach}`);
