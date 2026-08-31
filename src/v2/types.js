@@ -39,7 +39,7 @@
 
 /**
  * Where an observation came from, when it matters which platform produced it.
- * @typedef {'cli'|'library'|'server'|'web'|'electron'|'android'|'ios'|'windows'|'extension'} Surface
+ * @typedef {'cli'|'library'|'server'|'web'|'electron'|'android'|'ios'|'windows'|'linux'|'macos'|'extension'} Surface
  */
 
 // ---------------------------------------------------------------------------

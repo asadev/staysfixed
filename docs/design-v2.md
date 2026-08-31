@@ -17,12 +17,13 @@
 > servers, source reading, the web, Electron, Android, iOS and native Windows over ssh. The
 > MCP surface is seven tools and it is what `staysfixed mcp` serves.
 >
-> **What is written and not wired:** replaying a recorded session. The code is in
-> `src/v2/journeys/` with tests around it and nothing on the check path calls it; asking for
-> it is refused by name. Harvesting a project's own test suite was in this list and is now
-> wired — `--journeys suite`, opt-in, held to a 90-second budget, every file it did not reach
-> named. Journeys otherwise come from what each adapter reads out of your source, plus a
-> journeys file you point it at.
+> **What is written and not wired:** nothing. Replaying a recorded session was the last one
+> and it landed on 2026-08-31: `staysfixed record` opens the product, follows what a person
+> does, walks the session twice against the same build before keeping it, and `--journeys
+> recorded` walks it on every later check. Harvesting a project's own test suite was in this
+> list too and is wired — `--journeys suite`, opt-in, held to a 90-second budget, every file
+> it did not reach named. Journeys otherwise come from what each adapter reads out of your
+> source, plus a journeys file you point it at.
 >
 > **What is permanent and will not change:** nothing irreversible is ever run — it is watched
 > at the call and refused at the effect, and the refusal is reported as missing coverage;

@@ -60,7 +60,9 @@ export const PRODUCT_KINDS = Object.freeze({
   electron: { name: 'a desktop app built with Electron', surface: 'electron', adapter: 'electron', what: 'A desktop app. Watched by opening the built app on its own, reading its window, its menus and every private channel it registers.' },
   ios: { name: 'an iPhone or iPad app', surface: 'ios', adapter: 'ios', what: 'An Apple app. Driven on the simulator; a real device in your hand can never be compared side by side.' },
   android: { name: 'an Android app', surface: 'android', adapter: 'android', what: 'An Android app. Driven on an emulator against the stored record.' },
-  desktopNative: { name: 'a native desktop app', surface: 'windows', adapter: 'windows', what: 'A desktop app that is not Electron — Swift, WinUI, Tauri, Qt. Only readable from the operating system it runs on.' },
+  desktopNative: { name: 'a native desktop app', surface: 'windows', adapter: 'windows', what: 'A desktop app that is not Electron — Swift, WinUI, Tauri, Qt. Only readable from the operating system it runs on — Windows here; see desktopNativeLinux for Linux.' },
+  macNative: { name: 'a native Mac app', surface: 'macos', adapter: 'macos', what: 'A Mac app that is not Electron — Swift or Objective-C, AppKit or SwiftUI. Readable only on a Mac, one build at a time, and one person has to allow it once under Privacy & Security.' },
+  desktopNativeLinux: { name: 'a native Linux desktop app', surface: 'linux', adapter: 'linux', what: 'A Linux desktop app that is not Electron — GTK, Qt, Tauri. Read through the accessibility bus every screen reader already uses, on a machine somebody is logged in to.' },
   container: { name: 'a containerised service', surface: 'server', adapter: 'http', what: 'A service that ships as a container. Watched the same way as any server, once there is a command that starts it.' },
   other: { name: 'a product in a language this tool cannot drive yet', surface: 'cli', adapter: null, what: 'Recognised, named, and honestly not drivable here. It is listed so a clean run is never mistaken for full coverage.' },
 });

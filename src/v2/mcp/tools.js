@@ -493,7 +493,7 @@ export function toolDefinitions() {
           journeys: {
             type: 'string',
             description:
-              "Where the steps come from. 'code' is the default and needs nothing: each adapter reads your source and offers what it finds - routes, commands, screens, message channels. 'suite' walks the project's own test suite as well: each test file runs twice inside the scratch copy, every check is reported by name, and it stops after 90 seconds naming each file it did not reach. It catches breaks nothing else can - a rounding change the product's own output never shows. It is opt-in because running a stranger's whole suite twice on every check is not something to do by default. You can also pass a path to a journeys file naming steps by hand. 'recorded' (replay a recorded session) is written and not yet wired into a run: ask for it and it says so rather than checking something else.",
+              "Where the steps come from. 'code' is the default and needs nothing: each adapter reads your source and offers what it finds - routes, commands, screens, message channels. 'suite' walks the project's own test suite as well: each test file runs twice inside the scratch copy, every check is reported by name, and it stops after 90 seconds naming each file it did not reach. It catches breaks nothing else can - a rounding change the product's own output never shows. It is opt-in because running a stranger's whole suite twice on every check is not something to do by default. 'recorded' replays the sessions somebody recorded with `staysfixed record` and kept in .staysfixed/journeys - the only source that knows which four screens a person actually opens every morning, which reading the source cannot work out. You can also pass a path to a journeys file naming steps by hand.",
           },
           surface: {
             type: 'string',
@@ -934,19 +934,12 @@ async function toolCheck(ctx, input) {
   const limit = positive(input.limit) ?? DEFAULT_LIMIT;
   const offset = positive(input.offset) ?? 0;
 
-  // A value the engine does not understand must be refused BY NAME, never passed down.
-  //
-  // `suite` is now wired and reaches the harvest. `recorded` is still written and called by
-  // nothing, so passing it down would reach the engine as the name of a FILE and come back as
-  // "there is no journeys file at .../recorded" — an error that sends an agent looking for a
-  // file it never asked for. Refusing it by name and saying why is the honest answer, and a
-  // clean result about the wrong steps would be worse than no result.
+  // Every word this tool offers now reaches something that walks. `suite` harvests the
+  // project's own tests; `recorded` replays the sessions in `.staysfixed/journeys`, which was
+  // written and wired to nothing until 2026-08-31 and was refused here by name because of it.
+  // A project with no recordings comes back BLOCKED from the engine, naming the folder and the
+  // command that makes one - never as a clean result about steps nobody walked.
   const wantedJourneys = text(input.journeys);
-  if (wantedJourneys === 'recorded') {
-    return problem(
-      'Replaying a recorded session is written and not wired into a run yet, so nothing was checked. Leave journeys out to use the steps each adapter reads from your source, pass "suite" to walk your own test suite, or pass the path to a journeys file.'
-    );
-  }
 
   const surface = text(input.surface);
   const at = text(input.at);

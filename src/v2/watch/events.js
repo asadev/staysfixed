@@ -60,6 +60,8 @@ export const SURFACE_WORDS = Object.freeze({
   android: 'Android phone',
   ios: 'iPhone',
   windows: 'Windows app',
+  linux: 'Linux desktop app',
+  macos: 'Mac app',
 });
 
 /**
@@ -76,6 +78,8 @@ export const SURFACE_NOTES = Object.freeze({
   android: 'installed on an emulator, watched through what is on the screen',
   ios: 'installed on a simulator, watched through what is on the screen',
   windows: 'driven on a real Windows desktop, watched through what is on the screen',
+  linux: 'opened on a real Linux desktop, watched through what the accessibility bus says its controls do',
+  macos: 'opened in the background on a Mac, watched through what is on the screen',
 });
 
 /**

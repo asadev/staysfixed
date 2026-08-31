@@ -163,13 +163,15 @@ pretend otherwise.
 | The coverage ledger — every door counted, the unopened ones named, and the sentence saying so on every reply | **Works.** See [what it did not check](#what-it-did-not-check). |
 | Aiming a check at one kind of product, and refusing by name rather than checking something else | **Works.** |
 | Steps taken from your own test suite | **Works.** `--journeys suite` runs each test file twice inside the scratch copy, reports every check by name and why each failure failed, and stops after 90 seconds naming every file it did not reach. It is opt-in: running a stranger's whole suite twice on every check is not a thing to do by default. It catches what nothing else can — remove the penny-rounding from a `total()` and the product's own output does not move by one character, the discovered journeys say "nothing has changed", and the harvest names the check that turned red. |
-| Steps taken from a recorded session, or rejected at birth for not repeating twice | **Written, not wired.** The code is in `src/v2/journeys/` with tests around it, and nothing on the check path calls it yet. Ask for `--journeys recorded` and you are told so by name. |
+| Steps taken from a recorded session, or rejected at birth for not repeating twice | **Works.** `staysfixed record <name>` opens your product, follows what you do in it, and writes the session down; `--journeys recorded` walks it on every later check. It is the one source that knows which four screens a person actually opens every morning, which no amount of reading the source can work out. Nothing is kept until it has been walked twice against the same build: anything that differs between those two walks is noise, not a step, and the recording is refused with the reason. Passwords and tokens are taken out on the way to the file. Proved end to end on a two-page site — break the second page and the journeys read out of the code say "nothing that worked has changed", because nothing in the source names that page; the recorded session names the sentence that changed. |
 | Android APKs on an emulator | **The adapter is here.** It reads everything the APK declares with nothing installed and no Java, and where there is an emulator it installs one build at a time and walks it. Whether *this* machine can run one is a separate question, and `doctor` asks the adapter itself rather than keeping a second opinion — most of what it wants installs with a command; accepting Google's licence, once, needs a person. Two emulator snapshots restoring byte-identically is unproven, so Android compares against the stored record and says which mode it used. |
 | The iOS simulator | **The adapter is here.** It reads what the app bundle declares with nothing running, and where Xcode and a simulator runtime are present it installs one build at a time, boots it and reads what is on the screen. It is new. Paired running costs two `xcodebuild` passes, so it is for before a release rather than for every edit, and like Android it compares against the stored record and says which mode it used. Ask `doctor` what it is actually covering on your machine before trusting a clean run. |
 | Native Windows GUI (a real Win32 app, not an Electron one) | **Works,** and it has now been driven end to end: a real Win32 window on a Windows 11 desktop reached over ssh, 10 addresses read out of the UI Automation tree, a reference cut, and the next run compared against it. Nothing was installed on that machine — the program that reads the screen is sent down the connection each run. Windows shows one desktop, so two builds can never run at once: the comparison is genuinely weaker here than anywhere else, and a run says so rather than hiding it. |
+| Native Mac GUI (a Swift or Objective-C app, not an Electron one) | **Works,** and it has been driven end to end on a real Mac: two builds of an AppKit app differing by one line, 75 addresses read out of the Accessibility API each, and exactly the one changed checkbox reported. Nothing is installed — the program that reads the screen is JavaScript handed to macOS's own `osascript`. One person has to allow it once under System Settings, Privacy & Security, Accessibility; macOS will not let any program grant itself that. One build at a time: two copies of one Mac app make one of them stop answering, which looks exactly like an app with no controls, so every read is cross-checked against the window server's own list. |
+| Native Linux desktop GUI (GTK or Qt, not an Electron one) | **Works,** and it has been driven end to end: a real GTK window on an Ubuntu 24.04 desktop reached over ssh, every control read out of the accessibility bus every screen reader already uses, two runs of one build with zero unstable addresses, then a build with one checkbox ticked and one button disabled reported as exactly two differences and nothing else. Nothing was installed on that machine. A desktop shows one screen, so two builds can never run at once. A machine with nobody logged in has no accessibility bus at all, and is told so rather than reported as an app with no controls. |
 
-All eight surfaces — command-line tools, libraries, servers, websites, Electron,
-Android, iOS and native Windows — have now actually been run against a real
+All ten surfaces — command-line tools, libraries, servers, websites, Electron,
+Android, iOS, native Windows, native Linux and native Mac — have now actually been run against a real
 product, rather than only having an adapter and tests. That sentence was not true
 before 2026-08-31, and the four that were unproven each turned out to have at
 least one defect that only running them could find.
@@ -283,15 +285,59 @@ under instrumentation → recorded real sessions → the agent exploring one nam
 gap and freezing it into a replayable file → never a person clicking through an
 app.
 
-What is wired into `staysfixed check` today is the first of those, a journeys file
-you point it at, and — when you ask for it — the project's own test suite. Each
-adapter reads your source and offers the journeys it can walk: routes, commands,
-screens, message channels. `--journeys <file>` names steps by hand. `--journeys
-suite` runs each test file twice inside the scratch copy, reports every check by
-name, and stops after 90 seconds naming every file it did not reach. Recorded
-sessions and the flake register are written and tested in `src/v2/journeys/`, and
-**nothing on the check path calls them yet**. Saying so is the point: a feature
-that exists in the repository and not in the run is not a feature you have.
+Each adapter reads your source and offers the journeys it can walk: routes,
+commands, screens, message channels. `--journeys <file>` names steps by hand.
+`--journeys suite` runs each test file twice inside the scratch copy, reports every
+check by name, and stops after 90 seconds naming every file it did not reach.
+`--journeys recorded` walks the sessions you made with `staysfixed record` — the
+one source that knows how a person actually uses the product, because every other
+one worked it out by reading, and reading only ever finds which doors exist, never
+which four somebody opens every morning. A recording is walked twice against the
+same build before it is kept, and refused with the reason if the two walks
+disagree. The flake register is written and tested and **nothing on the check path
+calls it yet**. Saying so is the point: a feature that exists in the repository and
+not in the run is not a feature you have.
+
+### Recording the session you actually perform
+
+```
+staysfixed record the-morning-round
+staysfixed check --journeys recorded
+```
+
+The first command opens your product, follows what you do in it, and writes the
+session into `.staysfixed/journeys/`. Close the window when you are done. Commit
+the file: it is the promise, not the evidence.
+
+It is the answer to the one thing reading your source can never do. The code says
+which doors exist; it never says which four you open every morning, in which
+order, with what in the boxes. Tell it once and it is checked for ever. On a
+two-page site whose second page is named nowhere in the source, breaking that page
+reports **nothing** through the journeys read out of the code — the run says
+"nothing that worked has changed" — and the recorded session names the sentence
+that changed.
+
+Nothing is kept until it repeats. The session is walked twice against the same
+build, by the same walker a later check uses, before a byte of it reaches the
+disk; if the two walks disagree about what exists, or it could not get through its
+own steps, it is refused and told why. A journey that argues with itself goes red
+on somebody else's laptop for no reason, and a check nobody trusts is worse than
+no check.
+
+Two details worth knowing. Passwords, tokens, card numbers and one-time codes are
+taken out on the way to the file, and the count of what was hidden is written into
+it. And a page move that a click caused is **not** written down as a step — a
+journey that clicked a link and then opened that address would open the second
+page whether or not the link still worked, which is exactly the false all-clear
+this tool exists to never give.
+
+Two limits, said plainly. `staysfixed record` follows you around a **web** app, in
+a browser of the tool's own; nothing yet follows your hands around a desktop or a
+phone, though `--journeys recorded` walks a recording of whatever surface its file
+names. And a recorded journey is the weakest of the sources — one path somebody
+happened to take, which goes stale when the interface moves — so anything reachable
+from your code or your test suite should come from there instead. Before a run
+walks one, it says by name what in it may not replay.
 
 ## Keeping it quiet
 
@@ -955,6 +1001,13 @@ Honestly, so you know before you invest an afternoon.
   It earns the ask: take the penny-rounding out of a `total()` and the product's
   own output does not move by one character — the discovered journeys say nothing
   has changed, and the harvest names the check that turned red.
+- **A recorded session is the weakest of the sources, and it says so.** It is one
+  path somebody happened to take, and it goes stale the moment the interface it
+  describes moves — so anything reachable from the code or from your test suite
+  comes from there instead. Before a run walks one it says what in it may not
+  replay, by name. What it buys is the one thing the other sources cannot reach:
+  the way a person actually uses the product, which no amount of reading can work
+  out.
 - **No hosted service, no dashboard, no accounts, no teams, nothing paid.** It is
   a command and a folder of files in your repository.
 - **Pictures still do not travel between operating systems.** Text is drawn

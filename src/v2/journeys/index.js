@@ -33,7 +33,7 @@ import path from 'node:path';
 import { measureWobble } from '../observation.js';
 import { journeysFromCode } from './from-routes.js';
 import { DEFAULT_HARVEST_BUDGET_MS, harvestJourneys, testsNear } from './from-suite.js';
-import { loadJourneyFolder, whatWillNotReplay } from './record.js';
+import { RECORDINGS_DIR, loadJourneyFolder, whatWillNotReplay } from './record.js';
 
 /** @typedef {import('../types.js').Journey} Journey */
 /** @typedef {import('../types.js').JourneySource} JourneySource */
@@ -47,7 +47,7 @@ import { loadJourneyFolder, whatWillNotReplay } from './record.js';
 
 export { journeysFromCode, journeysFromDoors, irreversibility } from './from-routes.js';
 export { detectRunner, harvestJourneys, listTestFiles, testsNear, DEFAULT_HARVEST_BUDGET_MS } from './from-suite.js';
-export { startRecording, recordSession, saveJourneys, loadJourneys, loadJourneyFolder, redact } from './record.js';
+export { startRecording, recordSession, saveJourneys, loadJourneys, loadJourneyFolder, redact, RECORDINGS_DIR } from './record.js';
 
 /**
  * A journey with everything this folder knows about where it came from.
@@ -508,7 +508,7 @@ export async function gather(opts) {
 
   // ---- recorded sessions ---------------------------------------------------
   if (opts.recorded !== false) {
-    const dir = opts.recorded?.dir ?? path.join(root, '.staysfixed', 'journeys');
+    const dir = opts.recorded?.dir ?? path.join(root, RECORDINGS_DIR);
     const loaded = await loadJourneyFolder(dir);
     for (const journey of loaded.journeys) {
       const willNotReplay = whatWillNotReplay(journey);
