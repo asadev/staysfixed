@@ -55,6 +55,15 @@ const run = promisify(execFile);
  * @property {{file: string, header: string}|null} hunk
  * @property {number} checked      How many of the finding's differences were re-checked.
  * @property {number} disappeared  How many of them went away.
+ * @property {number} reran        How many journeys were actually walked again. Zero means
+ *                                 nothing was measured at all — no build was started, no
+ *                                 journey was walked, and whatever this says is not a
+ *                                 measurement. On 2026-08-31 a `prove` on a real website
+ *                                 came back in five seconds, with zero server starts in the
+ *                                 run log, wearing the same sentence as a real eleven-minute
+ *                                 measurement. This number is what tells the two apart, so
+ *                                 it is carried on every answer this file gives, including
+ *                                 the ones it gives from the catch block.
  * @property {string} [why]        Why it could not be tested, when it could not.
  * @property {ChangedHunk[]} [candidates]  Hunks it could have tested, when it could not choose.
  * @property {string} [worktree]   Where it ran, when `keep` was asked for.
@@ -170,6 +179,14 @@ export async function proveCause(finding, opts) {
   // verdict; `gitQuiet` hands back whether it worked and nothing used to look.
   /** @type {{proof: CauseProof|null}} */
   const held = { proof: null };
+  // How many journeys have actually been walked again by the time anything answers.
+  //
+  // Held out here, rather than inside the try, because the catch block below answers with
+  // `cannot()` and that answer has to say whether any measuring happened. A throw halfway
+  // through the second of three journeys is a genuinely different thing from a throw before
+  // the scratch checkout existed, and until 2026-08-31 both came back wearing the same
+  // sentence as a full eleven-minute measurement.
+  const walked = { count: 0 };
   /**
    * @param {CauseProof} p
    * @returns {CauseProof}
@@ -212,6 +229,7 @@ export async function proveCause(finding, opts) {
       return done(cannot(
         `${notCarried.length} new ${notCarried.length === 1 ? 'file' : 'files'} could not be copied into the scratch checkout: ${notCarried.join('; ')}. Anything that went away in a copy missing those files would have gone away for the wrong reason, so nothing is claimed here.`,
         hunk,
+        walked.count,
       ));
     }
 
@@ -230,6 +248,7 @@ export async function proveCause(finding, opts) {
         return done(cannot(
           `That change could not be undone on its own: ${undone.why}. It probably overlaps another change in the same place.`,
           hunk,
+          walked.count,
         ));
       }
     }
@@ -257,6 +276,9 @@ export async function proveCause(finding, opts) {
       });
       const settled = opts.normalise ? opts.normalise(capture) : capture;
       without.set(journey.name, indexByPath(settled.observations));
+      // Counted AFTER the walk returns, never before it starts. A journey that threw halfway
+      // was not walked, and saying it was is how "could not test" starts sounding measured.
+      walked.count += 1;
     }
 
     const differences = finding.differences;
@@ -292,22 +314,23 @@ export async function proveCause(finding, opts) {
           : partly
             ? `Undoing that one change in ${hunk.file} took away every address that could be re-walked.${unseen} So this is not proved: what was not walked may be the half that matters.`
             : proved
-              ? `Undoing that one change in ${hunk.file} made this go away. It is yours, and it is explained.`
+              ? `Undoing that one change in ${hunk.file} made this go away. It is yours, and it is explained. That rests on real work: ${walked.count} ${walked.count === 1 ? 'journey was' : 'journeys were'} walked again with the change undone, and ${rechecked.length === 1 ? 'the one address that was re-checked matched' : `all ${rechecked.length} re-checked addresses matched`} the old build again.`
               : disappeared > 0
                 ? `Undoing that change in ${hunk.file} took away ${disappeared} of the ${rechecked.length} addresses that were re-checked and left ${rechecked.length - disappeared} exactly as ${rechecked.length - disappeared === 1 ? 'it was' : 'they were'}. So that change explains part of this and not the rest, and the rest has another cause nothing has looked for yet. It is not covered by undoing that one change.${unseen}`
-                : `This is still here with that change undone, so ${hunk.file} is not what caused it. Something else did, and nothing knows what yet.${unseen}`,
+                : `This is still here with that change undone, so ${hunk.file} is not what caused it. Something else did, and nothing knows what yet. That was measured, not assumed: ${walked.count} ${walked.count === 1 ? 'journey was' : 'journeys were'} walked again without your change and ${rechecked.length === 1 ? 'the one address that was re-checked still differed' : `all ${rechecked.length} re-checked addresses still differed`}.${unseen}`,
       hunk: { file: hunk.file, header: hunk.header },
       // What was actually re-walked. It used to be every difference in the finding, including
       // the ones no journey ever went near, so the number said the work had been done.
       checked: rechecked.length,
       disappeared,
+      reran: walked.count,
     };
     if (notRechecked > 0) result.why = unseen.trim();
     if (opts.keep === true) result.worktree = tree;
     if (events) events.emit({ type: 'proof:done', at: events.elapsed(), message: result.what });
     return done(result);
   } catch (e) {
-    return done(cannot(messageOf(e), hunk));
+    return done(cannot(messageOf(e), hunk, walked.count));
   } finally {
     // Even when it throws. A leftover worktree makes the next `git status`
     // confusing and the one after that frightening — and until 2026-08-30, if the removal
@@ -449,20 +472,38 @@ function sameFile(a, b) {
 }
 
 /**
+ * "I could not test this" — which is a third answer, not a soft version of the second one.
+ *
+ * The `what` sentence says out loud whether anything was re-walked, because the number
+ * alone travels badly. On 2026-08-31 the facade in src/v2/check.js forwarded only
+ * `{gone, verdict, escalates, detail}` to the MCP surface, so a caller reading `detail`
+ * had no way to know that the five-second answer in front of it had started no build and
+ * walked no journey. A fact that matters this much belongs in the sentence as well as in
+ * the field, so that it survives every surface that only passes the words along.
+ *
  * @param {string} why
  * @param {ChangedHunk|null} hunk
+ * @param {number} [reran]  Journeys walked again before this gave up. Usually none — but the
+ *                          catch block in `proveCause` reaches here AFTER a walk may already
+ *                          have happened, and claiming "nothing was re-run" there would be
+ *                          its own small lie.
  * @returns {CauseProof}
  */
-function cannot(why, hunk) {
+function cannot(why, hunk, reran = 0) {
+  const measured =
+    reran === 0
+      ? ' Nothing was re-run: no build was started and no journey was walked again, so nothing here is a measurement of your product.'
+      : ` ${reran} ${reran === 1 ? 'journey was' : 'journeys were'} walked again before this gave up, and that work proved nothing either way.`;
   return {
     verdict: 'could not test',
     // Not proven either way is not the same as proven innocent, and it must
     // never be reported as if it were.
     escalates: false,
-    what: `This could not be tested by undoing a change. ${why}`,
+    what: `This could not be tested by undoing a change, so your edit is neither cleared nor blamed. ${why}${measured}`,
     hunk: hunk ? { file: hunk.file, header: hunk.header } : null,
     checked: 0,
     disappeared: 0,
+    reran,
     why,
   };
 }

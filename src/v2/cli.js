@@ -259,7 +259,7 @@ export const V2_COMMANDS = {
     summary: 'Test whether your own edit really caused a finding, by undoing it.',
     usage: 'staysfixed prove <finding> --revert <file> [--revert <file>]',
     describe:
-      'You believe your change to a particular file caused a difference. This puts that file\nback to the reference build, runs again, and says whether the difference went away.\nIf it survives, your edit did not cause it and you were about to fix the wrong thing.\n\nNothing is left reverted: the working tree is put back exactly as it was.\n\nIt answers 0 when it could test the claim and 2 when it could not. The answer itself —\ncaused it, or did not — is in the words, not the exit code, because "your edit was\ninnocent" is not a failure and must not be read as one.',
+      'You believe your change to a particular file caused a difference. This puts that file\nback to the reference build, runs again, and says whether the difference went away.\n\nIt gives you one of THREE answers, and only two of them are answers:\n  PROVEN CAUSED      undoing your change made the difference go away.\n  PROVEN NOT CAUSED  it was re-run without your change and the difference is still there,\n                     so you were about to fix the wrong file.\n  NOT TESTED         nothing was measured — the file you named was not among your changes,\n                     the old build would not build, or nothing was re-run at all. This\n                     never means your edit is innocent. It means nobody looked.\n\nIt is a real re-run, not a lookup: expect it to take about as long as a check.\nNothing is left reverted: the working tree is put back exactly as it was.\n\nIt answers 0 when it could test the claim and 2 when it could not. Which way it came out —\ncaused it, or did not — is in the words, not the exit code, because "your edit was\ninnocent" is not a failure and must not be read as one.',
     options: [
       ['--revert <file>', 'A file to put back to the reference for one run. Repeat it for several.'],
     ],
@@ -475,8 +475,26 @@ export async function proveRun(ctx) {
     });
   }
 
+  // The price, said before it is charged rather than after.
+  //
+  // Proving a cause is not a lookup. It checks out the old build into a scratch copy, undoes
+  // the one change, and WALKS THE JOURNEYS AGAIN - on a real website that is eleven to
+  // twenty minutes, and somebody who thinks they typed a query sits watching a blank screen
+  // and kills it. On 2026-08-31 the opposite also happened and is worse: an answer came back
+  // in five seconds, having started no build and walked nothing, and read exactly like a
+  // measurement. Saying what this is about to cost is half of what stops a fast reply being
+  // mistaken for a cheap one - the reply itself now says what it actually ran.
+  say(paint.grey(`Undoing ${revert.join(', ')} in a scratch copy and walking this product again. That is a full re-run of the journeys this finding came from, so it costs about what a check costs. Nothing of yours is touched and nothing is left reverted.`));
+  blank();
+
   const reply = await askTheToolSet(ctx, 'staysfixed_prove', { finding, revert });
   sayReply(reply);
+  // Non-zero means "could not test", never "your edit was innocent". `staysfixed_prove`
+  // marks exactly one of its three answers as an error - the one that is not an answer -
+  // which is the promise this command's own help has always made: 0 when it could test the
+  // claim, 2 when it could not. Until 2026-08-31 it exited 0 on all three, so a CI step or
+  // an agent reading the code alone was told a question nobody had answered had come back
+  // clean.
   return reply.isError ? EXIT.error : EXIT.ok;
 }
 

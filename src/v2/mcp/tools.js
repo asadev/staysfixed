@@ -538,7 +538,10 @@ export function toolDefinitions() {
       title: 'Prove what caused it',
       annotations: behaves({ title: 'Prove what caused it' }),
       description:
-        'Test a causal claim by undoing a change and running again. You believe your edit to a particular file caused a finding: this puts that file back to the reference, re-runs, and tells you whether the difference went away. If it survives the revert, your edit did not cause it and you were about to fix the wrong thing. Nothing is left reverted.',
+        'Test a causal claim by undoing a change and running again. You believe your edit to a particular file caused a finding: this puts that file back to the reference, re-runs, and tells you whether the difference went away. ' +
+        'It answers one of THREE things, and only two of them are answers: PROVEN CAUSED (undoing it made the difference go away), PROVEN NOT CAUSED (it was re-run without your change and the difference is still there, so you were about to fix the wrong file), ' +
+        'and NOT TESTED (nothing was measured - the file you named was not among the changes, the old build would not build, or nothing was re-run at all). NOT TESTED never means your edit is innocent; it means nobody looked, and it comes back as an error so it cannot be mistaken for a clean answer. ' +
+        'Proving costs a full re-run of the affected journeys - roughly what a check costs - because that is the only thing that settles it. Nothing is left reverted.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1512,6 +1515,22 @@ async function toolExplain(ctx, input) {
   } else if (deep && typeof deep.text === 'string') {
     out.push('');
     out.push(deep.text);
+  } else {
+    // The deep half is missing and nothing above says so.
+    //
+    // Same shape as the `prove` defect measured on 2026-08-31: a reply that is complete on
+    // its face while a whole half of it was never fetched. Everything above comes from the
+    // stored finding, which this surface can always read; the full list of addresses with
+    // both values comes from the engine, and when the engine cannot be loaded, or has no
+    // `explain` in it, the reply simply ended early and read as the whole answer. A reader
+    // has no way to tell "this is all there is" from "the rest could not be fetched", so it
+    // is said out loud rather than left to be inferred from an absence.
+    out.push('');
+    out.push(
+      engine.parts.explain
+        ? 'The engine returned nothing for this finding, so everything above comes from the stored record of the check and the full side-by-side values are missing. This is not the whole answer.'
+        : `This copy of Stays Fixed has no difference engine to ask, so everything above comes from the stored record of the check alone - the full list of addresses with both values is missing. This is not the whole answer. ${voice.isPerson ? 'Run' : 'Call'} ${voice.capabilities} for what this copy can do.`
+    );
   }
 
   content.push({ type: 'text', text: out.join('\n') });
@@ -1570,7 +1589,10 @@ async function toolProve(ctx, input) {
     return engineMissing(
       engine,
       'prove',
-      'prove({cwd, configFile, finding, revert}) returning {gone: boolean, detail?: string}. src/v2/cause.js already has proveCause(), but it takes an engine-internal finding and a loaded project, which this surface does not have - a small facade in src/v2/check.js is all that is needed.',
+      'prove({cwd, configFile, finding, revert}) returning {verdict: "caused by that change"|"not caused by that change"|"could not test", detail?: string, reran?: number, checked?: number, escalates?: boolean}. ' +
+      'The verdict has to be all three of those, not a boolean: "could not test" is a third outcome and reporting it as "not caused" is a false all-clear (measured 2026-08-31). ' +
+      '`reran` and `checked` are what let this reply say whether anything was actually run, so a five-second answer cannot pass for an eleven-minute one. ' +
+      'src/v2/cause.js already has proveCause() returning exactly that shape, but it takes an engine-internal finding and a loaded project, which this surface does not have - a small facade in src/v2/check.js is all that is needed.',
       voice
     );
   }
@@ -1586,23 +1608,174 @@ async function toolProve(ctx, input) {
 
   /** @type {any} */
   const result = (await run({ cwd: ctx.root, finding: id, revert })) ?? {};
-  const gone = result.gone === true;
+
+  // THREE OUTCOMES, THREE SENTENCES. Only two of them are answers.
+  //
+  // Until 2026-08-31 this branched on `result.gone === true` and printed one of two
+  // paragraphs, so everything that was not a proof came out as the confident denial "Your
+  // edit did not cause this, so fixing that file will not help." Measured on a real website
+  // that day: a one-line heading change that had definitely caused the finding was told it
+  // was innocent; naming a completely unrelated file produced the word-for-word identical
+  // denial; and a file that does not exist produced it too. All three came back in about
+  // five seconds, on a project where a real check takes eleven to twenty minutes, and the
+  // run log recorded zero server starts. Nothing had been re-run at all.
+  //
+  // `src/v2/cause.js` had the third outcome the whole time — its `cannot()` path carries a
+  // comment saying "not proven either way is not the same as proven innocent, and it must
+  // never be reported as if it were" — and this is the surface that was reporting it as if
+  // it were. So the verdict is read here, not re-derived from a boolean that cannot carry
+  // three states.
+  const verdict = verdictOf(result);
 
   /** @type {string[]} */
   const out = [];
-  if (gone) {
-    out.push(`PROVEN: your change caused it. With ${revert.join(', ')} put back, this matched the reference again.`);
-    out.push(`  ${trim(f.title, 200)}`);
-    out.push('So it is yours to fix - or to record as intended, if that is genuinely what you meant and it is not sealed.');
-  } else {
-    out.push(`NOT PROVEN: it survived the revert. With ${revert.join(', ')} put back, this was still different.`);
-    out.push(`  ${trim(f.title, 200)}`);
-    out.push('Your edit did not cause this, so fixing that file will not help. Something else did, or it was already broken before you started.');
-  }
-  if (result.detail) out.push('', trim(String(result.detail), 600));
-  out.push('', 'The working tree has been put back exactly as it was.');
+  const files = revert.join(', ');
+  const title = `  ${trim(f.title, 200)}`;
+  // How much real work the answer rests on, when the engine says. `reran` counts journeys
+  // actually walked again; `checked` counts the finding's addresses that were re-measured.
+  // Both are absent when the facade in src/v2/check.js does not forward them, and an absent
+  // number is never guessed at - it simply goes unsaid.
+  const reran = positive(result.reran);
+  const checked = positive(result.checked);
 
-  return { content: [{ type: 'text', text: out.join('\n') }] };
+  if (verdict === 'caused by that change') {
+    out.push(`PROVEN CAUSED: your change caused it. With ${files} put back, this matched the reference again.`);
+    out.push(title);
+    out.push(measuredLine(reran, checked, 'and the difference went away'));
+    out.push('So it is yours to fix - or to record as intended, if that is genuinely what you meant and it is not sealed.');
+  } else if (verdict === 'not caused by that change') {
+    out.push(`PROVEN NOT CAUSED: it was re-run with your change undone and the difference is still there.`);
+    out.push(title);
+    out.push(measuredLine(reran, checked, 'and the difference survived'));
+    out.push(`So putting ${files} back does not fix this, and fixing that file will not either. Something else caused it, and nothing knows what yet - this finding is louder now, not quieter.`);
+  } else {
+    // The one that must never sound like the one above it. It says what it is, why, what it
+    // is NOT, and what would actually settle the question.
+    out.push(`NOT TESTED: this was not proved either way. Nobody looked.`);
+    out.push(title);
+    out.push('');
+    const why = trim(dropRepeatedTail(String(result.detail ?? 'The engine did not say why.')), 600);
+    out.push(`Why: ${why}`);
+    out.push('');
+    // The re-run fact, said once. `cause.js` writes it into its own sentence so that it
+    // survives a facade that forwards only the words, so when it is already in `why` there
+    // is nothing to add - and adding a vaguer version underneath ("nothing here says how
+    // much was re-run") would contradict the specific one directly above it.
+    const rerunLine =
+      reran === 0
+        ? 'Nothing was re-run: no build was started and no journey was walked again, so no part of this reply is a measurement of your product.'
+        : reran !== null
+          ? `${reran} ${reran === 1 ? 'journey was' : 'journeys were'} walked again and it still settled nothing.`
+          : /re-run|walked again/i.test(why)
+            ? ''
+            : 'Nothing here says how much was re-run, so do not read any of this as a measurement.';
+    if (rerunLine) out.push(rerunLine);
+    out.push(`This is NOT "your edit did not cause it". ${files} has not been cleared - it was never tested. Keep suspecting it.`);
+    out.push(`To get a real answer: ${voice.isPerson ? 'run' : 'call'} ${voice.check} so there is a fresh run to work from, then ${explainThis(voice, id)} to see which files this finding actually sits near, and name one you really changed.`);
+  }
+
+  if (verdict !== 'could not test' && result.detail) out.push('', trim(dropRepeatedTail(String(result.detail)), 600));
+  out.push('', 'Nothing was left reverted. The working tree is exactly as it was.');
+
+  return {
+    content: [{ type: 'text', text: out.join('\n') }],
+    structuredContent: { finding: id, verdict, reverted: revert, reran, checked, escalates: result.escalates === true },
+    // "Could not test" answers non-zero on purpose, and the CLI's own help has promised
+    // exactly this since the command existed: "It answers 0 when it could test the claim and
+    // 2 when it could not." It exited 0 instead. An agent - or a CI step - that reads a zero
+    // as "asked and answered" is the false all-clear this tool exists to prevent, so the one
+    // outcome that is not an answer is the one outcome that does not come back clean.
+    isError: verdict === 'could not test',
+  };
+}
+
+/**
+ * How this reader asks to see THIS finding in full.
+ *
+ * `voice.explainCall` is a worked example carrying the made-up id f-a1b2c3, which is right
+ * where the point is to show the shape of a call and wrong the moment the sentence is about
+ * a finding that has a real id. Telling somebody to run `staysfixed explain f-a1b2c3` about
+ * finding f-15365c reads as a copy-and-paste slip and sends them to look up an id that does
+ * not exist.
+ *
+ * @param {Voice} voice
+ * @param {string} id
+ * @returns {string}
+ */
+function explainThis(voice, id) {
+  return voice.isPerson ? `\`staysfixed explain ${id}\`` : `staysfixed_explain { "finding": "${id}" }`;
+}
+
+/**
+ * Which of the three this is, refusing to invent the difference between two of them.
+ *
+ * The engine's own three-state verdict is used whenever it is there. When it is not - an
+ * older facade, or one that only ever returned `{gone: boolean}` - a `false` is genuinely
+ * ambiguous: it means either "measured, and your edit is innocent" or "could not measure".
+ * Those are the two this whole defect confused, so the unknown resolves to the one that
+ * claims nothing. Reporting "could not test" about something that was really tested costs
+ * somebody one more command; reporting "your edit did not cause this" about something
+ * nobody measured sends them to fix the wrong file, which is what happened on 2026-08-31.
+ *
+ * @param {any} result
+ * @returns {'caused by that change'|'not caused by that change'|'could not test'}
+ */
+function verdictOf(result) {
+  const said = typeof result?.verdict === 'string' ? result.verdict : null;
+  if (said === 'caused by that change' || said === 'not caused by that change' || said === 'could not test') return said;
+  if (result?.gone === true) return 'caused by that change';
+  return 'could not test';
+}
+
+/**
+ * One line saying what the verdict above actually rests on.
+ *
+ * A verdict with no measurement behind it reads exactly like one with eleven minutes behind
+ * it, which is how a five-second reply passed for a check of a whole website. When the
+ * numbers are not forwarded this says so plainly rather than inventing a reassuring one.
+ *
+ * @param {number|null} reran    Journeys walked again.
+ * @param {number|null} checked  Addresses re-measured.
+ * @param {string} outcome       What happened to the difference, in a few words.
+ * @returns {string}
+ */
+function measuredLine(reran, checked, outcome) {
+  if (reran === null && checked === null) return `That was measured by running it again, ${outcome}.`;
+  const bits = [];
+  if (reran !== null) bits.push(`${reran} ${reran === 1 ? 'journey' : 'journeys'} walked again`);
+  if (checked !== null) bits.push(`${checked} ${checked === 1 ? 'address' : 'addresses'} re-measured`);
+  return `Measured, not assumed: ${bits.join(', ')}, ${outcome}.`;
+}
+
+/**
+ * Drop a sentence the engine handed over twice.
+ *
+ * `prove` in src/v2/check.js builds its detail as `${proof.what} ${proof.why}`, and
+ * `proof.what` already ends with `why` - so every "could not test" arrived with its reason
+ * printed twice in a row. That is only noise, but a reply that visibly repeats itself is a
+ * reply people stop reading closely, and this one is asking to be read closely.
+ *
+ * @param {string} detail
+ * @returns {string}
+ */
+function dropRepeatedTail(detail) {
+  const s = detail.trim();
+  // Walk back from the end looking for a tail that already appeared earlier in the string.
+  // Only whole trailing sentences of real length count, so ordinary repeated words - "the
+  // change", "this file" - are never mistaken for a duplicated reason.
+  for (let cut = Math.floor(s.length / 2); cut >= 30; cut -= 1) {
+    const tail = s.slice(s.length - cut).trim();
+    if (tail.length < 30) break;
+    if (s.slice(0, s.length - cut).includes(tail)) {
+      const kept = s.slice(0, s.length - cut).trim();
+      // The cut can land one character inside the sentence that is being KEPT, because the
+      // repeated tail often starts at ". " and the full stop it takes belongs to the line
+      // before it. Losing it leaves the reason ending mid-air, which reads like the text was
+      // truncated - the one impression this particular reply must never give.
+      return /[.!?]$/.test(kept) ? kept : `${kept}.`;
+    }
+  }
+  return s;
 }
 
 // ---------------------------------------------------------------------------
