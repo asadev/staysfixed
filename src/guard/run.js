@@ -29,6 +29,7 @@ const FRESH_KEY = 'fresh';
  * @typedef {import('../types.js').GuardResult & {
  *   retriedToPass?: boolean,
  *   assertedNothing?: boolean,
+ *   timedOut?: boolean,
  *   checks?: import('../types.js').CheckStep[],
  * }} GuardRunResult
  */
@@ -38,6 +39,8 @@ const FRESH_KEY = 'fresh';
  * @property {boolean} ok
  * @property {string} [message]
  * @property {string} [failedAt]
+ * @property {boolean} [timedOut]  The clock ran out before the guard answered. Not the same
+ *                                 as the answer being no — see the note on the result below.
  */
 
 /** @typedef {(step: import('../types.js').CheckStep) => void} StepSink */
@@ -166,6 +169,24 @@ export async function runGuards(project, app, guards, opts = {}) {
         `This guard checked nothing. Its \`run()\` finished without asking a single question, so it cannot fail ` +
         `and it is not protecting anything — it would report "still holds" every day for ever. ` +
         `Give it at least one \`expect(...)\`. ${guard.because ? `What it is meant to protect: ${guard.because}` : ''}`.trim();
+    } else if (outcome.timedOut) {
+      // A third thing wearing the same status, for the same reason as the second one.
+      // Measured on 2026-08-31 against a healthy shop with three guards — one genuinely broken,
+      // one whose `run()` slept six seconds against its own limit of one and a half: the run
+      // announced "2 guards failed — bugs that were already fixed are back." One bug was back.
+      // The other guard was never answered, and somebody reading that line goes hunting a
+      // regression in checkout that never happened. Running out of time is the guard failing to
+      // report, not the product failing — the same distance as "nothing changed" from "nothing
+      // was compared".
+      //
+      // The status stays 'failed' on purpose. A question nobody got an answer to must never
+      // count as a pass, or a stuck guard becomes the quietest way there is to go green. The
+      // flag is what lets the words be right without letting the verdict go soft.
+      result.timedOut = true;
+      result.message = outcome.message ?? 'This guard ran out of time before it answered.';
+      // The story of the original bug is deliberately left off. It is printed beside every
+      // failure to say whether the failure matters — and here nothing yet says the bug is
+      // back, so leading with its story is the exact wrong impression to give.
     } else if (outcome.ok) {
       // Passing only on the second go is not passing. The flake register picks
       // this up and condemns the guard, because a guard nobody trusts is worse
@@ -307,8 +328,23 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
         message: `This should still be true, and it is not: "${error.claim}".${consoleNote(app)}`,
       };
     }
+    // Out of time is its own answer, and it is not "no". The guard was still going when the
+    // clock stopped, so all anyone knows is that nobody asked it anything it managed to
+    // finish. Said in those words rather than as a returned bug.
+    if (error instanceof TookTooLong) {
+      return {
+        ok: false,
+        timedOut: true,
+        message:
+          `This guard ran out of time after ${humanSeconds(timeoutMs)} and never gave an answer, so nothing ` +
+          `here says the bug is back — only that the guard could not be asked. Either it genuinely needs ` +
+          `longer than its own \`timeoutMs\`, or it is waiting for something that never arrives. ` +
+          `Its \`run()\` was left going when the clock stopped, so anything odd in the guards after it ` +
+          `may be this one still moving around.${consoleNote(app)}`,
+      };
+    }
     const raw = error instanceof Error ? error.message : String(error);
-    return { ok: false, message: `${explainApiSlip(raw, app.page, project)}${consoleNote(app)}` };
+    return { ok: false, message: `${explainApiSlip(plainly(raw), app.page, project)}${consoleNote(app)}` };
   } finally {
     // The losing side of the race keeps running otherwise, and a stray timer
     // holds the process open long after the run is reported.
@@ -364,6 +400,65 @@ export function explainApiSlip(raw, page, project) {
     `A guard is given one object — call it \`app\` — with ${onApp.map((n) => `\`${n}()\``).join(', ')}. ` +
     'The whole page is `app.page`. There is a worked example in `examples/guards/`.'
   );
+}
+
+/**
+ * Fragments that only ever come out of the debugging protocol talking to itself.
+ *
+ * Chrome's parameter reader answers in its own vocabulary — the byte it got stuck on, the
+ * name of an internal binding, a JSON-RPC error number. Measured on 2026-08-31: a guard that
+ * passed the wrong sort of value to `app.page.send` failed with `Invalid parameters (Failed to
+ * deserialize params.expression - BINDINGS: string value expected at position 19)` printed at
+ * the person as the whole explanation. Nothing in the bracket is about their app, their guard
+ * or their bug.
+ */
+const PROTOCOL_CHATTER = /Failed to deserialize|BINDINGS:|at position \d|-32\d{3}|"method"\s*:|"params"\s*:/;
+
+/** Past this a failure message stops being something anyone reads and starts being a wall. */
+const MAX_MESSAGE = 400;
+
+/**
+ * Say a failure in words, with the machinery's own muttering taken out.
+ *
+ * Three things had to go, all of them seen printed at somebody:
+ *
+ *  - **More than one line.** A stack trace, a browser library's "Call log" block or a dump of
+ *    the debugging protocol all arrive as one long message with newlines in it, and the
+ *    results table this sits inside is built of rows — the second line lands in the next
+ *    column and the table comes apart. The same lesson `explainApiSlip` above learned by
+ *    printing thirty method names inline.
+ *  - **The protocol's own diagnostics**, which Chrome hangs off the end in brackets.
+ *  - **`[object Object]`**, which is what a guard that throws something other than an error
+ *    turns into. It was, on its own, the entire reason given for a failing guard.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+export function plainly(raw) {
+  const text = String(raw ?? '').trim();
+
+  if (text === '' || text === '[object Object]' || text === '[object Undefined]') {
+    return (
+      'This guard threw something that is not an error, so there is no message to read. ' +
+      "Throw `new Error('what went wrong')`, or better, use `app.expect(...)` — it fails with the " +
+      'plain sentence you wrote, which is the sentence that gets printed.'
+    );
+  }
+
+  // One line. Everything after it is the machinery describing itself.
+  let line = text.split('\n')[0].trim();
+
+  // A whole protocol frame, pasted in as if it were a sentence.
+  if (/^[[{]/.test(line) && PROTOCOL_CHATTER.test(line)) {
+    return 'The app answered this guard with a raw debugging-protocol message rather than a result, so the guard could not finish.';
+  }
+
+  // Chrome's own diagnostics, bracketed on the end. Only dropped when the bracket really is
+  // protocol talk — plenty of failures put something useful in brackets.
+  line = line.replace(/\s*\([^()]*\)$/, (blob) => (PROTOCOL_CHATTER.test(blob) ? '' : blob)).trim();
+
+  if (line.length > MAX_MESSAGE) return `${line.slice(0, MAX_MESSAGE).trimEnd()}… (cut short)`;
+  return line;
 }
 
 /** A timeout, kept apart from a real error so the wording stays ours. */
@@ -423,6 +518,10 @@ function withStory(message, because) {
  */
 function humanSeconds(ms) {
   if (ms < 1000) return `${Math.round(ms)} milliseconds`;
-  const seconds = Math.round(ms / 1000);
+  // Rounded to whole seconds, `timeoutMs: 1500` came back as "did not finish within 2
+  // seconds" — a number the person cannot find anywhere in their own guard, which reads
+  // as the tool having waited longer than it did. One decimal place, so it matches what
+  // they typed: 1.5, 8, 30.
+  const seconds = Math.round(ms / 100) / 10;
   return seconds === 1 ? '1 second' : `${seconds} seconds`;
 }
