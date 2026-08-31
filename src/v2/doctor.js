@@ -196,7 +196,8 @@ export const CHANNELS = [
  * should be able to read it once and know what to call, what it will get back,
  * and what it must not bother asking for here.
  *
- * @param {{cwd?: string, configFile?: string, offline?: boolean, machines?: boolean}} [opts]
+ * @param {{cwd?: string, configFile?: string, offline?: boolean, machines?: boolean,
+ *   settingsText?: string}} [opts]
  * @returns {Promise<Capabilities>}
  */
 export async function capabilities(opts = {}) {
@@ -209,6 +210,19 @@ export async function capabilities(opts = {}) {
   // Measured on Terminal Deck: doctor reported "a built APK is still missing" with the APK
   // sitting two folders up, and told the agent to go and build one that was already there.
   const root = configFile ? rootForConfig(configFile) : cwd;
+
+  // The settings, as text, from whichever of the two places they live in.
+  //
+  // `init` is the second place. It works out what it is about to write and only then asks
+  // this function what the machine can do — so on a fresh project every question below was
+  // answered against NO settings at all, and the answers went straight into the readiness
+  // it printed. A plain Node command-line tool was told, by the same run that had just
+  // wired `node cli.js --help` into its settings, that it still needed "a command to run".
+  // Being sent to set up something the tool has already set up is how somebody decides this
+  // page is not worth reading. Measured 2026-08-31.
+  const settingsText = opts.settingsText ?? readTextOrNull(configFile);
+  const settingsAreJson = opts.settingsText ? false : configFile !== null && configFile.endsWith('.json');
+  const hasSettings = settingsText !== null;
 
   // The browser survey comes first because three different answers below depend
   // on it, and asking this machine the same question three times would be both
@@ -227,20 +241,12 @@ export async function capabilities(opts = {}) {
     isRepo(root).catch(() => false),
     findReference(root),
     whatThisCopyCanDrive(),
-    phoneApps(root, configFile),
-    askTheAdapters(root),
+    phoneApps(root, settingsText),
+    askTheAdapters(root, settingsText, settingsAreJson),
   ]);
 
-  /** @type {{commands: number, imports: number}} */
-  let wires = { commands: 0, imports: 0 };
-  if (configFile) {
-    try {
-      wires = whatTheProcessBlockWires(readFileSync(configFile, 'utf8'));
-    } catch {
-      wires = { commands: 0, imports: 0 };
-    }
-  }
-  const surfaces = describeSurfaces(tools, hosts, configFile !== null, browsers, desktopApp, drivers, phones, asked, wires);
+  const wires = settingsText ? whatTheProcessBlockWires(settingsText) : { commands: 0, imports: 0 };
+  const surfaces = describeSurfaces(tools, hosts, hasSettings, browsers, desktopApp, drivers, phones, asked, wires);
 
   /** @type {Capabilities} */
   const caps = {
@@ -263,7 +269,7 @@ export async function capabilities(opts = {}) {
     },
     surfaces,
     drivers,
-    covers: whatThisRunActuallyCovers(surfaces, configFile !== null),
+    covers: whatThisRunActuallyCovers(surfaces, hasSettings),
     browsers: {
       willOpen: browsers.chosen,
       borrowingYourOwn: browsers.borrowingHis,
@@ -884,21 +890,13 @@ function findDesktopApp(cwd) {
  * design turns on never doing that.
  *
  * @param {string} root
- * @param {string|null} configFile
+ * @param {string|null} settingsText
  * @returns {Promise<{android: FoundApp|null, ios: FoundApp|null}>}
  */
-async function phoneApps(root, configFile) {
-  /** @type {string} */
-  let settings = '';
-  if (configFile) {
-    try {
-      // Comments taken away first, for the same reason `findDesktopApp` does it: a
-      // commented-out `apk:` line is an example, not an Android app.
-      settings = withoutComments(readFileSync(configFile, 'utf8'));
-    } catch {
-      settings = '';
-    }
-  }
+async function phoneApps(root, settingsText) {
+  // Comments taken away first, for the same reason `findDesktopApp` does it: a
+  // commented-out `apk:` line is an example, not an Android app.
+  const settings = settingsText ? withoutComments(settingsText) : '';
 
   /**
    * @param {string} key
@@ -1074,9 +1072,12 @@ const ADAPTERS_THAT_ANSWER_FOR_THEMSELVES = ['android', 'ios', 'windows'];
  * take the rest of the answer with it.
  *
  * @param {string} root
+ * @param {string|null} [settingsText]   The settings as text — from disk, or from what
+ *                                       `init` is about to write.
+ * @param {boolean} [settingsAreJson]
  * @returns {Promise<Map<string, Need[]>>}
  */
-async function askTheAdapters(root) {
+async function askTheAdapters(root, settingsText = null, settingsAreJson = false) {
   /** @type {Map<string, Need[]>} */
   const out = new Map();
   /** @type {{adapters: {name: string, detect: (p: any) => Promise<any>}[]}} */
@@ -1090,10 +1091,9 @@ async function askTheAdapters(root) {
   /** @type {Record<string, any>} */
   let config = {};
   try {
-    const file = findConfigFile(root);
     // Read as text and parsed only when it is JSON. Doctor never runs a person's code to
     // answer a question about their machine, and a settings file may be JavaScript.
-    if (file && file.endsWith('.json')) config = JSON.parse(readFileSync(file, 'utf8'));
+    if (settingsText && settingsAreJson) config = JSON.parse(settingsText);
     // But "not JSON" was being treated as "says nothing", and `init` writes JavaScript — so
     // for almost every project every adapter was asked what it needs while being handed an
     // EMPTY config. It then asked for the very thing the settings already named: a project
@@ -1103,7 +1103,7 @@ async function askTheAdapters(root) {
     // The few values the adapters need to answer honestly are read out of the TEXT instead,
     // scoped to their own block so one block's `app` can never be read as another's. Still no
     // code is run, which was the whole point of the rule.
-    else if (file) config = { ...config, ...settingsFromText(readFileSync(file, 'utf8')) };
+    else if (settingsText) config = { ...config, ...settingsFromText(settingsText) };
   } catch {
     config = {};
   }
@@ -1421,6 +1421,24 @@ export function readHostProbe(name, alive, look) {
   const report = { name, reachable: true, how: 'it answered over ssh with the key you already have', windows: powershell !== undefined };
   if (powershell !== undefined) report.powershell = powershell;
   return report;
+}
+
+/**
+ * The settings as text, or null when there are none to read yet.
+ *
+ * Null and empty are different answers here. "There is no settings file" is what makes a
+ * surface unready; "the settings say nothing about this surface" is a different sentence.
+ *
+ * @param {string|null} file
+ * @returns {string|null}
+ */
+function readTextOrNull(file) {
+  if (!file) return null;
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 /**

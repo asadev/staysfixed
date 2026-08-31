@@ -8,6 +8,78 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.11.0] — 2026-08-31
+
+Twenty-six defects, closed by seven lanes working at once, each owning its own files and each
+required to reproduce the defect on a throwaway product before touching anything.
+
+### Fixed — it reported things as checked that were never checked
+
+- **A root-level server went unread the moment the project also had a `src/` folder.** The
+  source reader fell back to its own default folder list, so a four-route `server.js` sitting
+  at the root was never read at all. A deleted route and a 200 turning into a 500 both came
+  back "Nothing that worked has changed", exit 0.
+- **`ship` blessed a run in which every journey REFUSED.** It was not blocked — it ran to the
+  end — and it found no differences, because there was nothing to differ. So a product that
+  throws on its first line became the definition of working, and every later check compared
+  one refusal against another, found them equal, and reported it as fine. Worse on recovery:
+  fixing the product produced thirteen findings nobody caused. The gate now lives in
+  `shouldCut`, where every caller passes through it.
+- **A surface said "fully covered here" about a project that wires nothing.** The command-line
+  surface was hard-coded ready and never looked at the project.
+- **`init` said a library "can be checked here now" and is "covered in full"** about an
+  `index.js` that does not exist — the entry point was read from package.json and never
+  checked against the disk.
+
+### Fixed — false alarms, which cost trust just as fast
+
+- **A guard that ran out of time was reported as "a bug that was already fixed is back"** on a
+  healthy tree. A timeout means the question could not be ANSWERED, which is not the answer
+  being no — the same distinction this tool draws everywhere else.
+- **A guard was told it "did not finish within 2 seconds"** when its own limit was 1.5.
+- **Raw Chrome DevTools Protocol text** was printed at a person as the whole reason a guard
+  failed.
+
+### Fixed — the report disagreed with itself
+
+- **Two byte-identical runs produced different `coverage.gaps`** — different doors named, a
+  different order. This tool's whole method is running the same thing twice and subtracting
+  what disagrees; a report that disagrees with itself undermines the measurement.
+- **`coverage.doorsWalked` counted doors as walked in the same report** whose only line about
+  them said "was not tried".
+- **`ship` said "nothing is being compared against anything yet"** with a reference in force,
+  and promised "the previous reference" when there had never been one.
+
+### Fixed — the agent and the person were told different things
+
+- **A person could not ask four of the questions an agent can.** `coverage`, `explain`,
+  `prove` and `waive` existed only over MCP. All four are commands now, plus `intent` —
+  without which a waiver could only ever be refused — and `check` now prints the finding ids,
+  without which there was nothing to hand them.
+- **`staysfixed_waive` refused the only file in the product** — the one the agent had just
+  edited — because an agent holds absolute paths and the seal expected relative ones.
+- **`staysfixed_coverage` forced the machine survey offline and then reported the forced
+  answer as a fact about the world**, telling the agent that iPhone and Android apps "cannot
+  be reached from this machine" when the truth was this project contains none.
+
+### Fixed — what a person is handed when something goes wrong
+
+- **An unwritable `TMPDIR` handed a raw `ENOENT ... mkdtemp`** to the block this tool tells
+  you to give a non-technical owner.
+- **A check run inside a nested project silently checked the PARENT's product**, saying
+  nothing about the switch.
+- **`flake` said "No check here has ever changed its mind"** about a register whose own JSON
+  showed a guard flipping — and the reason it gave was untrue.
+- **A monorepo container folder was announced as a product**, and the repository root was
+  named "the server" over routes belonging to a package one level down.
+
+### Proven
+
+The iOS surface, for the first time: built for the simulator, `doctor` went from "unavailable"
+to ready, and a check walked the app and recorded `screen.the-first-screen.walked`. Seven of
+the eight surfaces have now actually been exercised. Windows is reachable and signed in, and
+its screen is locked.
+
 ## [0.10.0] — 2026-08-31
 
 The night the four surfaces nobody had pointed it at were pointed at it, and the biggest

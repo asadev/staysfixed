@@ -163,12 +163,24 @@ export async function plan(options = {}) {
   const root = existing ? rootForConfig(existing) : cwd;
 
   const project = await detectProject({ root, readCode: options.readCode });
-  const machine = await readMachine({ cwd: root, offline: options.offline });
+
+  // The settings are worked out BEFORE the machine is asked, and handed over. Doctor reads
+  // the settings to answer half its questions, and on a fresh project there is no settings
+  // file yet — so it used to answer every one of them against nothing, and init printed the
+  // result as this project's readiness. A plain Node command-line tool was told it needed
+  // "a command to run" by the same run that had already written `node cli.js --help` into
+  // its settings. Settings that already exist are read from disk as before; this only hands
+  // over the ones that are about to be written.
+  const config = await planConfig(root, project, existing);
+  const machine = await readMachine({
+    cwd: root,
+    offline: options.offline,
+    settingsText: config.exists ? undefined : config.text,
+  });
 
   const readiness = readinessFor(project, machine);
   const journeys = proposeJourneys(project);
   const needs = sortNeeds(readiness, project, machine);
-  const config = await planConfig(root, project, existing);
   const covers = whatItCovers(readiness);
 
   return {
@@ -250,13 +262,13 @@ export async function init(options = {}) {
  * survey throws, and the honest degradation is "nothing is known about this machine", which
  * makes every surface a person's problem rather than silently a ready one.
  *
- * @param {{cwd: string, offline?: boolean}} opts
+ * @param {{cwd: string, offline?: boolean, settingsText?: string}} opts
  * @returns {Promise<Capabilities|null>}
  */
 async function readMachine(opts) {
   try {
     const { capabilities } = await import('./doctor.js');
-    return await capabilities({ cwd: opts.cwd, offline: opts.offline });
+    return await capabilities({ cwd: opts.cwd, offline: opts.offline, settingsText: opts.settingsText });
   } catch {
     return null;
   }
