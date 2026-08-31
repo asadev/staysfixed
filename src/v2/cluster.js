@@ -372,6 +372,47 @@ export function describe(d, count, rename, identical = true) {
 
   switch (d.kind) {
     case 'changed': {
+      // A RENAME INSIDE ONE VALUE, before anything else is tried. `findRenames` above only
+      // ever sees a rename that arrived as two addresses — one vanished, one appeared — and
+      // a JSON field is not addressed that way: the whole reply is one observation at one
+      // address, so renaming a field is a single `changed` difference and every line below
+      // this one describes it as something other than a rename.
+      //
+      // Measured 2026-08-30 on a six-field JSON reply with `name` renamed to `fullName`. The
+      // summary of a set of details prints its first four field names, both sides came out in
+      // the same words, and `whatMoved` then walked the union of the keys in alphabetical
+      // order and stopped at the first one that differed — `fullName`, the half that ARRIVED.
+      // The sentence was: `"GET /api/user / shape" now has "fullName" reading "string" where
+      // it read nothing.` The word `name` was nowhere in it, on the one channel whose whole
+      // promise is that "a renamed or dropped field shows up on its own". Every caller still
+      // reading `user.name` was broken and the report named only the field to start using.
+      const swap = renamedField(d.reference, d.candidate);
+      if (swap) {
+        return `${where}, "${name}" no longer has "${swap.from}" — the same value is under "${swap.to}" now, so anything still reading "${swap.from}" gets nothing.${spread}`;
+      }
+      const moved = whatMoved(d.reference, d.candidate);
+      // A FIELD THAT IS NO LONGER THERE, OR ONE THAT HAS TURNED UP, IS NAMED — and it is named
+      // ahead of the summary below, not only when the summary happens to fail. A set of
+      // details is summarised by its field COUNT and its first four names, so a reply that
+      // lost `name` from six fields read "is now a set of details (5 fields: "address",
+      // "avatar", "created", "email", and more) where it was a set of details (6 fields:
+      // "address", "avatar", "created", "email", and more)". Both halves true, both halves
+      // ending in "and more", and the one word that moved hidden inside the "and more" on
+      // each side. A dropped field is the loudest thing this tool finds and a reader could not
+      // see which one it was. Measured 2026-08-30 alongside the rename above.
+      //
+      // "now has X reading nothing" was the old wording for a field that had gone, and it is
+      // not true either: the value does not HAVE that field any more.
+      if (moved?.side === 'gone') {
+        return moved.what === ''
+          ? `${where}, "${name}" is no longer there at all. It read ${moved.was}.${spread}`
+          : `${where}, "${name}" has lost "${moved.what}", which read ${moved.was}. Anything still reading it gets nothing.${spread}`;
+      }
+      if (moved?.side === 'arrived') {
+        return moved.what === ''
+          ? `${where}, "${name}" reads ${moved.now} now, and read nothing before.${spread}`
+          : `${where}, "${name}" has gained "${moved.what}", reading ${moved.now}. Nothing was there before.${spread}`;
+      }
       const now = describeValue(d.candidate);
       const was = describeValue(d.reference);
       if (now !== was) return `${where}, "${name}" is now ${now} where it was ${was}.${spread}`;
@@ -382,7 +423,6 @@ export function describe(d, count, rename, identical = true) {
       // it was a set of details (one field: line)" — twice the same words, on the tool's own
       // flagship example, in the paragraph a person reads rather than an agent. So the
       // summary is put down and the thing that actually moved is named instead.
-      const moved = whatMoved(d.reference, d.candidate);
       if (!moved) return `${where}, "${name}" changed, and both versions of it read the same at this length.${spread}`;
       return moved.what === ''
         ? `${where}, "${name}" now reads ${moved.now} where it read ${moved.was}.${spread}`
@@ -501,15 +541,32 @@ export function describeValue(value) {
  * @param {ObservedValue|undefined} reference
  * @param {ObservedValue|undefined} candidate
  * @param {string[]} [trail]
- * @returns {{what: string, was: string, now: string}|null}
+ * @returns {{what: string, was: string, now: string, side?: 'gone'|'arrived'}|null}
+ *   `side` says the field is on one side only: `gone` means it was there and is not, which is
+ *   the half a caller breaks on, and `arrived` means the opposite. Absent means both sides
+ *   have it and only the value moved.
  */
 function whatMoved(reference, candidate, trail = []) {
   if (isSetOfDetails(reference) && isSetOfDetails(candidate)) {
-    for (const key of [...new Set([...Object.keys(reference), ...Object.keys(candidate)])].sort()) {
+    // THE FIELDS THAT WENT AWAY ARE WALKED FIRST, and until 2026-08-30 the union of both
+    // sides' keys was walked in plain alphabetical order. That order decides which single
+    // field the sentence ends up naming, and it was deciding it by spelling: rename `name` to
+    // `fullName` and `fullName` sorts first, so the report named the field that had just been
+    // invented and never the one that had gone. A field that arrived breaks nobody. A field
+    // that went away breaks every caller that reads it, so it is the one the sentence owes
+    // the reader when only one of them can be named.
+    const before = Object.keys(reference).sort();
+    const after = Object.keys(candidate).sort();
+    const gone = before.filter((k) => !(k in /** @type {object} */ (candidate)));
+    const rest = [...before.filter((k) => k in /** @type {object} */ (candidate)), ...after.filter((k) => !(k in /** @type {object} */ (reference)))];
+    for (const key of [...gone, ...rest]) {
       const a = /** @type {Record<string, any>} */ (reference)[key];
       const b = /** @type {Record<string, any>} */ (candidate)[key];
       if (sameValue(a, b)) continue;
-      return whatMoved(a, b, [...trail, key]);
+      const side = !(key in /** @type {object} */ (candidate)) ? 'gone' : !(key in /** @type {object} */ (reference)) ? 'arrived' : undefined;
+      const deeper = whatMoved(a, b, [...trail, key]);
+      if (!deeper) return null;
+      return side ? { ...deeper, side } : deeper;
     }
     return null;
   }
@@ -531,6 +588,57 @@ function whatMoved(reference, candidate, trail = []) {
   const was = describeValue(reference);
   const now = describeValue(candidate);
   return was === now ? null : { what, was, now };
+}
+
+/**
+ * One field swapped for another INSIDE a single value.
+ *
+ * `findRenames` above spots a rename that arrived as two ADDRESSES, one vanished and one
+ * appeared. That is how a screen control or a source door is addressed, and it is not how a
+ * JSON reply is: the whole body, and separately the whole shape of it, is one observation at
+ * one address, so renaming a field there produces exactly one `changed` difference and the
+ * pairing above never gets a chance to look at it. This is the same test, applied to the two
+ * values rather than to two addresses: in the same place, one name went away, one arrived,
+ * and they hold the same value.
+ *
+ * The conditions are the strict ones on purpose, for the same reason they are strict up
+ * there. Exactly one of each — two of each is a rewrite, and picking the pairs would be
+ * fiction. The values must match, or these are two unrelated edits that happened to land in
+ * the same object. And everything the two sides still share has to be untouched, because the
+ * caller prints ONE sentence: if something else moved as well, saying only "renamed" would be
+ * a true sentence that leaves out the rest, and the field-by-field wording below is the
+ * honest answer instead.
+ *
+ * @param {ObservedValue|undefined} reference
+ * @param {ObservedValue|undefined} candidate
+ * @param {string[]} [trail]  How far in we are, for a rename nested inside the reply.
+ * @returns {{from: string, to: string}|null}
+ */
+function renamedField(reference, candidate, trail = []) {
+  if (!isSetOfDetails(reference) || !isSetOfDetails(candidate)) return null;
+  const was = /** @type {Record<string, ObservedValue>} */ (reference);
+  const is = /** @type {Record<string, ObservedValue>} */ (candidate);
+  const before = Object.keys(was);
+  const after = Object.keys(is);
+  const gone = before.filter((k) => !(k in is));
+  const came = after.filter((k) => !(k in was));
+
+  if (gone.length === 1 && came.length === 1) {
+    if (!sameValue(was[gone[0]], is[came[0]])) return null;
+    // Everything they still share has to be the same, or the rename is not the whole story.
+    for (const key of before) {
+      if (key === gone[0]) continue;
+      if (!sameValue(was[key], is[key])) return null;
+    }
+    return { from: [...trail, gone[0]].join(' / '), to: [...trail, came[0]].join(' / ') };
+  }
+
+  // Same names at this level, so the rename — if there is one — is further in. Only one
+  // field may have moved, for the same reason as above: two moved fields is not one rename.
+  if (gone.length > 0 || came.length > 0) return null;
+  const moved = before.filter((k) => !sameValue(was[k], is[k]));
+  if (moved.length !== 1) return null;
+  return renamedField(was[moved[0]], is[moved[0]], [...trail, moved[0]]);
 }
 
 /**

@@ -922,6 +922,32 @@ export function proveAgainstLive(suspicions, live, now) {
     if (!was && !is) continue;
     if (was && is && sameValue(was.value, is.value)) continue;
     if (!was && is) {
+      // AN ADDRESS THE RECORD HOLDS A VALUE FOR IS NEVER "was not there before".
+      //
+      // A live walk of the old build answering DIFFERENTLY from its own record is drift, and
+      // subtracting it is the whole reason this function exists. A live walk that does not
+      // answer at that address AT ALL is not drift — it is the booted build failing to
+      // reproduce its own record, and the two are not the same news.
+      //
+      // Measured 2026-08-31 on a Node API. `ship` cut the reference from a working tree with
+      // uncommitted changes and said so; the record was filed under the build fingerprint of
+      // the tree that was actually walked, `work-76ac0155c8b9`, and it holds
+      // `api.GET /api/session.shape` with the value `{"token":"string"}` on disk. `bootReference`
+      // then fetched "the old build" by a DIFFERENT key off the same reference object — its
+      // `gitSha` — and `git archive` of that commit has no `/api/session` route in it at all,
+      // so nothing was observed at that address. This branch then threw the recorded value
+      // away and the run printed: `"GET /api/session / shape" is there now and was not before.`
+      // The record was sitting in the repository saying the opposite, and the difference was
+      // stamped `proven: true` on top, which the summary reads out as re-checked against the
+      // old build. A confident sentence, contradicted by this tool's own evidence.
+      //
+      // So the record wins where the live walk is silent: the difference keeps the values it
+      // came in with and goes back unproven, which is what the tool already says for every
+      // journey the old build could not walk.
+      if (d.reference !== undefined) {
+        kept.push({ ...d, proven: false });
+        continue;
+      }
       kept.push({ ...d, kind: 'appeared', reference: undefined, candidate: is.value, proven: true });
       continue;
     }
