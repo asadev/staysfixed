@@ -178,10 +178,12 @@ out of your source. `"suite"` walks the project's own test suite as well — eac
 test file run twice inside the scratch copy, every check reported by name and why
 each failure failed, stopping after 90 seconds with every file it did not reach
 named. It is worth asking for when a change could break behaviour the product's own
-output would never show. You can also pass a path to a journeys file. `"recorded"`
-is written in `src/v2/journeys/` and not yet wired into a run: ask for it and you
-are told so by name, rather than given a clean result about steps something quietly
-chose instead.
+output would never show. `"recorded"` walks the sessions a person made with
+`staysfixed record` and kept in `.staysfixed/journeys` — the one source that knows
+which screens somebody actually opens, which reading the source cannot work out. Ask
+for it in a project with no recordings and the reply comes back blocked, naming the
+folder and the command that makes one, rather than giving a clean result about steps
+something quietly chose instead. You can also pass a path to a journeys file.
 
 ---
 
