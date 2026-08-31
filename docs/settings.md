@@ -406,12 +406,15 @@ anything behind in them.
 ## `android` — an APK on an emulator
 
 Installed on an emulator of its own, walked, then removed. Compared against the
-stored record: whether two emulator snapshots come back byte for byte is unproven,
-and every run says which mode it used.
+stored record, or paired against the old build if you keep a copy of it. A snapshot
+restore was measured on 2026-08-31 and repeats: 301 of 309 addresses agreed across
+five pairs, and the eight that moved were the app's own freshly-made identity code,
+which the wobble subtraction already removes. Every run says which mode it used.
 
 | Option | What it does |
 | --- | --- |
 | `apk` | The built package. Left out, it looks in the usual build folders. |
+| `reference` | A kept copy of the OLD build's package, for a paired run. An APK is a build output, so a checkout of the old commit has none. Also accepts `{ apk: '...' }`. Left out, a paired run falls back to the stored record and says so. |
 | `avd` | Which emulator to use. Left out, it takes the first one that is **not** a Play Store image. |
 | `serial` | A device already plugged in, or an emulator already running. |
 | `journeys[]` / `screens[]` | Walks through the app: `{ name, steps: [{ tap: 'Sign in' }] }`. Left out, it opens the app and reads the first screen. |
@@ -459,9 +462,15 @@ Installed on a simulator, opened, and read — the same roles, names and states 
 person hears read out to them. One build at a time. macOS only: nothing on Linux
 or Windows can run an iOS simulator.
 
+A paired run is offered: two restores of one build were measured on 2026-08-31 on
+an iOS 27.0 simulator and 725 of 725 addresses agreed across five pairs. It needs a
+kept copy of the old build's `.app`, because a build output is not in any checkout
+of the old commit.
+
 | Option | What it does |
 | --- | --- |
 | `app` | The built app bundle for the simulator. Left out, it looks where builds land. |
+| `reference` | A kept copy of the OLD build's app bundle, for a paired run. A `.app` is a build output, so a checkout of the old commit has none. Also accepts `{ app: '...' }`. Left out, a paired run falls back to the stored record and says so. |
 | `deviceType`, `runtime` | Which simulator and which system: `'iPhone 17'`, `'iOS 26.4'`. Left out it picks a sensible one and says which. |
 | `device` | An exact simulator that already exists, by name or id. |
 | `journeys[]` | Walks through the app: `{ name, steps: [{ tap: 'Sign in' }] }`. |

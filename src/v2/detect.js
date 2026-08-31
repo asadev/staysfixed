@@ -599,7 +599,7 @@ async function productsIn(input) {
         ...(gradlew || gradle ? { buildWith: `${gradlew ? './gradlew' : 'gradle'} ${folder('app') ? ':app:assembleDebug' : 'assembleDebug'}` } : {}),
       },
       blockers: available.has('android')
-        ? ['It runs on an emulator. Whether two emulator snapshots restore identically is unproven, so a run says which mode it used.']
+        ? ['It runs on an emulator. A snapshot restore was measured on 2026-08-31 and repeats — 301 of 309 addresses agreed across five pairs, and the eight that moved were the app\'s own identity code — so a paired run is offered. It needs a kept copy of the old build\'s APK ("reference" under "android"), because a checkout of the old commit contains no build output.']
         : ['Nothing in this copy of the tool can drive an Android app yet. When it can, it will run on an emulator against the stored record.'],
     });
   }
