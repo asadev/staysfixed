@@ -512,7 +512,11 @@ export function howLongItTook(spec) {
     // never become a difference. The measurement lives in the sentence, which is never compared.
     value: `not compared — ${NOT_COVERED_MEANING['measures the machine']}`,
     says:
-      `${spec.what} took ${timeBucket(spec.ms)}. That is recorded and NOT compared: a stopwatch on a shared machine ` +
+      // "took" reads wrong in front of two of the rungs — "took quick", "took instant" —
+      // and this sentence goes in front of a person. The rungs are values, kept as they are
+      // because they are recorded; the sentence bends around them instead. Measured on a
+      // real run 2026-08-31, which printed "Walking the steps of "home" took quick."
+      `${spec.what}: ${timeBucket(spec.ms)}. That is recorded and NOT compared: a stopwatch on a shared machine ` +
       `measures the machine as much as the product, so a busy laptop would otherwise invent a slowdown that nobody caused. ` +
       `A build that hangs is still caught — it gets stopped for taking too long, and how it finished is compared.` +
       (spec.andAlso ? ` ${spec.andAlso}` : ''),

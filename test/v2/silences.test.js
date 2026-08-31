@@ -88,7 +88,12 @@ describe('how long something took is recorded and never compared', () => {
 
   test('the measurement is still there to read, in the sentence', () => {
     const seen = howLongItTook({ channel: 'counters', path: 'count.build.duration', ms: 40_000, what: 'the build' });
-    assert.match(String(seen.meta?.describe), /took half a minute|took a minute or so|took several seconds/);
+    // The bucket, not the word "took": the sentence stopped saying "took" on 2026-08-31
+    // because two of the rungs read wrong behind it ("took quick", "took instant") and this
+    // sentence is printed at a person. What this test is about is that the measurement is
+    // still there to read, and it is.
+    assert.match(String(seen.meta?.describe), /half a minute|a minute or so|several seconds/);
+    assert.match(String(seen.meta?.describe), /^the build[:.]/, 'the thing measured has to be named before the measurement');
   });
 
   test('it counts as missing coverage rather than as a pass', () => {

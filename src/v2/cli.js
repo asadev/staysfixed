@@ -542,8 +542,25 @@ export async function run(ctx) {
   if (ctx.bool('selfcheck')) return await runSelfCheck(ctx, asJson);
 
   const check = await engineCheck();
+
+  // A person watching a run has to be told what it is waiting for.
+  //
+  // The run says things while it works — "the site came up at http://[::1]:51492", "the old
+  // build did not shut down cleanly", "this run could not be saved" — and every one of those
+  // reached the live panel and nothing else. At a terminal the whole of a ninety-second wait
+  // was a blank screen, which is indistinguishable from the tool being broken, and that is
+  // the state somebody kills the run in. Switched off for --json, where one stray sentence on
+  // standard output is a reply that will not parse.
+  const { makeCheckEvents } = await import('./run.js');
+  const events = makeCheckEvents();
+  if (!asJson) {
+    events.on((event) => {
+      if (event.type === 'note' && event.message) say(paint.dim(String(event.message)));
+    });
+  }
+
   /** @type {Verdict} */
-  const verdict = await check(checkOptions(ctx));
+  const verdict = await check({ ...checkOptions(ctx), events });
 
   // Write down what this check concluded, before printing anything.
   //
