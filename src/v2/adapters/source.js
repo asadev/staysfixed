@@ -1292,6 +1292,14 @@ async function collectFiles(root, folders, maxFileBytes) {
  * Both layouts are handled: an app folder, where a `route` file's exported method names are
  * the verbs, and a pages/api folder, where the file itself is the route.
  *
+ * SO DO THE OTHERS, AND UNTIL 2026-08-31 ONLY NEXT.JS WAS READ. Measured that day on a
+ * three-page SvelteKit site with an endpoint and a form in it: "0 routes". Not "we could not
+ * read them" — zero, printed as a fact, in a report that then called the site covered in
+ * full. SvelteKit writes an endpoint as `+server.ts` and a form handler as an `actions`
+ * export in `+page.server.ts`; Nuxt puts its under `server/api`; Astro puts its beside the
+ * pages in `src/pages`. Every one of those is a door somebody can knock on, and a door this
+ * tool cannot see is a door it cannot notice disappearing.
+ *
  * Python's routes are read here too, and this is the reason they are read HERE rather than
  * somewhere of their own: five places in this tool ask for routes, and four of them would
  * have had to be found and changed. A Flask app that had routes in one of them and none in
@@ -1366,7 +1374,12 @@ export async function readFileRoutes(root) {
     });
   }
 
-  for (const pagesDir of ['pages/api', 'src/pages/api']) {
+  // Astro keeps its endpoints in `src/pages` too, and an Astro project with an `api` folder in
+  // there would otherwise have every endpoint counted twice — once as a Next.js api route with
+  // the verb unknown, once as an Astro endpoint with the verb read. Two doors where there is
+  // one is the same lie as none where there is one, told the other way round.
+  const astro = await looksLikeAstro(root);
+  for (const pagesDir of astro ? ['pages/api'] : ['pages/api', 'src/pages/api']) {
     await walk(path.join(root, pagesDir), async (rel, full) => {
       if (!/\.[cm]?[jt]sx?$/.test(rel)) return;
       const stem = rel.replace(/\.[cm]?[jt]sx?$/, '').split(path.sep).join('/');
@@ -1378,11 +1391,166 @@ export async function readFileRoutes(root) {
     });
   }
 
+  // ── SvelteKit ─────────────────────────────────────────────────────────────
+  // `+server.ts` answers requests on the address of the folder it sits in, and the functions
+  // it exports are the verbs — exactly the same idea as a Next.js `route.ts`, spelled
+  // differently. `+page.server.ts` is not an endpoint, but an `actions` export in one IS: it
+  // is where every form on that page posts to, which makes it one of the busiest doors in a
+  // SvelteKit app and the one most worth noticing the disappearance of.
+  for (const routesDir of ['src/routes', 'routes']) {
+    let anyHere = false;
+    await walk(path.join(root, routesDir), async (rel, full) => {
+      const posix = rel.split(path.sep).join('/');
+      const name = posix.split('/').pop() ?? '';
+      const endpoint = /^\+server\.[cm]?[jt]s$/.test(name);
+      const pageServer = /^\+page(@[^.]*)?\.server\.[cm]?[jt]s$/.test(name);
+      if (!endpoint && !pageServer) return;
+      const url = '/' + posix.split('/').slice(0, -1)
+        .filter((s) => s !== '.' && !(s.startsWith('(') && s.endsWith(')')) && !s.startsWith('_'))
+        .join('/');
+      /** @type {string[]} */
+      let verbs = [];
+      try {
+        const reading = readFile(path.relative(root, full), await fsp.readFile(full, 'utf8'));
+        const named = reading.doors
+          .filter((d) => d.kind === 'export' && typeof d.name === 'string')
+          .map((d) => String(d.name));
+        if (endpoint) {
+          verbs = named.filter((n) => /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|fallback)$/.test(n));
+          // An endpoint file that exports nothing readable is still an endpoint. Reporting no
+          // door at all because the verbs would not parse is the failure this whole file
+          // exists to prevent.
+          if (verbs.length === 0) verbs = ['ANY'];
+        } else if (named.includes('actions')) {
+          verbs = ['POST'];
+        }
+      } catch {
+        if (endpoint) verbs = ['ANY'];
+      }
+      if (verbs.length === 0) return;
+      anyHere = true;
+      for (const verb of verbs) {
+        doors.push({
+          kind: 'route', name: url === '/' ? '/' : url.replace(/\/$/, ''), detail: verb,
+          file: path.relative(root, full), line: 1, inTest: false, named: true,
+          via: 'the folder it lives in',
+        });
+      }
+    });
+    // A project has one routes folder, not two. Stopping after the one that had something in
+    // it keeps a stray top-level `routes/` from being read as a second copy of the site.
+    if (anyHere) break;
+  }
+
+  // ── Nuxt ──────────────────────────────────────────────────────────────────
+  // Nuxt names the verb in the filename — `login.post.ts` is a POST — and serves `server/api`
+  // under `/api` while `server/routes` is served at the top level.
+  //
+  // Only read when the project says it is Nuxt, and that gate is not caution for its own sake.
+  // `server/api/orders.js` is an ordinary place to keep an Express handler, and that file
+  // already has its real route read out of the `router.get(...)` call inside it. Walking the
+  // folder as well would invent a second address beside the true one — two doors reported
+  // where one exists, which makes the door count a thing nobody can trust.
+  const nuxt = await looksLikeNuxt(root);
+  for (const [serverDir, prefix] of /** @type {[string, string][]} */ (nuxt ? [
+    ['server/api', '/api'], ['server/routes', ''], ['src/server/api', '/api'], ['src/server/routes', ''],
+  ] : [])) {
+    await walk(path.join(root, serverDir), async (rel, full) => {
+      if (!/\.[cm]?[jt]s$/.test(rel)) return;
+      const stem = rel.replace(/\.[cm]?[jt]s$/, '').split(path.sep).join('/');
+      const verbInName = stem.match(/\.(get|post|put|patch|delete|head|options)$/i);
+      const cleaned = (verbInName ? stem.slice(0, -verbInName[0].length) : stem).replace(/\/?index$/, '');
+      doors.push({
+        kind: 'route', name: `${prefix}/${cleaned}`.replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1') || '/',
+        detail: verbInName ? String(verbInName[1]).toUpperCase() : 'ANY',
+        file: path.relative(root, full), line: 1, inTest: false, named: true,
+        via: 'the folder it lives in',
+      });
+    });
+  }
+
+  // ── Astro ─────────────────────────────────────────────────────────────────
+  // Astro keeps its endpoints in the same folder as its pages, and tells them apart by
+  // extension alone: `.astro` is a page, and a plain `.ts` beside it is an endpoint whose
+  // exported function names are the verbs. Only read when the project says it is Astro,
+  // because that same folder belongs to the Next.js pages router in other projects and a
+  // page read as an endpoint would be counted twice.
+  if (astro) {
+    await walk(path.join(root, 'src/pages'), async (rel, full) => {
+      const posix = rel.split(path.sep).join('/');
+      if (!/\.[cm]?[jt]s$/.test(posix) || /\.d\.[cm]?ts$/.test(posix)) return;
+      const stem = posix.replace(/\.[cm]?[jt]s$/, '').replace(/\/?index$/, '');
+      /** @type {string[]} */
+      let verbs = ['ANY'];
+      try {
+        const reading = readFile(path.relative(root, full), await fsp.readFile(full, 'utf8'));
+        const named = reading.doors
+          .filter((d) => d.kind === 'export' && typeof d.name === 'string' && /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|ALL)$/.test(String(d.name)))
+          .map((d) => String(d.name));
+        if (named.length > 0) verbs = named;
+      } catch { /* an unreadable endpoint is still an endpoint */ }
+      for (const verb of verbs) {
+        doors.push({
+          kind: 'route', name: `/${stem}`.replace(/(.)\/$/, '$1'), detail: verb,
+          file: path.relative(root, full), line: 1, inTest: false, named: true,
+          via: 'the folder it lives in',
+        });
+      }
+    });
+  }
+
   const python = await readPythonRoutes(root);
   doors.push(...python.doors);
   problems.push(...python.problems);
 
   return { doors, problems };
+}
+
+/**
+ * Is this a Nuxt project?
+ *
+ * Same reason as {@link looksLikeAstro}, for a different folder: `server/api` is Nuxt's
+ * routing and also an ordinary place to keep an Express handler, and only one of those two
+ * turns a filename into an address.
+ *
+ * @param {string} root
+ * @returns {Promise<boolean>}
+ */
+async function looksLikeNuxt(root) {
+  for (const name of ['nuxt.config.ts', 'nuxt.config.js', 'nuxt.config.mjs']) {
+    if (fs.existsSync(path.join(root, name))) return true;
+  }
+  try {
+    const pkg = JSON.parse(await fsp.readFile(path.join(root, 'package.json'), 'utf8'));
+    const deps = { ...pkg?.dependencies, ...pkg?.devDependencies };
+    return 'nuxt' in deps || 'nuxt3' in deps || 'nuxt-edge' in deps;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Is this an Astro project?
+ *
+ * It matters for one reason only: `src/pages/thing.ts` is a server endpoint in Astro and a
+ * whole page in the Next.js pages router, and the two folders are spelled identically. Read
+ * the wrong way, a page gets counted as a door it is not, or a door goes unseen. package.json
+ * settles it, and an `astro.config` file settles it for a project that has not installed
+ * anything yet.
+ *
+ * @param {string} root
+ * @returns {Promise<boolean>}
+ */
+async function looksLikeAstro(root) {
+  for (const name of ['astro.config.mjs', 'astro.config.js', 'astro.config.ts', 'astro.config.mts']) {
+    if (fs.existsSync(path.join(root, name))) return true;
+  }
+  try {
+    const pkg = JSON.parse(await fsp.readFile(path.join(root, 'package.json'), 'utf8'));
+    return 'astro' in { ...pkg?.dependencies, ...pkg?.devDependencies };
+  } catch {
+    return false;
+  }
 }
 
 /**
