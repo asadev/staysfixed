@@ -15,7 +15,7 @@
  * off IS the guard's own words, in the guard's own order.
  */
 
-import { exec } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { StaysFixedError } from '../core/errors.js';
@@ -298,41 +298,120 @@ export function makeGuardApi(page, project, opts = {}) {
 
       /** @type {Promise<{code: number, stdout: string, stderr: string}>} */
       const finished = new Promise((resolve, reject) => {
-        exec(
-          cmd,
-          // `signal` is what actually kills the child. A guard that shells out to something
-          // long-running was the clearest case of a timed-out guard holding a real resource:
-          // the run had reported and moved on, and the command was still going.
-          { cwd, timeout: timeoutMs, maxBuffer: MAX_OUTPUT, encoding: 'utf8', signal: givenUp },
-          (error, stdout, stderr) => {
-            const out = String(stdout ?? '');
-            let err = String(stderr ?? '');
-            let code = 0;
+        // `spawn` with `shell: true` rather than `exec`, for one reason: `detached`.
+        //
+        // KILLING THE SHELL IS NOT KILLING WHAT THE SHELL STARTED. A command runs through a
+        // shell, so a signal reaches the shell and the program it started carries on with a
+        // new parent. On a Mac the shell usually takes its child with it and this was
+        // invisible; on Linux it does not, and a command the run had given up on finished its
+        // work 800ms later, wrote its file, and proved it — caught by CI on 2026-08-31
+        // against a green Mac suite. `detached` puts the shell and everything it starts in
+        // one process group, and the group is what gets signalled.
+        //
+        // `exec` cannot do this: `detached` is not one of its documented options. It happens
+        // to be passed through today, and a tool built on not lying should not rest on that.
+        const child = spawn(cmd, {
+          cwd,
+          shell: true,
+          detached: process.platform !== 'win32',
+          windowsHide: true,
+        });
 
-            if (error) {
-              const e = /** @type {any} */ (error);
-              // Stopped because the run gave up on this guard, not because the command ran
-              // long. Saying "stopped after 60 seconds" here would be a made-up reason.
-              if (givenUp?.aborted && (e.name === 'AbortError' || e.killed)) {
-                reject(
-                  new GuardAbandoned(
-                    'The run gave up on this guard while this command was still going, so the command was stopped.',
-                  ),
-                );
-                return;
-              }
-              if (e.killed || e.signal) {
-                // 124 is what `timeout(1)` uses, so a guard can spot it.
-                code = 124;
-                err += `\n(the command was stopped after ${humanTime(timeoutMs)})`;
-              } else {
-                code = typeof e.code === 'number' ? e.code : 1;
-              }
-            }
+        let out = '';
+        let err = '';
+        let tooMuch = false;
+        /** @type {'ran'|'gave up'|'ran out of time'} */
+        let how = 'ran';
+        let done = false;
 
-            resolve({ code, stdout: out, stderr: err });
-          },
-        );
+        /** Stop the shell AND everything it started. */
+        const stopEverything = () => {
+          if (!child.pid) return;
+          try {
+            if (process.platform === 'win32') child.kill('SIGKILL');
+            else process.kill(-child.pid, 'SIGKILL');
+          } catch {
+            // Already gone, which is the good case.
+          }
+        };
+
+        child.stdout?.setEncoding('utf8');
+        child.stderr?.setEncoding('utf8');
+        child.stdout?.on('data', (/** @type {string} */ chunk) => {
+          if (out.length + chunk.length > MAX_OUTPUT) {
+            tooMuch = true;
+            out = (out + chunk).slice(0, MAX_OUTPUT);
+            stopEverything();
+            return;
+          }
+          out += chunk;
+        });
+        child.stderr?.on('data', (/** @type {string} */ chunk) => {
+          if (err.length + chunk.length > MAX_OUTPUT) {
+            tooMuch = true;
+            err = (err + chunk).slice(0, MAX_OUTPUT);
+            stopEverything();
+            return;
+          }
+          err += chunk;
+        });
+
+        const ranOut = setTimeout(() => {
+          how = 'ran out of time';
+          stopEverything();
+        }, timeoutMs);
+        if (typeof ranOut.unref === 'function') ranOut.unref();
+
+        const gaveUp = () => {
+          how = 'gave up';
+          stopEverything();
+        };
+        givenUp?.addEventListener('abort', gaveUp, { once: true });
+        if (givenUp?.aborted) gaveUp();
+
+        /** @param {number} code */
+        const finish = (code) => {
+          if (done) return;
+          done = true;
+          clearTimeout(ranOut);
+          givenUp?.removeEventListener('abort', gaveUp);
+
+          // Stopped because the run gave up on this guard, not because the command ran long.
+          // Saying "stopped after 60 seconds" here would be a made-up reason.
+          if (how === 'gave up') {
+            reject(
+              new GuardAbandoned(
+                'The run gave up on this guard while this command was still going, so the command was stopped.',
+              ),
+            );
+            return;
+          }
+          if (how === 'ran out of time') {
+            // 124 is what `timeout(1)` uses, so a guard can spot it.
+            resolve({ code: 124, stdout: out, stderr: `${err}\n(the command was stopped after ${humanTime(timeoutMs)})` });
+            return;
+          }
+          if (tooMuch) {
+            resolve({ code: 124, stdout: out, stderr: `${err}\n(the command was stopped after printing more than this tool will keep)` });
+            return;
+          }
+          resolve({ code, stdout: out, stderr: err });
+        };
+
+        child.on('error', (/** @type {any} */ e) => {
+          if (done) return;
+          done = true;
+          clearTimeout(ranOut);
+          givenUp?.removeEventListener('abort', gaveUp);
+          if (how === 'gave up') {
+            reject(new GuardAbandoned('The run gave up on this guard while this command was still going, so the command was stopped.'));
+            return;
+          }
+          resolve({ code: 1, stdout: out, stderr: `${err}\n${String(e?.message ?? e)}` });
+        });
+        // `close`, not `exit`: exit fires when the shell ends, and everything it printed has
+        // to have been read before the answer is handed back.
+        child.on('close', (/** @type {number|null} */ code) => finish(typeof code === 'number' ? code : 1));
       });
 
       const outcome = await finished;

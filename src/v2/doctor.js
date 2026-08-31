@@ -898,9 +898,15 @@ function findDesktopApp(cwd) {
  * install thirty gigabytes of Xcode is asking for work that changes nothing, and the whole
  * design turns on never doing that.
  *
+ * Windows is answered here too, for the same reason and by the same rule: a repository with
+ * no Windows program in it does not need a Windows machine, and saying "no Windows desktop
+ * can be reached from here" about one sends somebody looking for a machine they will never
+ * use. Only the settings can answer it — a native Windows build is not something this file
+ * can go and find in a folder.
+ *
  * @param {string} root
  * @param {string|null} settingsText
- * @returns {Promise<{android: FoundApp|null, ios: FoundApp|null}>}
+ * @returns {Promise<{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null}>}
  */
 async function phoneApps(root, settingsText) {
   // Comments taken away first, for the same reason `findDesktopApp` does it: a
@@ -977,7 +983,9 @@ async function phoneApps(root, settingsText) {
         ? { where: root, how: 'there is an Xcode project here, but nothing says where the built app is' }
         : null);
 
-  return { android, ios };
+  const windows = named('remoteExe') ?? namedPath('exe', (v) => /\.exe$/i.test(v));
+
+  return { android, ios, windows };
 }
 
 /**
@@ -1671,7 +1679,7 @@ async function findReference(root) {
  * @param {import('./browsers.js').BrowserSurvey} browsers
  * @param {{where: string, how: string}|null} desktopApp
  * @param {DriverReport[]} drivers      What this copy of the tool can drive at all.
- * @param {{android: FoundApp|null, ios: FoundApp|null}} phones
+ * @param {{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null}} phones
  * @param {Map<string, Need[]>} asked   What each separate adapter says IT is missing.
  * @param {{commands: number, imports: number}} [wires]
  *   What this project's own settings wire for the command-line surface. A surface with
@@ -1884,7 +1892,20 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   const iosBlocked = iosWants.some(blocks);
   const iosReady = iosMachine && canDrive('ios') && phones.ios !== null && iosWants.length === 0;
   const iosPartly = iosMachine && canDrive('ios') && phones.ios !== null && !iosReady && !iosBlocked;
-  if (!onAMac) {
+  // THE PROJECT IS ASKED BEFORE THE MACHINE, and the order is the whole point. "There is no
+  // iPhone app in this repository" and "this machine cannot run one" are different sentences
+  // with different things to do about them, and a machine reason given for a project that has
+  // no iPhone app in it sends somebody to install thirty gigabytes of Xcode for nothing. On a
+  // Mac this was already right; on Linux the platform test came first, so every project on
+  // every Linux machine was told its non-existent iPhone app was out of reach. Caught by CI
+  // on 2026-08-31 — the Mac suite was green and said nothing about it.
+  if (phones.ios === null) {
+    notInThisProject.add('ios');
+    impossible.set(
+      'ios',
+      'This project has no iPhone app in it, so there is nothing for a simulator to run. If yours is built somewhere else, name the built .app in your settings under ios.app.'
+    );
+  } else if (!onAMac) {
     impossible.set('ios', 'An iPhone build can only be run on a Mac. Everything else on this list is unaffected — check the iPhone app from a Mac, and let this machine cover the rest.');
   } else if (phones.ios === null) {
     notInThisProject.add('ios');
@@ -1902,10 +1923,10 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
     id: 'ios',
     name: 'iPhone apps, on the simulator',
     status: iosReady ? 'ready' : iosPartly ? 'partial' : 'unavailable',
-    summary: !onAMac
-      ? 'Cannot run here: iOS needs a Mac.'
-      : phones.ios === null
-        ? 'Nothing to check: no iPhone app was found in this project, and the settings do not name one.'
+    summary: phones.ios === null
+      ? 'Nothing to check: no iPhone app was found in this project, and the settings do not name one.'
+      : !onAMac
+        ? 'Cannot run here: iOS needs a Mac.'
         : !canDrive('ios')
           ? `An iPhone app is here (${phones.ios.how}), and this copy of Stays Fixed cannot drive one. ${noDriver('ios')}`
           : !iosMachine
@@ -1949,6 +1970,20 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   // is "detect rather than ask" at its sharpest: a runner that already answers must never
   // be presented as something to go and set up.
   const windowsDriver = canDrive('windows');
+  // Same rule as iPhone and Android: the project is asked before the machine. A repository
+  // with no native Windows program in it does not need a Windows machine, and "no Windows
+  // desktop is reachable from here" about one is a machine reason given for a project fact.
+  // Caught by CI on 2026-08-31, where a Linux runner reported native Windows apps as out of
+  // reach for a project that contains none.
+  if (phones.windows === null) {
+    notInThisProject.add('windows');
+    impossible.set(
+      'windows',
+      'This project has no native Windows program named in its settings, so there is nothing to open on a Windows desktop. '
+      + 'If yours is built somewhere else, name it under windows.remoteExe (already on that machine) or windows.exe (copied over each run). '
+      + 'Most Windows products are Electron, and those are covered over their debug port from any machine.'
+    );
+  }
   // A Windows desktop nobody has signed into is not a runner. There is nothing on it to read
   // — no windows, no controls — so calling it "partly covered" would be the exact over-claim
   // this file exists to prevent. The question can only be asked when the runner started
@@ -1959,7 +1994,9 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
     id: 'windows',
     name: 'native Windows apps',
     status: windowsUsable ? 'partial' : 'unavailable',
-    summary: !windowsHost
+    summary: phones.windows === null
+      ? 'Nothing to check: this project names no native Windows program in its settings. Most Windows products are Electron, and those are covered over their debug port from any machine.'
+      : !windowsHost
       ? nobodyWasDialled
         // Not "no Windows desktop is reachable" — nothing was dialled, so that is not known.
         // The two were the same sentence until 2026-08-31, and it stated as a fact about the

@@ -8,6 +8,26 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.11.1] — 2026-08-31
+
+Two defects that a Mac could never have shown, both caught by CI on Linux minutes after
+0.11.0 went out. Both were verified as broken and then as fixed on a real Linux machine
+rather than by reading the code.
+
+- **A command a guard had been abandoned mid-flight kept running.** Killing the shell is not
+  killing what the shell started: a command runs through a shell, so the signal reaches the
+  shell and the program it started carries on with a new parent. On macOS the shell usually
+  takes its child with it and this was invisible; on Linux it does not, and a command the run
+  had given up on finished its work 800 milliseconds later and wrote its file. It now runs in
+  its own process group and the group is what gets signalled. (`exec` does not document
+  `detached`; `spawn` does, so this moved to `spawn` rather than resting on behaviour that
+  happens to work.)
+- **`doctor` asked the machine before it asked the project.** For iPhone and Windows apps the
+  platform test came first, so on Linux a project containing no iPhone app was told its
+  non-existent app could not be reached from this machine — a machine reason given for a
+  project fact, which is the exact conflation that sends somebody to install thirty gigabytes
+  of Xcode for nothing. The project is asked first now, on every surface and every platform.
+
 ## [0.11.0] — 2026-08-31
 
 Fifty-odd defects, found by running the thing rather than reading it. Two rounds of seven
