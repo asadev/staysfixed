@@ -45,10 +45,10 @@ describe('an empty answer from a living app is never a pass', () => {
   test('a window the window server can see, with no controls, is recorded as unchecked', () => {
     const seen = meaningFromTree({ journey, window: 'Widget Shop', nodes: [], onScreenCount: 1, childCount: -1 });
     assert.equal(seen.length, 1);
-    assert.equal(seen[0].meta.refused, true, 'this has to be a hole, not a fact');
-    assert.match(seen[0].meta.describe, /is on the screen/);
-    assert.match(seen[0].meta.describe, /second copy of the same app/, 'and it has to name the cause somebody can act on');
-    assert.match(seen[0].meta.describe, /agree that nothing had changed/, 'and say why staying quiet would be worse');
+    assert.equal(seen[0].meta?.refused, true, 'this has to be a hole, not a fact');
+    assert.match(String(seen[0].meta?.describe), /is on the screen/);
+    assert.match(String(seen[0].meta?.describe), /second copy of the same app/, 'and it has to name the cause somebody can act on');
+    assert.match(String(seen[0].meta?.describe), /agree that nothing had changed/, 'and say why staying quiet would be worse');
   });
 
   test('a window that claims children and then hands back none is a half answer, not an empty one', () => {
@@ -56,14 +56,14 @@ describe('an empty answer from a living app is never a pass', () => {
       journey, window: 'Widget Shop', nodes: [control({ d: 0, role: 'AXWindow' })], onScreenCount: 1, childCount: 12,
     });
     assert.equal(seen.length, 1);
-    assert.equal(seen[0].meta.refused, true);
-    assert.match(seen[0].meta.describe, /12 things in it and then handed back none/);
+    assert.equal(seen[0].meta?.refused, true);
+    assert.match(String(seen[0].meta?.describe), /12 things in it and then handed back none/);
   });
 
   test('nothing on screen and nothing in the tree is still unchecked, never empty', () => {
     const seen = meaningFromTree({ journey, window: 'Widget Shop', nodes: [], onScreenCount: 0, childCount: -1 });
-    assert.equal(seen[0].meta.refused, true);
-    assert.match(seen[0].meta.describe, /unchecked, not empty/);
+    assert.equal(seen[0].meta?.refused, true);
+    assert.match(String(seen[0].meta?.describe), /unchecked, not empty/);
   });
 
   test('a real tree is recorded as facts, and the count comes with it', () => {
@@ -75,9 +75,9 @@ describe('an empty answer from a living app is never a pass', () => {
       childCount: 2,
       settled: true,
     });
-    assert.equal(seen.filter((o) => o.meta.refused).length, 0, 'a good read produces no holes at all');
+    assert.equal(seen.filter((o) => o.meta?.refused).length, 0, 'a good read produces no holes at all');
     const counter = seen.find((o) => o.channel === 'counters');
-    assert.equal(counter.value, 2);
+    assert.equal(counter?.value, 2);
   });
 });
 
@@ -88,28 +88,28 @@ describe('the caps announce themselves', () => {
     const seen = meaningFromTree({
       journey, window: 'Big', nodes: big, onScreenCount: 1, childCount: 3, settled: true, truncated: true,
     });
-    const hole = seen.find((o) => o.meta.refused);
+    const hole = seen.find((o) => o.meta?.refused);
     assert.ok(hole, 'hitting the cap must be visible, or the ledger claims coverage it does not have');
-    assert.match(hole.meta.describe, new RegExp(String(MAX_TREE_NODES)));
-    assert.match(hole.meta.describe, /unchecked/);
+    assert.match(String(hole?.meta?.describe), new RegExp(String(MAX_TREE_NODES)));
+    assert.match(String(hole?.meta?.describe), /unchecked/);
   });
 
   test('a tree that ran out of time says so separately from one that ran out of room', () => {
     const seen = meaningFromTree({
       journey, window: 'Slow', nodes: big, onScreenCount: 1, childCount: 3, settled: true, ranOut: true,
     });
-    const hole = seen.find((o) => o.meta.refused);
-    assert.match(hole.meta.describe, /limit with 3 controls read/);
-    assert.match(hole.meta.describe, /unchecked, not unchanged/);
+    const hole = seen.find((o) => o.meta?.refused);
+    assert.match(String(hole?.meta?.describe), /limit with 3 controls read/);
+    assert.match(String(hole?.meta?.describe), /unchecked, not unchanged/);
   });
 
   test('a window that never held still is reported, because the difference may be the movement', () => {
     const seen = meaningFromTree({
       journey, window: 'Busy', nodes: big, onScreenCount: 1, childCount: 3, settled: false,
     });
-    const hole = seen.find((o) => o.meta.refused);
-    assert.match(hole.meta.describe, /never held still/);
-    assert.match(hole.meta.describe, /the movement rather than the change/);
+    const hole = seen.find((o) => o.meta?.refused);
+    assert.match(String(hole?.meta?.describe), /never held still/);
+    assert.match(String(hole?.meta?.describe), /the movement rather than the change/);
   });
 });
 
@@ -189,7 +189,7 @@ describe('the other channels', () => {
       { pid: 2, parent: 1, command: '/Applications/Thing.app/Contents/MacOS/Updater --silent' },
     ]);
     const started = seen.find((o) => o.channel === 'effects');
-    assert.match(String(started.value), /--silent/, 'a changed flag on a helper is a real regression nothing else catches');
+    assert.match(String(started?.value), /--silent/, 'a changed flag on a helper is a real regression nothing else catches');
   });
 
   test('two runs that started the same helpers in a different order do not differ', () => {
@@ -208,7 +208,7 @@ describe('the other channels', () => {
     const seen = fileObservations(journey, before, after, '~/Library/Application Support/Thing');
     const changed = seen.find((o) => o.channel === 'effects');
     assert.ok(changed, 'the same-length rewrite that the Windows adapter openly misses is caught here');
-    assert.match(changed.meta.describe, /changed what is inside settings\.json/);
+    assert.match(String(changed.meta?.describe), /changed what is inside settings\.json/);
   });
 
   test('a run that watched nowhere still says the disk was not watched', async () => {
@@ -231,21 +231,21 @@ describe('the other channels', () => {
 
   test('a log that could not be read is a hole, never a quiet zero', () => {
     const seen = complaintObservations(journey, [], { kept: [], dropped: 0, ok: false, why: 'the log could not be read' });
-    const hole = seen.find((o) => o.meta.refused);
+    const hole = seen.find((o) => o.meta?.refused);
     assert.ok(hole, 'an unreadable log must not look like an app that logged nothing');
-    assert.match(hole.meta.describe, /Crashes are still reported/);
+    assert.match(String(hole?.meta?.describe), /Crashes are still reported/);
   });
 
   test('connections are reported with the note that sampling misses things', () => {
     const seen = networkObservations(journey, 'Thing 42 me 9u IPv4 0x1 0t0 TCP 10.0.0.2:5000->93.184.216.34:443 (ESTABLISHED)');
     assert.ok(seen.some((o) => o.value === '93.184.216.34:443'));
-    const hole = seen.find((o) => o.meta.refused);
-    assert.match(hole.meta.describe, /sampled while the app ran, not captured/);
+    const hole = seen.find((o) => o.meta?.refused);
+    assert.match(String(hole?.meta?.describe), /sampled while the app ran, not captured/);
   });
 
   test('the loopback is not reported as somewhere it reached out to', () => {
     const seen = networkObservations(journey, 'Thing 42 me 9u IPv4 0x1 0t0 TCP 127.0.0.1:5000->127.0.0.1:6000 (ESTABLISHED)');
-    assert.equal(seen.filter((o) => !o.meta.refused).length, 0);
+    assert.equal(seen.filter((o) => !o.meta?.refused).length, 0);
   });
 });
 
@@ -460,10 +460,11 @@ describe('what it says it can do', () => {
       // and both answers are correct — but each has to say the right thing.
       if (detection.applies) {
         assert.match(detection.why, /one build at a time/);
-        assert.ok(detection.notes.some((n) => /BACKGROUND/.test(n)), 'and that it never steals the screen');
+        assert.ok(detection.notes?.some((n) => /BACKGROUND/.test(n)), 'and that it never steals the screen');
       } else {
-        assert.ok(detection.missing.some((m) => m.blocking && /permission/.test(m.what)));
-        assert.match(detection.missing.find((m) => /permission/.test(m.what)).howToGet, /System Settings/);
+        const needed = detection.missing.find((m) => /permission/.test(m.what));
+        assert.ok(needed?.blocking, 'without permission nothing on this surface works at all');
+        assert.match(String(needed?.howToGet), /System Settings/, 'and the fix has to be an exact click');
       }
     } finally {
       await fsp.rm(where, { recursive: true, force: true });
@@ -491,10 +492,10 @@ describe('an irreversible journey is refused rather than walked carefully', () =
       { scratchDir: '/tmp', evidenceDir: '/tmp', seed: 1, clock: 'now', config: {} },
     );
     assert.equal(seen.length, 1);
-    assert.equal(seen[0].meta.refused, true);
-    assert.equal(seen[0].meta.refusedWhy.includes('irreversible'), true);
-    assert.match(seen[0].meta.describe, /It was not run at all/);
-    assert.match(seen[0].meta.describe, /not a pass/);
+    assert.equal(seen[0].meta?.refused, true);
+    assert.match(String(seen[0].meta?.refusedWhy), /irreversible/);
+    assert.match(String(seen[0].meta?.describe), /It was not run at all/);
+    assert.match(String(seen[0].meta?.describe), /not a pass/);
   });
 
   test('a build that was never made ready reports a hole, not an empty screen', async () => {
@@ -503,7 +504,7 @@ describe('an irreversible journey is refused rather than walked carefully', () =
       { build: { id: 'b', label: 'b', role: 'candidate', root: '/p' }, root: '/p', ready: false, why: 'no app was named', dispose: async () => {} },
       { scratchDir: '/tmp', evidenceDir: '/tmp', seed: 1, clock: 'now', config: {} },
     );
-    assert.equal(seen[0].meta.refused, true);
-    assert.match(seen[0].meta.describe, /no app was named/);
+    assert.equal(seen[0].meta?.refused, true);
+    assert.match(String(seen[0].meta?.describe), /no app was named/);
   });
 });

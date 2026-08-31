@@ -631,9 +631,6 @@ export function looksLikeAMacProject(topLevelNames) {
  */
 const startedHere = new Map();
 
-/** Where each prepared build wrote what the app printed, so `run` can read it back. */
-const printedTo = new Map();
-
 export const macosAdapter = defineAdapter({
   name: 'macos',
   title: 'native Mac apps',
@@ -888,7 +885,6 @@ export const macosAdapter = defineAdapter({
     let pid = null;
     const outFile = path.join(ctx.scratchDir, `macos-${journey.name}-printed.txt`);
     const errFile = path.join(ctx.scratchDir, `macos-${journey.name}-complained.txt`);
-    printedTo.set(journey.name, outFile);
 
     try {
       /** @type {Map<string, Map<string, string>>} */
@@ -1154,7 +1150,6 @@ export const macosAdapter = defineAdapter({
       for (const pid of pids) await stopOne(pid);
       startedHere.delete(id);
     }
-    printedTo.clear();
   },
 });
 
@@ -1355,7 +1350,11 @@ function isStillRunning(pid) {
  * One paragraph about what this adapter can do on this machine, for `doctor` and for an agent
  * reading the tool's own description of itself.
  *
- * @param {{darwin: boolean, allowed: boolean, macos?: string}} facts
+ * `allowed` is optional because on a machine that is not a Mac the question is never asked —
+ * there is nothing to ask it of — and a signature that demanded an answer would force callers
+ * to invent one.
+ *
+ * @param {{darwin: boolean, allowed?: boolean, macos?: string}} facts
  * @returns {string}
  */
 export function describeMacos(facts) {
