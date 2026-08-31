@@ -38,8 +38,9 @@ import {
 // 2026-08-31 straight back — two refusals compared equal and a product that could not start
 // came back "Nothing that worked has changed".
 import { compareAnswers, answeredAnything, isAnswer, refusalsIn, whyNoAnswer } from './refusal.js';
-import { ensureStore, saveBuild, saveCapture, latestCapture, referenceFor, listBuilds } from './store.js';
+import { ensureStore, saveBuild, saveCapture, latestCapture, loadCapture, referenceFor, listBuilds } from './store.js';
 import { describeRuleChange } from './normalise.js';
+import { currentReference } from './reference.js';
 import { clusterDifferences } from './cluster.js';
 import { rankFindings } from './rank.js';
 
@@ -216,6 +217,17 @@ export async function runCheck(opts) {
 
   // 1 — what counts as working.
   const reference = await resolveReference(opts.store, opts.product, opts.against);
+
+  // WHICH captures of the reference build are the record.
+  //
+  // The store keeps every capture a build ever produced, and the reader took the NEWEST of
+  // them. So the moment somebody checked out the old commit and ran a check, the record the
+  // whole comparison rests on quietly moved to whatever that run happened to see. Only `ship`
+  // may decide what "working" means, and a record that drifts on its own is that rule leaking.
+  // The two captures blessed at ship time are already written down beside the cut; they are
+  // used when they are still there, and the newest is the fallback for a reference cut before
+  // this was recorded. Found by the identical-runs lane, 2026-08-31.
+  const blessedRuns = await blessedCapturePairs(opts.store, opts.product, reference);
   say({
     type: 'reference',
     at: events.elapsed(),
@@ -369,7 +381,7 @@ export async function runCheck(opts) {
           surface: journey.surface,
         });
       }
-      const stored = await storedReference(opts.store, reference.id, journey.name);
+      const stored = await storedReference(opts.store, reference.id, journey.name, blessedRuns.get(journey.name));
       for (const problem of stored.problems) {
         gaps.push({
           what: `Part of the old build's record of "${journey.describe || journey.name}" could not be read.`,
@@ -887,6 +899,55 @@ function namesBuild(build, wanted) {
 }
 
 /**
+ * The two captures `ship` blessed, per journey.
+ *
+ * Empty when there is no cut record — a reference set before this was written down, or one
+ * pointed at by hand — and the caller falls back to the newest capture, which is what every
+ * run did before.
+ *
+ * @param {Store} store
+ * @param {string} product
+ * @param {BuildFingerprint|null} reference
+ * @returns {Promise<Map<string, [string, string]>>}
+ */
+async function blessedCapturePairs(store, product, reference) {
+  /** @type {Map<string, [string, string]>} */
+  const out = new Map();
+  if (!reference?.id) return out;
+  try {
+    const current = await currentReference(store, product);
+    if (!current?.cut || current.cut.buildId !== reference.id) return out;
+    for (const journey of current.cut.stability?.byJourney ?? []) {
+      if (journey.runs && journey.runs.length === 2) out.set(journey.journey, journey.runs);
+    }
+  } catch {
+    // A reference log that cannot be read is somebody else's problem to report. Falling back
+    // to the newest capture keeps the check running, which is the honest degradation.
+  }
+  return out;
+}
+
+/**
+ * One capture by its id, or null when it is no longer there.
+ *
+ * @param {Store} store
+ * @param {string} buildId
+ * @param {string} journey
+ * @param {string} id
+ * @param {(m: string) => void} onProblem
+ * @returns {Promise<Capture|null>}
+ */
+async function captureById(store, buildId, journey, id, onProblem) {
+  if (!id) return null;
+  try {
+    return await loadCapture(store, { buildId, journey, captureId: id });
+  } catch (e) {
+    onProblem(`The capture ${id}, which is part of what this product calls working, could not be read. ${messageOf(e)}`);
+    return null;
+  }
+}
+
+/**
  * The reference build's stored record for one journey, and how steady it was.
  *
  * The second run matters as much as the first. Without it nothing can say
@@ -896,13 +957,28 @@ function namesBuild(build, wanted) {
  * @param {Store} store
  * @param {string} buildId
  * @param {string} journey
+ * @param {[string, string]} [blessed]  The two captures `ship` blessed, when it wrote them down.
  * @returns {Promise<{capture: Capture|null, wobble: Wobble|null, problems: string[]}>}
  */
-async function storedReference(store, buildId, journey) {
+export async function storedReference(store, buildId, journey, blessed) {
   /** @type {string[]} */
   const problems = [];
   /** @param {string} m */
   const onProblem = (m) => problems.push(m);
+  // The blessed pair first. These are the captures that were the product's definition of
+  // working at the moment somebody shipped, and nothing since may replace them.
+  if (blessed) {
+    const pinnedA = await captureById(store, buildId, journey, blessed[0], onProblem);
+    const pinnedB = await captureById(store, buildId, journey, blessed[1], onProblem);
+    if (pinnedA) {
+      if (!pinnedB || pinnedB.id === pinnedA.id) return { capture: pinnedA, wobble: null, problems };
+      try {
+        return { capture: pinnedA, wobble: measureWobble(pinnedA, pinnedB), problems };
+      } catch {
+        return { capture: pinnedA, wobble: null, problems };
+      }
+    }
+  }
   const a =
     (await latestCapture(store, { buildId, journey, run: 'a', onProblem })) ??
     (await latestCapture(store, { buildId, journey, onProblem }));
