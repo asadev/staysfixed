@@ -56,6 +56,7 @@ import { sourceAdapter } from './adapters/source.js';
 import { httpAdapter } from './adapters/http.js';
 import { webAdapter } from './adapters/web.js';
 import { electronAdapter } from './adapters/electron.js';
+import { extensionAdapter } from './adapters/extension.js';
 
 const exec = promisify(execFile);
 
@@ -124,7 +125,7 @@ const exec = promisify(execFile);
  */
 
 /** The adapters compiled into every copy, in the order the engine trusts them. Reading the code is free, so it is first. */
-const BUILT_IN = [sourceAdapter, processAdapter, httpAdapter, webAdapter, electronAdapter];
+const BUILT_IN = [sourceAdapter, processAdapter, httpAdapter, webAdapter, electronAdapter, extensionAdapter];
 
 /**
  * The platforms that arrive as a file of their own.
@@ -193,6 +194,7 @@ export const ADAPTER_FOR_SURFACE = {
   server: 'http',
   web: 'web',
   electron: 'electron',
+  extension: 'extension',
   android: 'android',
   ios: 'ios',
   windows: 'windows',

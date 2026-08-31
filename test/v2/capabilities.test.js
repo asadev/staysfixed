@@ -217,7 +217,7 @@ describe('aiming a check at a web page or a desktop app', () => {
     assert.ok(check);
     const surface = check.inputSchema.properties.surface;
     assert.ok(surface, 'there has to be a way to say which kind of product to look at');
-    assert.deepEqual(surface.enum, ['auto', 'cli', 'library', 'server', 'web', 'electron', 'android', 'ios']);
+    assert.deepEqual(surface.enum, ['auto', 'cli', 'library', 'server', 'web', 'electron', 'android', 'ios', 'extension']);
     assert.match(surface.description, /never yours/, 'an agent should learn from the schema that this does not borrow the person’s browser');
     assert.ok(check.inputSchema.properties.at, 'and a way to say where: a URL, or the built app');
   });

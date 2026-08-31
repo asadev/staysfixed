@@ -497,9 +497,9 @@ export function toolDefinitions() {
           },
           surface: {
             type: 'string',
-            enum: ['auto', 'cli', 'library', 'server', 'web', 'electron', 'android', 'ios'],
+            enum: ['auto', 'cli', 'library', 'server', 'web', 'electron', 'android', 'ios', 'extension'],
             description:
-              "What kind of product to aim at. Default 'auto', which uses the settings. 'web' opens the page in a browser of the tool's own — never yours — and reads what the screen says each control is and does. 'electron' opens the desktop app with its own scratch data folder and drives it over its own debugging port. 'android' installs the APK on a virtual device; 'ios' boots the built app on a simulator. Aim it at something this copy or this machine cannot drive and it refuses by name rather than checking something else and reporting that.",
+              "What kind of product to aim at. Default 'auto', which uses the settings. 'web' opens the page in a browser of the tool's own — never yours — and reads what the screen says each control is and does. 'electron' opens the desktop app with its own scratch data folder and drives it over its own debugging port. 'android' installs the APK on a virtual device; 'ios' boots the built app on a simulator. 'extension' loads a browser extension into a throwaway browser: its manifest is read as a contract, its popup and options pages are walked like any other page, and what its content scripts do to somebody else's page is measured by opening that page with the extension and without it and comparing the difference — point 'extension.dir' in the settings at the folder you would load unpacked. Aim it at something this copy or this machine cannot drive and it refuses by name rather than checking something else and reporting that.",
           },
           at: {
             type: 'string',
