@@ -583,6 +583,7 @@ async function countTheDoors(verdict, project) {
     const { ledger, toCoverage } = await import('./coverage.js');
     const led = await ledger(project.store, project.product, {
       root: project.root,
+      folders: project.sourceFolders,
       journeys: project.journeys,
       builds: [project.candidate.id],
     });
@@ -1628,6 +1629,9 @@ async function waitForItsWindow(pid, stopped) {
  * @property {import('./types.js').Store} store
  * @property {BuildFingerprint} candidate
  * @property {string} [against]   The reference build's own id, once a name has been resolved.
+ * @property {string[]} [sourceFolders]  The folders this run reads code from, straight from
+ *                                       the settings it was given, so nothing downstream has
+ *                                       to find them a second time and find different ones.
  * @property {number} keepBuilds  How many builds of this product other than the reference keep
  *   their full record. Everything older is thinned out at the end of a run.
  * @property {string} [referenceSha]  The commit the build you were happy with is at. It is
@@ -2285,6 +2289,12 @@ async function openProject(options) {
     store,
     candidate,
     keepBuilds: keepBuildsFrom(config),
+    // The folders THIS run is reading, carried so the coverage ledger counts the doors of the
+    // same product the run walked. The ledger can find the settings itself, and does — but it
+    // finds them by looking beside the project, and a run started with `--config elsewhere`
+    // is reading a different file. Two answers to "what is in this project" is how the
+    // ledger came to measure "78 of 78 doors" from 8 of 20 files. Measured 2026-08-31.
+    sourceFolders: Array.isArray(config.source?.folders) ? config.source.folders : undefined,
     referenceSha,
     against: reference ? reference.id : options.against,
     journeys,
