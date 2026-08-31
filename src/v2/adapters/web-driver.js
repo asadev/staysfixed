@@ -729,6 +729,9 @@ export const IRREVERSIBLE = Object.freeze([
  * @property {JsonValue} [answered]   The answer, for the app's own calls that speak JSON.
  * @property {JsonValue} [shape]      The fields the answer carries and what type each one is.
  * @property {string} [failed]        Why it never finished.
+ * @property {boolean} [unfinishedAtTeardown]  It was still in flight when the walk closed the
+ *                                    page, so how it ended was never seen. A hole, and never
+ *                                    a complaint: the abort is our own doing.
  * @property {number} times
  */
 
@@ -838,10 +841,28 @@ export async function watchTheWire(page, opts) {
     );
   });
 
+  // Whether the walk has started packing up. A request that was still in flight when WE
+  // closed the page is aborted by the closing, and that is the measurement's own footprint
+  // rather than anything the product did — the browser reports it exactly like a real
+  // failure. Next.js starts a prefetch behind every internal link, so on a two-page app the
+  // address `.../never finished` appeared in roughly four runs in five, at random, and two
+  // byte-identical runs disagreed about whether the product had a problem. Measured
+  // 2026-08-31.
+  let packingUp = false;
+  const OUR_OWN_DOING = /ERR_ABORTED|context or browser has been closed|Target closed/i;
+
   page.on('requestfailed', (/** @type {any} */ request) => {
     const entry = entryFor(String(request.method()).toUpperCase(), String(request.url()));
     if (entry.refused) return;
-    entry.failed = String(request.failure()?.errorText ?? 'it did not finish');
+    const failure = String(request.failure()?.errorText ?? 'it did not finish');
+    if (packingUp && OUR_OWN_DOING.test(failure)) {
+      // Recorded as a HOLE, not dropped and not turned into a complaint. Something was still
+      // being asked for and we never saw how it ended, which is missing coverage — louder
+      // than a complaint, never quieter.
+      entry.unfinishedAtTeardown = true;
+      return;
+    }
+    entry.failed = failure;
   });
 
   return {
@@ -850,6 +871,7 @@ export async function watchTheWire(page, opts) {
       await withLimit(Promise.all(reading.splice(0)), 15000, []);
     },
     stop: async () => {
+      packingUp = true;
       try {
         await page.unroute('**/*');
       } catch {

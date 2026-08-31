@@ -1045,6 +1045,22 @@ export function describeTraffic(journey, calls, footprint) {
           surface: 'web',
         }),
       );
+    } else if (call.unfinishedAtTeardown) {
+      // Missing coverage, not a complaint. The page was still asking for this when the walk
+      // ended, and the abort that followed is this tool closing the page — reporting it as
+      // the product failing made an unchanged tree look broken in four runs out of five.
+      // Recorded rather than dropped: something was being asked for and how it ended was
+      // never seen, which is a hole, and a hole is louder than a complaint, never quieter.
+      out.push(
+        notCovered({
+          channel: 'effects',
+          path: `${where}.how it finished`,
+          reason: 'refused',
+          says:
+            `The page was still asking for ${asked} when the walk ended, so how that finished was never seen. ` +
+            `The request was cancelled by this tool closing the page, which is not the product doing anything wrong.`,
+        }),
+      );
     }
     if (call.status !== undefined) {
       out.push(
