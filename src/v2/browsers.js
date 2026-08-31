@@ -679,10 +679,18 @@ function argsFor(ctx) {
   // Nothing pops up, and the browser itself talks to nobody. The second half
   // matters more than it looks: without it a run depends on somebody else's
   // server being awake.
+  // `--disable-extensions` is dropped when the caller is deliberately loading one. Chrome
+  // accepts both flags without a word and simply loads nothing, so an extension surface
+  // asked for through this function would have walked a browser with no extension in it and
+  // reported everything about it as unchanged — a clean answer about nothing, which is the
+  // one result this tool must never produce. Written on 2026-08-31, the day the extension
+  // surface landed, before anybody could route through here and be caught by it.
+  const loadingAnExtension = (ctx.extra ?? []).some((flag) => String(flag).startsWith('--load-extension'));
+
   args.push(
     '--no-first-run',
     '--no-default-browser-check',
-    '--disable-extensions',
+    ...(loadingAnExtension ? [] : ['--disable-extensions']),
     '--disable-background-networking',
     '--disable-component-update',
     '--disable-default-apps',
