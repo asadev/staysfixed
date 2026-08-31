@@ -634,7 +634,15 @@ async function productsIn(input) {
   const bundler = ['vite', 'webpack', 'parcel', 'esbuild', 'rollup', '@rsbuild/core'].find(has) ?? null;
   const indexHtml = file('index.html') || fs.existsSync(path.join(dir, 'public', 'index.html'));
   const hostConfig = anyFile(/^(vercel|netlify|firebase|now|wrangler)\.(json|toml)$/);
-  const routeFolders = folder('pages') || (folder('app') && (fs.existsSync(path.join(dir, 'app', 'page.tsx')) || fs.existsSync(path.join(dir, 'app', 'page.jsx')) || fs.existsSync(path.join(dir, 'app', 'layout.tsx'))));
+  // A folder that only ever exists because a framework routes out of it. `src/routes` is
+  // SvelteKit's, `src/pages` is Astro's, `app/routes` is Remix's — and on 2026-08-31 none of
+  // the three was on this list, so a project that had one but did not name its framework in
+  // package.json was not read as a website at all.
+  const routeFolders = folder('pages')
+    || fs.existsSync(path.join(dir, 'src', 'routes'))
+    || fs.existsSync(path.join(dir, 'src', 'pages'))
+    || fs.existsSync(path.join(dir, 'app', 'routes'))
+    || (folder('app') && (fs.existsSync(path.join(dir, 'app', 'page.tsx')) || fs.existsSync(path.join(dir, 'app', 'page.jsx')) || fs.existsSync(path.join(dir, 'app', 'layout.tsx'))));
   const webish = Boolean(webFramework) || indexHtml || Boolean(hostConfig) || routeFolders || pages.length > 0;
   if (webish) {
     /** @type {Clue[]} */
@@ -662,19 +670,22 @@ async function productsIn(input) {
       const flat = listing.files.filter((f) => f.endsWith('.html')).map((f) => (f === 'index.html' ? '/' : `/${f}`));
       if (flat.length > 1) clues.push({ where: at('*.html'), means: `${flat.length} pages are plain HTML files sitting in this folder.` });
 
-      // Where the screens come from. Folder names answer for a framework that builds its
-      // addresses out of them; for everything else the router is read, and where there is no
-      // router the screens are read off the control that switches between them. Reading the
-      // folder names and stopping there is what reported a four-screen app as a one-page one.
-      const reading = pages.length > 0
-        ? { screens: /** @type {Screen[]} */ ([]), needValues: /** @type {{url: string, names: string[]}[]} */ ([]), router: /** @type {Router} */ ({ kind: 'files', where: 'the page folders', why: `${pages.length} addresses are built out of folder names, the way Next.js and its cousins do it, and every one of them is opened.` }) }
-        : fromHere(await readScreens(dir, has), where);
+      // Where the screens come from, and this one call is the difference between a site being
+      // walked and a site being glanced at. It asks the folder layout first, the router next,
+      // and the strip of tabs last — see {@link readScreens}. The pages `readPageRoutes`
+      // already found are handed in so they are not listed a second time: they are already
+      // turned into journeys by the web adapter, and listing them again would walk every page
+      // of a Next.js site twice.
+      const reading = fromHere(await readScreens(dir, has, pages.map((page) => page.url)), where);
       /** @type {Screen[]} */
       const screens = flat.length > 1
         ? flat.map((url) => ({ name: url === '/' ? 'the front page' : url, url }))
         : reading.screens;
-      if (reading.router.kind === 'tabs' || reading.router.kind === 'hash' || reading.router.kind === 'declared') {
-        clues.push({ where: at(reading.router.where ?? 'the source'), means: reading.router.why });
+      // The sentence that says WHERE the screen list came from is evidence in its own right,
+      // and the folder-layout reading was the one kind missing from this list — so a
+      // SvelteKit site's addresses were found and then never explained to anybody.
+      if (reading.router.where) {
+        clues.push({ where: at(reading.router.where), means: reading.router.why });
       }
 
       add('web', {
@@ -684,12 +695,23 @@ async function productsIn(input) {
           webFramework ? `It uses ${webFramework}` : 'There is a page here',
           pages.length > 0 ? ` and ${pages.length} page address${pages.length === 1 ? '' : 'es'} were read out of the folder names` : '',
           pages.length === 0 && screens.length > 0 ? ` and ${screens.length} screen${screens.length === 1 ? '' : 's'} were read out of ${reading.router.kind === 'tabs' ? 'the strip of tabs that switches between them' : reading.router.kind === 'files' ? 'the folder names' : 'its router'}` : '',
+          // An address nobody can open yet belongs in the FIRST sentence about this product,
+          // not only in the ledger further down. A summary that counts what was found and
+          // stays quiet about what cannot be reached is how "covers the website in full"
+          // ended up printed over a site with two unopened pages on 2026-08-31.
+          reading.needValues.length > 0 ? ` and ${reading.needValues.length} more ${reading.needValues.length === 1 ? 'address is' : 'addresses are'} waiting on a real value before ${reading.needValues.length === 1 ? 'it' : 'they'} can be opened at all` : '',
           flat.length > 1 && pages.length === 0 ? ` and ${flat.length} more are plain HTML files` : '',
           hostConfig ? `, it is set up to deploy to ${hostConfig.split('.')[0]}` : '',
           start ? `, and \`${start}\` starts it` : '',
         ].join('') + '.',
         evidence: clues,
-        router: pages.length > 0 || flat.length > 1
+        // A site of plain .html files is the one case the screen reading has nothing to say
+        // about: there is no framework, no router and no route folder, only files. Everywhere
+        // else `reading.router` is kept, because it names the file it came from and says how
+        // many addresses are waiting on a value — and that sentence is copied straight into
+        // the settings. Overwriting it with a fixed line, which is what happened until
+        // 2026-08-31, threw away the only place a person was told what was NOT being opened.
+        router: flat.length > 1 && reading.router.kind !== 'files'
           ? { kind: 'files', where: null, why: 'Every page here is a file with an address of its own, so each one is opened directly.' }
           : reading.router,
         startNote: booting.why,
@@ -2188,7 +2210,592 @@ async function looksLikeAServer(dir) {
 }
 
 // ---------------------------------------------------------------------------
-// Screens: read the router, not the folder names
+// Routes the folder layout declares
+// ---------------------------------------------------------------------------
+
+/**
+ * One address a framework builds out of a folder or a filename.
+ *
+ * @typedef {object} FolderRoute
+ * @property {string} url       The address as the framework spells it, changing parts and
+ *                              all — `/blog/[slug]`. This is the identity of the route, and
+ *                              it is what the coverage ledger names when nobody can open it.
+ * @property {string|null} open The address that can actually be typed into a browser, or
+ *                              null when a changing part still has no value. Never guessed.
+ * @property {string[]} needs   The changing parts still waiting on a value, by name.
+ * @property {string|null} from Where the value came from, in plain English, so nobody has to
+ *                             wonder whether the tool invented it.
+ * @property {string} file      The file the address came out of, relative to the app folder.
+ * @property {string} family    Which framework's spelling this was read in.
+ */
+
+/**
+ * How many route files are read before the walk stops and says so. A route tree is filenames
+ * only — nothing is opened — so this is generous; it exists to stop a walk that has wandered
+ * into somebody's photo library, not to ration normal work.
+ */
+const MOST_ROUTE_FILES = 5_000;
+
+/** How deep a route tree is followed. Real ones are five or six folders; twelve is slack. */
+const DEEPEST_ROUTE = 12;
+
+/** Files that sit beside a route for company and are not addresses of their own. */
+const NOT_A_ROUTE_FILE = /\.(test|spec|stories|d)\.|\.(css|scss|sass|less|styl|json|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|txt|map)$|\.(server|client)\.[cm]?[jt]sx?$/;
+
+/**
+ * Every filename under one folder, as POSIX paths relative to it, plus the folders that would
+ * not open.
+ *
+ * A folder that refuses to open is a hole in the route list, and the route list is the thing
+ * that decides how much of a website gets walked — so it is carried back rather than
+ * swallowed. On 2026-08-31 a three-page SvelteKit site reported "0 routes" and walked one
+ * page; a reader that hides its own blind spots is how that stays invisible.
+ *
+ * @param {string} base
+ * @returns {Promise<{files: string[], unreadable: string[], hitTheCap: boolean}>}
+ */
+async function everyFileUnder(base) {
+  /** @type {string[]} */
+  const files = [];
+  /** @type {string[]} */
+  const unreadable = [];
+  let hitTheCap = false;
+  if (!fs.existsSync(base)) return { files, unreadable, hitTheCap };
+  /** @type {{dir: string, depth: number}[]} */
+  const stack = [{ dir: base, depth: 0 }];
+  while (stack.length > 0) {
+    const here = /** @type {{dir: string, depth: number}} */ (stack.pop());
+    if (here.depth > DEEPEST_ROUTE) continue;
+    /** @type {import('node:fs').Dirent[]} */
+    let entries;
+    try {
+      entries = await fsp.readdir(here.dir, { withFileTypes: true });
+    } catch {
+      unreadable.push(path.relative(base, here.dir) || '.');
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const whole = path.join(here.dir, entry.name);
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+        stack.push({ dir: whole, depth: here.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (files.length >= MOST_ROUTE_FILES) { hitTheCap = true; continue; }
+      files.push(path.relative(base, whole).split(path.sep).join('/'));
+    }
+  }
+  return { files, unreadable, hitTheCap };
+}
+
+/**
+ * The changing parts of an address, by name, and whether the address works without them.
+ *
+ * Every family in this file spells the same idea differently — `[slug]`, `[...path]`,
+ * `[[...slug]]` — and the difference that matters is not the spelling. It is whether the
+ * address can be opened at all with nothing filled in. An OPTIONAL catch-all (`[[...slug]]`)
+ * answers on its own parent address, so it can be opened today. A required one cannot, and
+ * saying which is which is the whole job.
+ *
+ * @param {string} url
+ * @returns {{names: string[], optionalOnly: boolean}}
+ */
+function changingPartsOf(url) {
+  /** @type {string[]} */
+  const names = [];
+  let optionalOnly = true;
+  for (const segment of url.split('/')) {
+    if (segment === '' || !segment.startsWith('[')) continue;
+    const optional = /^\[\[.*\]\]$/.test(segment);
+    const inner = optional ? segment.slice(2, -2) : segment.slice(1, -1);
+    // `[slug=integer]` in SvelteKit names a checker for the value, never a second value.
+    const bare = inner.replace(/^\.{3}/, '').replace(/=.*$/, '');
+    names.push(bare === '' ? 'the rest of the address' : bare);
+    if (!optional) optionalOnly = false;
+  }
+  return { names, optionalOnly };
+}
+
+/**
+ * The address an optional catch-all answers on when nothing is filled in.
+ *
+ * `/shop/[[...slug]]` is `/shop`, and `/shop` is a page somebody can open right now. Dropping
+ * it into the "waiting on a value" pile would be true of the deeper addresses and false of
+ * this one, and it would leave a page that works today reported as never looked at.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function withoutTheOptionalParts(url) {
+  const kept = url.split('/').filter((segment) => !/^\[\[.*\]\]$/.test(segment));
+  const joined = kept.join('/').replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1');
+  return joined === '' ? '/' : joined;
+}
+
+/**
+ * A route folder name turned into one address segment, or nothing at all.
+ *
+ * The three things every one of these families does with a folder name, in the same order:
+ * a grouping that is not part of the address, a folder that is not routed at all, and a
+ * changing part that is. Getting the first two wrong invents addresses that 404, and an
+ * address that 404s reports a difference nobody caused.
+ *
+ * @param {string} name
+ * @returns {string|null}   The segment, or null when the name contributes nothing to the URL.
+ */
+function segmentFromFolder(name) {
+  if (name === '' || name === '.') return null;
+  // `(marketing)` in Next, `(app)` in SvelteKit: a grouping that organises files and never
+  // appears in the address.
+  if (name.startsWith('(') && name.endsWith(')')) return null;
+  // `(.)photo`, `(..)photo`: Next's intercepting routes. They re-use another route's address
+  // rather than adding one, so counting them would list the same page twice.
+  if (/^\(\.{1,3}\)/.test(name)) return null;
+  // `@modal`: a parallel slot. It renders INSIDE its parent's address and has none of its own.
+  if (name.startsWith('@')) return null;
+  // `_components`: private, and never routed.
+  if (name.startsWith('_')) return null;
+  // `[x+2e]`: SvelteKit's way of writing a character that cannot be a folder name. Decoded
+  // rather than treated as a changing part, because it is a literal full stop.
+  const escaped = name.match(/^\[x\+([0-9a-fA-F]{2})\]$/);
+  if (escaped) return String.fromCharCode(parseInt(escaped[1], 16));
+  return name;
+}
+
+/**
+ * Read every address this app builds out of its folder layout.
+ *
+ * WHY THIS EXISTS, AND IT IS THE POINT OF THE WHOLE SECTION. Until 2026-08-31 this tool found
+ * a site's pages by reading code that DECLARES routes — a route table, a `<Route path=...>`.
+ * That works for Express and for the older React routers and finds nothing whatever for the
+ * entire modern family where the folder layout IS the routing. Measured that day by somebody
+ * using the tool as a stranger: a three-page SvelteKit site reported 0 routes, opened the
+ * front page, and called that the website covered in full. Two of its three pages were never
+ * opened and the coverage ledger never named them. One page walked out of three, reported as
+ * all of them, is the exact false all-clear this product exists to make impossible.
+ *
+ * Six spellings of one idea, and each one is a place a whole site can go unseen:
+ *
+ *   SvelteKit          src/routes/about/+page.svelte     becomes  /about
+ *   Next app router    app/(marketing)/about/page.tsx    becomes  /about
+ *   Next pages router  pages/about.tsx                   becomes  /about
+ *   Nuxt               pages/about.vue                   becomes  /about
+ *   Astro              src/pages/about.astro             becomes  /about
+ *   Remix              app/routes/blog.$slug.tsx         becomes  /blog/[slug]
+ *
+ * Nothing is opened and nothing is run. This reads filenames.
+ *
+ * @param {string} dir
+ * @param {(name: string) => boolean} [has]   Is this a dependency? Three frameworks own a
+ *   folder called `pages`, and a `.ts` file inside it is a page in one of them and a server
+ *   endpoint in another. package.json is the only thing that can settle that.
+ * @returns {Promise<{routes: FolderRoute[], families: string[], where: string|null, unreadable: string[], hitTheCap: boolean}>}
+ */
+async function readFolderRoutes(dir, has = () => false) {
+  /** @type {Map<string, FolderRoute>} */
+  const found = new Map();
+  /** @type {Set<string>} */
+  const families = new Set();
+  /** @type {string[]} */
+  const unreadable = [];
+  /** @type {string|null} */
+  let where = null;
+  let hitTheCap = false;
+
+  /**
+   * @param {string} url
+   * @param {string} file
+   * @param {string} family
+   */
+  const add = (url, file, family) => {
+    // Every family joins a folder path to a filename, and a page at the top of the tree makes
+    // that "/" plus "about". Collapsing the repeats here rather than in six callers is the
+    // difference between `/about` and `//about`, and `//about` is an address that 404s.
+    const clean = url === '' ? '/' : url.replace(/\/{2,}/g, '/').replace(/(.)\/+$/, '$1');
+    if (found.has(clean)) return;
+    const { names, optionalOnly } = changingPartsOf(clean);
+    found.set(clean, {
+      url: clean,
+      // An address with nothing changing in it opens as written. One whose only changing
+      // parts are optional opens on its parent address. Anything else waits for a value, and
+      // waits VISIBLY — `needs` is carried all the way into the settings file and the ledger.
+      open: names.length === 0 ? clean : optionalOnly ? withoutTheOptionalParts(clean) : null,
+      needs: names.length === 0 || optionalOnly ? [] : names,
+      from: names.length > 0 && optionalOnly
+        ? 'the changing part of this address may be left out entirely, so this is the address it answers on with nothing filled in'
+        : null,
+      file,
+      family,
+    });
+    families.add(family);
+    where = where ?? file;
+  };
+
+  /**
+   * @param {string} folder
+   * @returns {Promise<string[]>}
+   */
+  const filesUnder = async (folder) => {
+    const reading = await everyFileUnder(path.join(dir, folder));
+    for (const bad of reading.unreadable) unreadable.push(bad === '.' ? folder : path.posix.join(folder, bad));
+    hitTheCap = hitTheCap || reading.hitTheCap;
+    return reading.files;
+  };
+
+  /**
+   * Fold a route file's folder path into an address, dropping the parts that are not in it.
+   *
+   * @param {string} rel
+   * @returns {string|null}  Null when the file sits under a folder that is not routed at all,
+   *   in which case the file has no address rather than an address one level up.
+   */
+  const urlFromFolders = (rel) => {
+    const folders = rel.split('/').slice(0, -1);
+    /** @type {string[]} */
+    const kept = [];
+    for (const part of folders) {
+      const segment = segmentFromFolder(part);
+      // A private, slot or intercepting folder does not just lose a segment — nothing under
+      // it is an address, so the whole file is dropped rather than hoisted up a level.
+      if (segment === null && (part.startsWith('_') || part.startsWith('@') || /^\(\.{1,3}\)/.test(part))) return null;
+      if (segment !== null) kept.push(segment);
+    }
+    return `/${kept.join('/')}`;
+  };
+
+  // ── SvelteKit: src/routes/**/+page.svelte ────────────────────────────────
+  // The `+` files are SvelteKit's whole vocabulary, and only `+page.svelte` renders something
+  // a person can open. `+layout` wraps other routes and has no address of its own; `+server`
+  // answers requests rather than showing a screen. Both are left to the door reader in
+  // adapters/source.js, because walking them as screens would photograph a JSON body and
+  // call it a page.
+  for (const routesDir of ['src/routes', 'routes']) {
+    const files = await filesUnder(routesDir);
+    for (const rel of files) {
+      const name = rel.split('/').pop() ?? '';
+      // `+page@.svelte` and `+page@named.svelte` reset which layout wraps the page. The part
+      // after the @ says which layout, never which address, so it is ignored here.
+      if (!/^\+page(@[^.]*)?\.(svelte|md|svx)$/.test(name)) continue;
+      const url = urlFromFolders(rel);
+      if (url === null) continue;
+      add(url, path.posix.join(routesDir, rel), 'SvelteKit');
+    }
+    if (found.size > 0) break;
+  }
+
+  // ── Next.js app router: app/**/page.tsx ─────────────────────────────────
+  for (const appDir of ['app', 'src/app']) {
+    const files = await filesUnder(appDir);
+    for (const rel of files) {
+      const name = rel.split('/').pop() ?? '';
+      if (!/^page\.([cm]?[jt]sx?|mdx?)$/.test(name)) continue;
+      const url = urlFromFolders(rel);
+      if (url === null) continue;
+      add(url, path.posix.join(appDir, rel), 'the Next.js app router');
+    }
+  }
+
+  // ── Remix and React Router file routes: app/routes/** ───────────────────
+  // The dots in `blog.$slug.tsx` are the slashes. This is read only when the project says it
+  // uses one of these routers, or when nothing in `app/` looks like a Next.js page — both
+  // families own a folder called `app/`, and guessing between them invents addresses.
+  const remixish = has('@remix-run/react') || has('@remix-run/node') || has('@remix-run/dev')
+    || has('react-router') || has('@react-router/dev') || has('@react-router/fs-routes') || has('@remix-run/router');
+  if (fs.existsSync(path.join(dir, 'app', 'routes')) && (remixish || !has('next'))) {
+    const files = await filesUnder('app/routes');
+    /** @type {Set<string>} */
+    const ids = new Set();
+    for (const rel of files) {
+      const parts = rel.split('/');
+      const name = /** @type {string} */ (parts[parts.length - 1]);
+      if (NOT_A_ROUTE_FILE.test(name) || !/\.([cm]?[jt]sx?|mdx?)$/.test(name)) continue;
+      const stem = name.replace(/\.([cm]?[jt]sx?|mdx?)$/, '');
+      // Two shapes mean the same route: `blog.$slug.tsx` sitting on its own, and
+      // `blog.$slug/route.tsx` with its helpers beside it. Anything else inside a route
+      // folder is a file kept next to its route rather than a route.
+      if (parts.length === 1) ids.add(stem);
+      else if (stem === 'route' && parts.length === 2) ids.add(/** @type {string} */ (parts[0]));
+    }
+    for (const id of ids) {
+      const url = remixUrl(id);
+      if (url === null) continue;
+      add(url, `app/routes/${id}`, 'Remix file routes');
+    }
+  }
+
+  // ── Nuxt, Astro and the Next.js pages router: a folder called `pages` ───
+  // Three frameworks, one folder name. Which one it is decides whether `pages/thing.ts` is a
+  // page or a server endpoint, and only package.json knows. Where package.json says nothing,
+  // the file extension does: `.vue` is Nuxt's and `.astro` is Astro's, and neither is ever
+  // the other's.
+  const astroish = has('astro');
+  const nuxtish = has('nuxt') || has('nuxt3') || has('nuxt-edge');
+  // A project routes one way, not three. Once SvelteKit's or Remix's tree has answered, a
+  // folder called `pages` beside it is a folder of components — and reading `src/pages/utils.ts`
+  // in a SvelteKit app as the address `/utils` would put a page that does not exist into the
+  // settings and then report a 404 as a difference nobody caused.
+  // Next.js is the exception: an app router and a pages router genuinely coexist in one
+  // project, and half the site lives in each. Only the two families that own the WHOLE tree
+  // rule the `pages` folder out.
+  const alreadyRouted = families.has('SvelteKit') || families.has('Remix file routes');
+  // `app/pages` is Nuxt 4's home and nobody else's. A Next.js app-router project with a real
+  // folder called `app/pages` would otherwise gain an invented `/page` address on top of the
+  // `/pages` one it genuinely has.
+  const pagesFolders = alreadyRouted ? [] : nuxtish ? ['src/pages', 'pages', 'app/pages'] : ['src/pages', 'pages'];
+  for (const pagesDir of pagesFolders) {
+    const files = await filesUnder(pagesDir);
+    for (const rel of files) {
+      const name = rel.split('/').pop() ?? '';
+      if (NOT_A_ROUTE_FILE.test(name) || name.startsWith('.')) continue;
+      // `pages/api/**` is the Next.js pages router's server half, and there is no screen
+      // behind it. It is a door, and doors are read in adapters/source.js.
+      if (rel.startsWith('api/')) continue;
+
+      const astroPage = /\.(astro|mdx?|markdown|html)$/.test(name);
+      const vuePage = /\.vue$/.test(name);
+      const scriptPage = /\.[cm]?[jt]sx?$/.test(name);
+      /** @type {string|null} */
+      let family = null;
+      if (astroPage && (astroish || !nuxtish)) family = 'Astro';
+      else if (vuePage) family = 'Nuxt';
+      // A plain script in `src/pages` is an Astro ENDPOINT rather than a page, so under Astro
+      // it is skipped here and left to the door reader. Under everything else this folder
+      // belongs to a router where a script IS the page.
+      else if (scriptPage && !astroish) family = nuxtish ? 'Nuxt' : 'the Next.js pages router';
+      if (family === null) continue;
+
+      const stem = name.replace(/\.[^.]+$/, '');
+      if (stem.startsWith('_')) {
+        // Nuxt 2 spelled a changing part `_id.vue` where everything else writes `[id]`. Under
+        // Nuxt that underscore is a parameter; under everything else it is a framework hook
+        // like `_app` or `_document`. Reading it the wrong way either invents an address or
+        // loses one.
+        const nuxtParam = family === 'Nuxt' && stem.length > 1 && !['_app', '_document', '_error', '_middleware'].includes(stem);
+        if (!nuxtParam) continue;
+      }
+      const folders = urlFromFolders(rel);
+      if (folders === null) continue;
+      const leaf = stem === 'index' ? null : segmentFromLeaf(stem, family);
+      if (stem !== 'index' && leaf === null) continue;
+      add(leaf === null ? folders : `${folders}/${leaf}`, path.posix.join(pagesDir, rel), family);
+    }
+  }
+
+  return {
+    routes: [...found.values()].sort((a, b) => a.url.localeCompare(b.url)),
+    families: [...families],
+    where,
+    unreadable,
+    hitTheCap,
+  };
+}
+
+/**
+ * The last part of a page's address, taken from the filename rather than the folder.
+ *
+ * Only Nuxt 2 needs a rule of its own here: it wrote a changing part as `_id.vue` where every
+ * other family writes `[id]`. Translating it means the coverage ledger names it the same way
+ * as all the others and asks for a value in the same sentence.
+ *
+ * @param {string} stem
+ * @param {string} family
+ * @returns {string|null}
+ */
+function segmentFromLeaf(stem, family) {
+  if (family === 'Nuxt' && stem.startsWith('_') && stem.length > 1) return `[${stem.slice(1)}]`;
+  return segmentFromFolder(stem);
+}
+
+/**
+ * A Remix route id turned into an address.
+ *
+ * Remix writes the whole path in the filename and uses dots for slashes, which makes five
+ * rules that look like typos and are not:
+ *
+ *   `_index`          the index of whatever it sits under, so it adds nothing to the address
+ *   `_auth.login`     a leading underscore is a layout with no address, so this is /login
+ *   `app_.projects`   a trailing underscore only opts out of a layout, so this is /app/projects
+ *   `sitemap[.]xml`   brackets escape a real full stop, so this is /sitemap.xml
+ *   `$slug` and `$`   a changing part, and a catch-all for everything below
+ *
+ * @param {string} id
+ * @returns {string|null}
+ */
+function remixUrl(id) {
+  // Escaped literals come out first, because the dots inside them are full stops while every
+  // other dot in the name is a slash. A space cannot appear in a route id, so it is safe to
+  // stand in for one while the rest is split.
+  /** @type {string[]} */
+  const literals = [];
+  const masked = id.replace(/\[([^\]]*)\]/g, (_, inner) => {
+    literals.push(String(inner));
+    return ` ${literals.length - 1} `;
+  });
+  /** @type {string[]} */
+  const kept = [];
+  for (const raw of masked.split('.')) {
+    const piece = raw.replace(/ (\d+) /g, (_, n) => literals[Number(n)] ?? '');
+    if (piece === '' || piece === '_index') continue;
+    // A leading underscore is a layout that wraps other routes without adding to the address.
+    if (piece.startsWith('_')) continue;
+    // A trailing underscore says "do not nest inside the parent's layout". The address is the
+    // same either way.
+    const bare = piece.replace(/_$/, '');
+    if (bare === '') continue;
+    if (bare === '$') { kept.push('[...rest]'); continue; }
+    if (bare.startsWith('$')) { kept.push(`[${bare.slice(1)}]`); continue; }
+    kept.push(bare);
+  }
+  return `/${kept.join('/')}`.replace(/(.)\/$/, '$1');
+}
+
+/**
+ * Values this project itself uses for the changing parts of its own addresses.
+ *
+ * WHY GUESSING IS NOT ALLOWED HERE. `/blog/[slug]` cannot be opened until somebody says which
+ * post. Inventing one opens a page that does not exist, and a 404 compared against a 404
+ * agrees with itself forever — a green tick over a page nobody has ever seen. So a value is
+ * only ever taken from somewhere the project already wrote it down, and where it came from is
+ * carried beside it and printed. Two places, in this order:
+ *
+ *   1. A LINK. `<a href="/blog/hello-world">` in the project's own source. The strongest
+ *      evidence there is: the project ships that address to a person to click.
+ *   2. A NAMED VALUE. `slug: 'hello-world'` in the project's own code, tests or fixtures.
+ *      Weaker, so it is only used when no link fits, and it is only accepted when it is
+ *      short and plainly a value rather than a sentence or a path.
+ *
+ * When neither exists the address is left unopened ON PURPOSE and reported as a door that was
+ * found and not opened. That is the difference between this tool and a green tick.
+ *
+ * @param {{rel: string, text: string}[]} source
+ * @returns {{links: {url: string, file: string}[], named: Map<string, {value: string, file: string}>}}
+ */
+function valuesTheProjectUses(source) {
+  /** @type {Map<string, string>} url -> the file it was written in */
+  const links = new Map();
+  /** @type {Map<string, {value: string, file: string}>} */
+  const named = new Map();
+
+  // Only places that are unmistakably an address. A bare string beginning with a slash turns
+  // up as a file path, a glob and a regular expression far more often than as a link, and
+  // three wrong values are worse than none.
+  const asAddress = /(?:href|to|action|formaction|goto|pathname)\s*[=:]\s*["'`](\/[^"'`\s{}]*)["'`]|(?:goto|push|replace|redirect|navigate|visit)\s*\(\s*(?:\d+\s*,\s*)?["'`](\/[^"'`\s{}]*)["'`]/gi;
+  const asNamedValue = /\b(?:"|')?([A-Za-z_$][\w$]{0,40})(?:"|')?\s*[:=]\s*["'`]([A-Za-z0-9][A-Za-z0-9._~-]{0,63})["'`]/g;
+
+  for (const one of source) {
+    for (const hit of one.text.matchAll(asAddress)) {
+      const url = (hit[1] ?? hit[2] ?? '').replace(/[?#].*$/, '').replace(/(.)\/$/, '$1');
+      if (url === '' || url === '/' || url.includes('//')) continue;
+      if (!links.has(url)) links.set(url, one.rel);
+    }
+    for (const hit of one.text.matchAll(asNamedValue)) {
+      const name = /** @type {string} */ (hit[1]);
+      if (named.has(name)) continue;
+      named.set(name, { value: /** @type {string} */ (hit[2]), file: one.rel });
+    }
+  }
+  return { links: [...links].map(([url, file]) => ({ url, file })), named };
+}
+
+/**
+ * Fill in the changing parts of an address from a value the project itself uses, or leave it
+ * unopened and say why.
+ *
+ * @param {FolderRoute[]} routes
+ * @param {{links: {url: string, file: string}[], named: Map<string, {value: string, file: string}>}} known
+ * @returns {FolderRoute[]}  The same routes, with `open` and `from` filled in where a real
+ *   value was found. Anything still unopened keeps its `needs` so the ledger can name it.
+ */
+function fillChangingParts(routes, known) {
+  // An address that is a route in its own right is never used as a value for another one.
+  // `/blog/archive` beside `/blog/[slug]` is a page, not a slug, and borrowing it would open
+  // the wrong page and call the changing one covered.
+  const realRoutes = new Set(routes.map((route) => route.url));
+  return routes.map((route) => {
+    if (route.open !== null || route.needs.length === 0) return route;
+
+    for (const link of known.links) {
+      if (realRoutes.has(link.url)) continue;
+      const values = matchAddress(route.url, link.url);
+      if (values === null) continue;
+      return {
+        ...route,
+        open: link.url,
+        from: `${describeValues(values)}, which is the address ${link.file} links to`,
+      };
+    }
+
+    // No link fits, so each changing part is asked for by name. All of them have to be
+    // answered: half an address is not an address, and opening `/blog/[slug]` with the slug
+    // still in it would ask the site for a page whose name is a pair of square brackets.
+    /** @type {Record<string, string>} */
+    const values = {};
+    /** @type {string[]} */
+    const files = [];
+    for (const need of route.needs) {
+      const guessFree = known.named.get(need);
+      if (guessFree === undefined) return route;
+      values[need] = guessFree.value;
+      if (!files.includes(guessFree.file)) files.push(guessFree.file);
+    }
+    let open = route.url;
+    for (const [name, value] of Object.entries(values)) {
+      open = open.replace(new RegExp(`\\[\\.{0,3}${name}(=[^\\]]*)?\\]`), encodeURIComponent(value));
+    }
+    return { ...route, open, from: `${describeValues(values)}, taken from ${plainly(files)} where this project sets it` };
+  });
+}
+
+/**
+ * Does this literal address fit that pattern, and if so what does each changing part become?
+ *
+ * @param {string} pattern  `/blog/[slug]`
+ * @param {string} literal  `/blog/hello-world`
+ * @returns {Record<string, string>|null}
+ */
+function matchAddress(pattern, literal) {
+  const want = pattern.split('/').filter((s) => s !== '');
+  const got = literal.split('/').filter((s) => s !== '');
+  /** @type {Record<string, string>} */
+  const values = {};
+  for (let i = 0; i < want.length; i += 1) {
+    const segment = /** @type {string} */ (want[i]);
+    if (!segment.startsWith('[')) {
+      if (got[i] !== segment) return null;
+      continue;
+    }
+    const inner = segment.replace(/^\[\[(.*)\]\]$/, '$1').replace(/^\[(.*)\]$/, '$1');
+    const name = inner.replace(/^\.{3}/, '').replace(/=.*$/, '');
+    if (inner.startsWith('...')) {
+      // A catch-all swallows everything left, so it has to be last and there has to be
+      // something for it to swallow.
+      const rest = got.slice(i);
+      if (i !== want.length - 1 || rest.length === 0) return null;
+      values[name] = rest.join('/');
+      return values;
+    }
+    const value = got[i];
+    if (value === undefined || value === '') return null;
+    values[name] = value;
+  }
+  return got.length === want.length ? values : null;
+}
+
+/**
+ * "the slug is hello-world" — the sentence that goes beside an address so nobody has to
+ * wonder whether a value was invented.
+ *
+ * @param {Record<string, string>} values
+ * @returns {string}
+ */
+function describeValues(values) {
+  return plainly(Object.entries(values).map(([name, value]) => `${name} is "${value}"`));
+}
+
+// ---------------------------------------------------------------------------
+// Screens: read whatever this app actually uses to decide what to show
 // ---------------------------------------------------------------------------
 
 /**
@@ -2213,37 +2820,101 @@ async function looksLikeAServer(dir) {
 /**
  * Every route a router declares, plus the screens a router does not declare at all.
  *
- * THE FAILURE THIS EXISTS TO STOP. A single-page app is one HTML file, so reading folder
- * names finds one screen and reports it as the whole product. Terminal Deck's phone client is
- * exactly that: one `index.html`, and four screens a person moves between all day. It was
- * checked for months of pretend coverage — one page walked, three unwatched, and a clean run
- * every time. Where the app declares a router, the router is read. Where it does not, the
- * screens are read out of the strip of tabs that switches between them — and the fact that
- * they are reached by CLICKING rather than by an address is said out loud, because a made-up
- * `#address` that silently lands on the same page is worse than nothing: it turns three
- * unchecked screens into three identical checks that agree with each other forever.
+ * TWO FAILURES THIS EXISTS TO STOP, and they are opposite halves of one mistake.
  *
- * Four readings, and every one names the file it came from:
+ * READING ONLY THE FOLDERS. A single-page app is one HTML file, so reading folder names finds
+ * one screen and reports it as the whole product. Terminal Deck's phone client is exactly
+ * that: one `index.html`, and four screens a person moves between all day. It was checked for
+ * months of pretend coverage — one page walked, three unwatched, and a clean run every time.
  *
- *   1. DECLARED ROUTES — `path: '/x'` in a route table, `<Route path="/x">`, the shape every
+ * READING ONLY THE ROUTERS. The correction to the first one went too far, and for a year this
+ * function looked for a route TABLE and nothing else. Every modern framework builds its
+ * addresses out of the folder layout instead, and there is no table anywhere to find.
+ * Measured on 2026-08-31 by somebody using the tool as a stranger: a three-page SvelteKit
+ * site, 0 routes reported, the front page opened, "the website covered in full". Two pages
+ * of three never opened, and the coverage ledger never named them.
+ *
+ * Five readings, in order of how much the app itself has settled the question, and every one
+ * names the file it came from:
+ *
+ *   1. THE FOLDER LAYOUT — SvelteKit, both Next.js routers, Nuxt, Astro, Remix. Where the
+ *      folders ARE the routing there is nothing to interpret: the layout is the answer.
+ *   2. DECLARED ROUTES — `path: '/x'` in a route table, `<Route path="/x">`, the shape every
  *      router library from React Router to Vue Router to Angular writes.
- *   2. HASH ROUTES — a `#name` compared against the address bar. A real address, reachable by
+ *   3. HASH ROUTES — a `#name` compared against the address bar. A real address, reachable by
  *      opening it, and only reported when the code actually reads `location.hash`.
- *   3. TABS — an object literal pairing a screen name with the label on the control that
- *      switches to it. Not an address: a click, and it is written as one.
- *   4. NOTHING FOUND — one page, said plainly, so the coverage ledger can say so too.
+ *   4. TABS — an object literal pairing a screen name with the label on the control that
+ *      switches to it. Not an address: a click, and it is written as one. A made-up
+ *      `#address` that silently lands on the same page is worse than nothing: it turns three
+ *      unchecked screens into three identical checks that agree with each other forever.
+ *   5. NOTHING FOUND — one page, said plainly, so the coverage ledger can say so too.
  *
  * @param {string} dir
  * @param {(name: string) => boolean} [has]   Is this package a dependency? A project that
  *   installs a router library is a project whose route tables mean what they say, and that
  *   fact lives in package.json rather than in the file the table is written in.
+ * @param {string[]} [alreadyListed]   Addresses something else in this run already turns into
+ *   a journey — today that is the page reader in adapters/web.js, which knows the two Next.js
+ *   routers. Those are not repeated in the settings, because a page listed twice is walked
+ *   twice and every run costs double for nothing. They are still COUNTED, so the sentence
+ *   this function writes about the router is about the whole site rather than the remainder.
  * @returns {Promise<{screens: Screen[], router: Router, needValues: {url: string, names: string[]}[]}>}
  */
-async function readScreens(dir, has = () => false) {
+async function readScreens(dir, has = () => false, alreadyListed = []) {
   const { files, tooBig } = await readSome(dir, { most: 200, depth: 5 });
   const source = files.filter((f) => !/\.(test|spec)\.[cm]?[jt]sx?$/.test(f.rel));
 
-  // ── 1: routes a router library declares ───────────────────────────────────
+  // ── 1: the folder layout, where the folder layout IS the routing ──────────
+  // This runs first and, when it finds anything, it is the final answer. A SvelteKit project
+  // that also happens to install a router library still gets its addresses from its folders,
+  // and reading the library's table instead would invent a second, wrong list.
+  const layout = await readFolderRoutes(dir, has);
+  if (layout.routes.length > 0) {
+    // Values are hunted for in the project's OWN files, tests and fixtures included — a test
+    // that opens `/blog/hello-world` is the project telling us that post exists. Nothing is
+    // ever invented; see {@link valuesTheProjectUses}.
+    const filled = fillChangingParts(layout.routes, valuesTheProjectUses(files));
+    const already = new Set(alreadyListed);
+    /** @type {Screen[]} */
+    const screens = [];
+    /** @type {{url: string, names: string[]}[]} */
+    const needValues = [];
+    for (const route of filled) {
+      if (route.open === null) {
+        // FOUND AND NOT OPENED, and named as such. Skipping it silently would be the same
+        // false all-clear in a smaller box: the ledger would count the pages it walked and
+        // never mention the one it could not.
+        needValues.push({ url: route.url, names: route.needs });
+        continue;
+      }
+      if (already.has(route.url)) continue;
+      screens.push({
+        name: route.url === '/' ? 'the front page' : route.url,
+        url: route.open,
+        describe: route.from === null
+          ? `open ${route.open} and read what the screen says every control is and does`
+          : `open ${route.open} and read what the screen says every control is and does — ${route.from}`,
+      });
+    }
+    const walked = filled.filter((route) => route.open !== null).length;
+    const holes = [
+      layout.unreadable.length > 0
+        ? ` ${plainly(layout.unreadable.slice(0, 3))}${layout.unreadable.length > 3 ? ' and others' : ''} could not be opened, so any page under ${layout.unreadable.length === 1 ? 'it' : 'them'} is missing from this list entirely.`
+        : '',
+      layout.hitTheCap ? ` There were more than ${MOST_ROUTE_FILES} files in the route folders, so the walk stopped early and this list may be short.` : '',
+    ].join('');
+    return {
+      screens,
+      needValues,
+      router: {
+        kind: 'files',
+        where: layout.where,
+        why: `${filled.length} address${filled.length === 1 ? ' is' : 'es are'} built out of the folder layout, the way ${plainly(layout.families)} does it — starting at ${layout.where}. ${walked} of them can be opened as ${walked === 1 ? 'it stands' : 'they stand'}${needValues.length > 0 ? `, and ${needValues.length} ${needValues.length === 1 ? 'has a changing part in it and is' : 'have a changing part in them and are'} waiting on a real value, listed below rather than dropped` : ''}.${holes}`,
+      },
+    };
+  }
+
+  // ── 2: routes a router library declares ───────────────────────────────────
   /** @type {Map<string, Screen>} */
   const declared = new Map();
   /** @type {string|null} */
@@ -2297,7 +2968,7 @@ async function readScreens(dir, has = () => false) {
     };
   }
 
-  // ── 2: hash routes ────────────────────────────────────────────────────────
+  // ── 3: hash routes ────────────────────────────────────────────────────────
   const readsHash = source.find((f) => /location\.hash|hashchange|useHashLocation|createWebHashHistory|HashRouter/.test(f.text));
   if (readsHash) {
     /** @type {Map<string, Screen>} */
@@ -2322,7 +2993,7 @@ async function readScreens(dir, has = () => false) {
     }
   }
 
-  // ── 3: a strip of tabs ────────────────────────────────────────────────────
+  // ── 4: a strip of tabs ────────────────────────────────────────────────────
   /** @type {Map<string, Screen>} */
   const tabs = new Map();
   /** @type {string|null} */
