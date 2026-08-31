@@ -1223,7 +1223,7 @@ function howToCover(kind, never, harvested = false) {
     case 'export':
       return harvested
         ? `The project's own tests have already been harvested and they do not reach these, so nothing existing covers them. Either they are dead code worth deleting, or they need a test that calls them — starting with "${first}".`
-        : `Write a journeys file that calls them and pass it with --journeys — starting with "${first}". (Harvesting the project's own tests would answer this for free, and that is written and not yet wired into a run.)`;
+        : `Write a journeys file that calls them and pass it with --journeys — starting with "${first}". (Or ask for a source that answers this for free: --journeys suite harvests the project's own tests.)`;
     default:
       return `Add a journey that reaches "${first}" and the ones beside it.`;
   }
