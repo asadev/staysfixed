@@ -28,7 +28,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Windows is here because for its whole life this package shipped to Windows and its
+        # own tests had never once been run there. They were, for the first time, on
+        # 2026-08-31: 75 of them did not pass. Isolation could not work at all, because
+        # Windows keeps its temporary folder inside AppData and the tool refuses to write
+        # there; stopping a command did not stop what the command started; paired mode — the
+        # strongest thing this tool does — had never run, because it piped two programs
+        # through /bin/sh. None of that was findable from a Mac, and this line is the only
+        # reason it stays findable.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
