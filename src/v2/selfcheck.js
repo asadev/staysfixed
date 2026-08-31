@@ -6,16 +6,20 @@
  * as the evidence that it can still go red, and there is no other way to get
  * that evidence: you cannot test a difference engine by reading it.
  *
- * So this builds nine tiny products, each as a real repository with a working
- * commit and an uncommitted change on top - which is exactly the shape of the
- * thing an agent points this tool at - runs the engine over each, and fails
- * loudly if a break gets through.
+ * So this builds a tiny product per case, each as a real repository with a
+ * working commit and an uncommitted change on top - which is exactly the shape
+ * of the thing an agent points this tool at - runs the engine over each, and
+ * fails loudly if a break gets through. A few of them go further and ship,
+ * because what "working" MEANS is only ever written down by shipping, and the
+ * cases about that record cannot be set up any other way.
  *
- * Six of the nine are breaks that MUST be caught. Three are the other half of
- * the same promise, and they matter just as much: pairs that must produce NO
- * findings at all. A tool that cries wolf gets switched off, and a tool that is
- * switched off catches nothing, so a false alarm fails this run exactly the way
- * a miss does.
+ * Most are breaks that MUST be caught. The rest are the other half of the same
+ * promise, and they matter just as much: pairs that must produce NO findings at
+ * all. A tool that cries wolf gets switched off, and a tool that is switched off
+ * catches nothing, so a false alarm fails this run exactly the way a miss does.
+ * No count is given here on purpose - it was wrong within a fortnight of being
+ * written, and a comment that has to be edited every time a case is added is a
+ * comment that ends up lying. The list below is the count.
  *
  *   staysfixed check --selfcheck
  *   node src/v2/selfcheck.js --only rounded --keep
@@ -37,6 +41,11 @@ import { fileURLToPath } from 'node:url';
 // ever looked in different places, the corpus would be proving something other
 // than what an agent actually runs, which is worse than having no corpus at all.
 import { loadEngine } from './mcp/tools.js';
+// Shipping is the one thing in this tool that decides what "working" means, and three of the
+// cases below are about exactly that decision, so they have to make it for real. This is the
+// same function `staysfixed ship` calls; going round it — writing a reference pointer by
+// hand — would prove the engine works against a record no person could ever produce.
+import { onShip } from './ship.js';
 
 const run = promisify(execFile);
 
@@ -71,6 +80,17 @@ const run = promisify(execFile);
  * @property {Record<string, unknown>[]} [journeys]
  *   A journeys file of its own, for a case about what happens when a journey cannot be
  *   walked. Left out, every case gets the one-step "run it" journey.
+ * @property {'the commit that works'|'whatever was shipped'} [compareWith]
+ *   Which build this case holds the product against. Every case but the ones about what
+ *   "working" MEANS uses the default and names the commit, because that is the shortest way
+ *   to a fixture with two builds in it. A case about the record itself cannot: the record is
+ *   only written by shipping, so those cases ship in `prepare` and then ask the engine the
+ *   way a person does — by asking nothing, and letting it read what the project calls working.
+ * @property {boolean} [paired]
+ *   Whether to boot the old build and walk it live. True unless a case says otherwise, because
+ *   it is the strongest comparison there is. A case about a reference that CANNOT honestly be
+ *   booted has to say false: asking for a paired run against one is refused outright, which is
+ *   the right answer to give a person and a useless one to write a corpus case against.
  * @property {(dir: string, working: string) => Promise<{ready: boolean, why: string}>} [prepare]
  *   Bend the machine around the product before the engine runs — take away permission to
  *   write, for instance. Answering `ready: false` means this machine cannot be made to do
@@ -573,7 +593,270 @@ export const CASES = [
       'report.js': `console.log('${broken ? 'three' : 'two'} orders');\n`,
     }),
   },
+
+  {
+    name: 'a product that never started is not a product that has not changed',
+    breaks:
+      'Nothing runs at all. This product throws on its first line, prints nothing and stops with a failure code, and it does it on BOTH builds — which is the ordinary shape of a project somebody is halfway through fixing. What the walk then wrote down was a stack trace and an exit code: two facts, both true, both about the crash rather than about the product. Two builds that crash the same way agree at every one of those addresses, and agreement is the silence this tool reads as "nothing changed". Measured on 2026-08-31 it came back "Nothing that worked has changed. 7 addresses checked" about a product that had done nothing whatsoever, `ship` blessed it as the standard, and fixing the product the next day produced four findings nobody had caused — every real value differing from the stored crash.',
+    expect: 'no answer',
+    // The word that has to be in the closing paragraph. A run may perfectly well come back
+    // with no findings here; what it may never do is present that as a comparison. Saying
+    // "refusal" is saying the addresses hold no answer on one side or the other, which is the
+    // whole difference between "I looked and found nothing" and "there was nothing to look at".
+    summaryMustSay: [/refusal/i],
+    build: (broken) => ({
+      // Its own package.json, without the `bin` entry every other fixture carries. That entry
+      // is a door, the source reader finds it without running anything, and two addresses that
+      // compare perfectly well are enough to stop this being a run where NOTHING was compared —
+      // which is the exact shape this case is about. The product here does nothing at all, and
+      // the fixture has to be a product that offers nothing else either.
+      'package.json': JSON.stringify({ name: 'widget', version: '1.0.0', type: 'module' }, null, 2) + '\n',
+      'cli.js': [
+        "import { readFileSync } from 'node:fs';",
+        '// The first line, and it throws: the settings file this needs is not there. Nothing',
+        '// below it ever runs, on either build.',
+        "const settings = JSON.parse(readFileSync('settings.json', 'utf8'));",
+        broken ? "console.log('orders: could not be loaded');" : 'console.log(`orders: ${settings.orders}`);',
+        '',
+      ].join('\n'),
+    }),
+  },
+
+  {
+    name: 'coverage this build took away is never handed back as a pass',
+    breaks:
+      'Two journeys. One of them is untouched and agrees perfectly; the other stops answering, because the program behind it now throws on its first line. So there are no findings — there is nothing at those addresses to differ from — and the honest verdict is that this run is not a pass: an address that used to be watched and cannot be now is coverage this change took away. The engine works that out correctly and then handed it to the bookkeeping, and until 2026-08-31 the bookkeeping ASSIGNED the verdict rather than narrowing it: one line, `ok = no findings and no new wobble`, which threw away every not-a-pass already decided. Accounting may take a pass away. It may never hand one back.',
+    expect: 'no answer',
+    summaryMustSay: [/coverage this build has taken away/i],
+    journeys: [
+      {
+        name: 'run-it',
+        describe: 'Run the main program.',
+        source: 'code',
+        surface: 'cli',
+        steps: [{ act: 'run', run: 'node cli.js', note: 'the part of the product that still works' }],
+      },
+      {
+        name: 'run-the-report',
+        describe: 'Run the report.',
+        source: 'code',
+        surface: 'cli',
+        steps: [{ act: 'run', run: 'node report.js', note: 'the part that stops answering' }],
+      },
+    ],
+    build: (broken) => ({
+      'package.json': PKG,
+      'cli.js': "console.log('two orders');\n",
+      'report.js': broken
+        ? [
+            "import { readFileSync } from 'node:fs';",
+            "const rows = JSON.parse(readFileSync('nowhere.json', 'utf8'));",
+            'console.log(`report rows ${rows.length}`);',
+            '',
+          ].join('\n')
+        : "console.log('report rows 3');\n",
+    }),
+  },
+
+  {
+    name: 'a standard cut from a tree git does not have is never walked out of git',
+    breaks:
+      'The product shipped from a working tree with uncommitted changes in it, which is how most things actually ship. The record is filed under a fingerprint of that TREE — an id like `work-76ac0155c8b9`, deliberately not the commit\'s — because the files that were checked are not the files git has. Then somebody threw the uncommitted work away, so the product is the old commit again and a field has gone from what it prints. That is a real regression against what shipped, and the record on disk holds the value it is missing. Until 2026-08-31 a run would export the COMMIT, boot it, call it the old build, see it missing the same field, and drop the finding as something the old build does too. A clean answer, produced by walking a build nobody ever shipped.',
+    expect: 'a finding',
+    mustSay: [/email/i],
+    compareWith: 'whatever was shipped',
+    // Not paired, and that is the case rather than a limitation of it. Asking for a paired run
+    // against a reference cut from a tree git does not have is refused in one sentence, which
+    // is the right answer and not one a corpus can learn anything from. The damage was always
+    // done on the ordinary run: the old build gets booted anyway, to prove the differences that
+    // survived, and that is the road this walks.
+    paired: false,
+    prepare: shipFromATreeWithUncommittedWork,
+    build: (broken) => ({ 'package.json': PKG, 'cli.js': theReply(broken) }),
+  },
+
+  {
+    name: 'with nothing edited, nothing can be a change',
+    breaks:
+      'Nothing at all, and there is nothing on the other side of the comparison either: this is the build already on record as working, run again. Measured 2026-08-31 on a stock Next.js app with two pages and a link between them — its own prefetch is started by the browser and cancelled when the page is torn down, so it lands in about four runs in five. Ten checks of that untouched tree, minutes apart, gave three reports of a difference, one report that "the change made something non-deterministic", and six clean ones. Identical bytes, four different answers, and the one thing that was certainly true — that nothing had been edited — was the thing the report denied. A race is no use in a corpus that has to mean the same thing every time it runs, so the fixture stands in for it with something that behaves the same way and never flickers: a local file nobody commits, holding the name of the machine this was set up on. The working tree has it and a checkout of the commit does not, so the address answers one way here and another way there while the build is byte for byte the same build.',
+    expect: 'nothing',
+    // Both sentences, and each carries half of it. The first is the headline saying what this
+    // run really was; the second proves an address DID move and was filed as the build
+    // disagreeing with itself rather than dropped. A case that went quiet because nothing
+    // happened would pass the first and fail the second, which is the point of having it.
+    summaryMustSay: [/compared with itself/i, /answered differently across two runs of one build/i],
+    build: () => ({
+      'package.json': PKG,
+      // Under `out/`, which the corpus gitignores, so it is in the working tree and not in
+      // the commit — exactly like the .env or the machine-local settings file every real
+      // project has one of.
+      'out/machine.txt': 'lab-7\n',
+      'cli.js': [
+        "import fs from 'node:fs';",
+        '// A product that says which machine it was set up on, out of a file nobody commits.',
+        "const machine = fs.existsSync('out/machine.txt') ? fs.readFileSync('out/machine.txt', 'utf8').trim() : 'unknown';",
+        'console.log(`machine ${machine}`);',
+        "console.log('total 10.005');",
+        '',
+      ].join('\n'),
+    }),
+  },
+
+  {
+    name: 'what working means moves only when somebody ships',
+    breaks:
+      'Nothing, and the product prints exactly what it printed on the day it shipped. What moved in between is the RECORD: somebody put the shipped build back on another machine and ran an ordinary check, which stored fresh captures of it. The store keeps every capture a build ever produced and the reader took the newest, so that run quietly became the definition of working — and the next check compared today against a stranger\'s afternoon rather than against what was blessed. Only `ship` decides what working means; a record that drifts on its own is that one rule leaking. Measured and fixed 2026-08-31, and the two captures blessed at ship time are written down beside the cut for exactly this reason.',
+    expect: 'nothing',
+    // Proof that it was quiet for the right reason. Silence over a comparison that never
+    // happened is the failure this whole corpus exists to make impossible, so the closing
+    // sentence has to name a count of addresses that really were put side by side.
+    summaryMustSay: [/addresses checked/i],
+    compareWith: 'whatever was shipped',
+    paired: false,
+    prepare: letTheRecordDriftAfterShipping,
+    build: () => ({
+      'package.json': PKG,
+      'cli.js': [
+        "import fs from 'node:fs';",
+        '// The machine name lives in a file nobody commits, so it can differ from one run of',
+        '// this very build to the next without the build itself changing at all.',
+        "const machine = fs.existsSync('out/machine.txt') ? fs.readFileSync('out/machine.txt', 'utf8').trim() : 'unknown';",
+        'console.log(`machine ${machine}`);',
+        "console.log('two orders');",
+        '',
+      ].join('\n'),
+    }),
+  },
 ];
+
+/**
+ * The reply this product prints, with and without the field that was shipped.
+ *
+ * One function because two cases need the same two versions of it: the build that is put in
+ * the commit, and the build that is really shipped on top of it.
+ *
+ * @param {boolean} withEmail
+ * @returns {string}
+ */
+function theReply(withEmail) {
+  return [
+    'const person = {',
+    '  id: 7,',
+    "  name: 'Ada',",
+    withEmail ? "  email: 'ada@example.com'," : null,
+    "  city: 'London',",
+    '};',
+    'console.log(JSON.stringify(person));',
+    '',
+  ]
+    .filter((line) => line !== null)
+    .join('\n');
+}
+
+/**
+ * Ship the working tree, uncommitted changes and all, and then throw the uncommitted work away.
+ *
+ * The state this leaves behind is an ordinary Tuesday: a release cut from what was actually on
+ * disk, and a tree that has since gone back to the commit. What makes it worth a case is that
+ * the record and the commit are two different builds, and everything downstream believed
+ * otherwise — so the value the record holds gets walked against a build that never had it.
+ *
+ * `ready: false` where the machine will not perform it. A refused cut is not a failed case: it
+ * means this fixture never reached the state the case is about, and calling that a pass would
+ * be the corpus telling the kind of lie it exists to catch.
+ *
+ * @param {string} dir
+ * @returns {Promise<{ready: boolean, why: string}>}
+ */
+async function shipFromATreeWithUncommittedWork(dir) {
+  const engine = await loadEngine();
+  if (!engine.parts.check) return { ready: false, why: 'the difference engine is not in this build' };
+  const journeys = path.join(dir, 'journeys.json');
+
+  // Proved, not assumed. The whole case rests on the tree being one git does not have, and a
+  // fixture that came out clean would ship a plain commit and test nothing at all.
+  const changed = await git(dir, ['status', '--porcelain']);
+  if (changed.trim() === '') return { ready: false, why: 'the working tree came out clean, so there was no uncommitted change to ship from' };
+
+  // One walk, so the store has a record of what this build does. Nothing is compared: there is
+  // no reference yet, which is exactly where a project starts.
+  try {
+    await engine.parts.check({ cwd: dir, configFile: undefined, against: undefined, paired: false, journeys, only: [] });
+  } catch (e) {
+    return { ready: false, why: `the first walk did not work: ${why(e)}` };
+  }
+
+  /** @type {any} */
+  let shipped;
+  try {
+    // No product name is passed, deliberately. A person runs `staysfixed ship` and nothing
+    // else, so the name has to be worked out the same way `check` works it out — and the day
+    // those two readers disagreed, a project shipped and checked under different names for its
+    // whole life and never compared anything. Letting it derive here keeps that in the corpus.
+    shipped = await onShip({ root: dir, note: 'shipped from the working tree' });
+  } catch (e) {
+    return { ready: false, why: `shipping did not work: ${why(e)}` };
+  }
+  if (shipped?.cut !== true) return { ready: false, why: `nothing was made the standard, so there is no record to compare against: ${shipped?.summary ?? 'no reason given'}` };
+
+  // And now somebody throws the uncommitted work away — a discarded stash, a `git checkout .`,
+  // an agent tidying up. The product is the commit again, and a field that was in what shipped
+  // has gone with it.
+  await writeAll(dir, { 'cli.js': theReply(false) });
+  return { ready: true, why: '' };
+}
+
+/**
+ * Ship, then let somebody else run an ordinary check on the very same build.
+ *
+ * That second run stores fresh captures of the shipped build, and it is the whole case: the
+ * store keeps every capture a build ever produced, and the moment the reader takes the newest
+ * of them, a stranger's afternoon has quietly replaced what "working" means. Nobody shipped.
+ *
+ * The last two lines matter as much as the rest. The machine name is put back so the product
+ * really is doing what it did on the day it shipped — the case is about the RECORD moving, not
+ * the product — and a note file is added so this build is not the reference build itself, which
+ * would make the run silent for a completely different and correct reason.
+ *
+ * @param {string} dir
+ * @returns {Promise<{ready: boolean, why: string}>}
+ */
+async function letTheRecordDriftAfterShipping(dir) {
+  const engine = await loadEngine();
+  if (!engine.parts.check) return { ready: false, why: 'the difference engine is not in this build' };
+  const journeys = path.join(dir, 'journeys.json');
+  /** @param {string} machine */
+  const setUpOn = async (machine) => writeAll(dir, { 'out/machine.txt': `${machine}\n` });
+
+  await setUpOn('lab-7');
+  try {
+    await engine.parts.check({ cwd: dir, configFile: undefined, against: undefined, paired: false, journeys, only: [] });
+  } catch (e) {
+    return { ready: false, why: `the walk before shipping did not work: ${why(e)}` };
+  }
+
+  /** @type {any} */
+  let shipped;
+  try {
+    shipped = await onShip({ root: dir, note: 'the build that works' });
+  } catch (e) {
+    return { ready: false, why: `shipping did not work: ${why(e)}` };
+  }
+  if (shipped?.cut !== true) return { ready: false, why: `nothing was made the standard, so there is no record to drift: ${shipped?.summary ?? 'no reason given'}` };
+
+  // Somebody else, on another machine, checks the same build out and runs a check. Nothing
+  // about that is unusual and nothing about it is shipping.
+  await setUpOn('lab-9');
+  try {
+    await engine.parts.check({ cwd: dir, configFile: undefined, against: undefined, paired: false, journeys, only: [] });
+  } catch (e) {
+    return { ready: false, why: `the second walk of the shipped build did not work: ${why(e)}` };
+  }
+
+  await setUpOn('lab-7');
+  await fsp.writeFile(path.join(dir, 'NOTES.md'), 'A note about the product. Nothing runs it.\n');
+  return { ready: true, why: '' };
+}
 
 /**
  * Take away the store's permission to be written to, and say honestly when this machine
@@ -836,8 +1119,11 @@ async function runOne(check, workDir, c, attempt) {
     result = await check({
       cwd: dir,
       configFile: undefined,
-      against: working,
-      paired: true,
+      // Naming the commit is what gives most cases two builds without anybody shipping. A
+      // case about what the RECORD says is working must not name one: it has to be answered
+      // out of the store, which is the only place a person's `staysfixed ship` writes to.
+      against: c.compareWith === 'whatever was shipped' ? undefined : working,
+      paired: c.paired !== false,
       journeys: path.join(dir, 'journeys.json'),
       only: [],
     });

@@ -206,7 +206,7 @@
  * @property {(selector: string, opts?: {timeoutMs?: number}) => Promise<void>} waitForGone
  * @property {(selector: string) => Promise<void>} scrollTo
  * @property {(ms: number) => Promise<void>} wait
- * @property {(js: string) => Promise<any>} evaluate
+ * @property {(js: string|Function) => Promise<any>} evaluate   Text, or a function to run in the page.
  * @property {(selector: string) => Promise<boolean>} visible
  * @property {(selector: string) => Promise<boolean>} exists
  * @property {(selector: string) => Promise<string>} textOf

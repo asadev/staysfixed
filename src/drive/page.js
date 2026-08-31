@@ -151,6 +151,73 @@ function removeStyleTagSource(token) {
 }
 
 /**
+ * What somebody handed `evaluate`, turned into a piece of JavaScript the app can run.
+ *
+ * A STRING IS NOT THE OBVIOUS THING TO PASS. Every other tool in this space takes a
+ * function — `page.evaluate(() => document.title)` is what anybody who has driven a browser
+ * before writes first — and this took only text. Handing it a function put a function object
+ * where the debug protocol wanted a string, and what came back was, in full, measured while
+ * using the tool on 2026-08-31:
+ *
+ *     The app refused the request "Runtime.evaluate": Invalid parameters
+ *
+ * That is the machine's own words about its own wire format, said to somebody who has done
+ * nothing wrong except write the thing that works everywhere else. So a function is now
+ * accepted and turned into the call it obviously means, and text goes through untouched.
+ * Only what genuinely cannot be run says so — in a sentence naming what it was given and
+ * showing the one line that works.
+ *
+ * It runs with nothing passed to it, which is why a function that declares a parameter is
+ * refused rather than quietly given `undefined`: there is no way to send a value into the
+ * page here, and the alternative is a guard failing inside the app for a reason that has
+ * nothing to do with the app.
+ *
+ * @param {unknown} what   A piece of JavaScript as text, or a function to call in the page.
+ * @returns {string}
+ */
+export function asJavaScript(what) {
+  if (typeof what === 'string') return what;
+
+  if (typeof what === 'function') {
+    const source = String(what);
+    // A built-in — `page.evaluate(Math.max)`, `page.evaluate(document.querySelector)` — has
+    // no readable body, so there is nothing to send. Asked FIRST, before anything about the
+    // arguments: a built-in usually declares some, and being told to close over them is
+    // advice about a function nobody could have sent anyway. Said plainly, too, because
+    // "SyntaxError: Unexpected token" out of the page is a worse version of the message this
+    // whole function exists to replace.
+    if (/\{\s*\[native code\]\s*\}/.test(source)) {
+      throw new StaysFixedError('evaluate() was handed a built-in function, and the app cannot be sent one: it has no source to run.', {
+        hint: 'Wrap it in a function of your own: page.evaluate(() => document.querySelector(".total").textContent).',
+      });
+    }
+    if (what.length > 0) {
+      throw new StaysFixedError(
+        `evaluate() runs a function inside the app with nothing passed to it, and this one asks for ${what.length === 1 ? 'an argument' : `${what.length} arguments`}.`,
+        {
+          hint: 'Nothing can be sent into the page here. Close over what it needs, or write the value into the JavaScript itself: page.evaluate(`document.title === ${JSON.stringify(expected)}`).',
+        },
+      );
+    }
+    // Shorthand method syntax — `{ title() { ... } }` — is not an expression on its own, so
+    // the ordinary wrapping below would send the app something it cannot parse. Put back in
+    // the object it was written in and called by name.
+    //
+    // A leading `async` is taken off before the name is read, and it has to be: leave it on
+    // and the pattern happily reads `async () => 1` as a method called "async", because
+    // backtracking gives up the optional keyword and matches the word itself.
+    const shorthand = /^(?!function\b)([A-Za-z_$][\w$]*)\s*\(/.exec(source.replace(/^async\s+/, ''));
+    if (shorthand) return `({ ${source} }).${shorthand[1]}()`;
+    return `(${source})()`;
+  }
+
+  throw new StaysFixedError(
+    `evaluate() wants a piece of JavaScript written as text, or a function to run in the app. It was given ${what === null ? 'null' : typeof what}.`,
+    { hint: 'Either way round works: page.evaluate(\'document.title\') or page.evaluate(() => document.title).' },
+  );
+}
+
+/**
  * One line describing whatever the page threw.
  * @param {any} details  Runtime.ExceptionDetails
  * @returns {string}
@@ -283,12 +350,17 @@ export async function createPage(cdp, opts) {
   // ---------------------------------------------------------------------------
 
   /**
-   * @param {string} js
+   * Run JavaScript in the page.
+   *
+   * Takes it as text, or as a function to call — see {@link asJavaScript} for why both, and
+   * for the message that used to come back when somebody wrote the function.
+   *
+   * @param {string|Function} js
    * @returns {Promise<any>}
    */
   async function evaluate(js) {
     const res = await send('Runtime.evaluate', {
-      expression: js,
+      expression: asJavaScript(js),
       awaitPromise: true,
       returnByValue: true,
       userGesture: true,

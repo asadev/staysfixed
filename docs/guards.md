@@ -126,6 +126,24 @@ export default {
 | `app.read(file)` | Read a project file as text. |
 | `app.project` | The resolved config and paths. |
 
+### Running your own JavaScript in the page
+
+`page.evaluate` takes it either way round — as a piece of JavaScript written as
+text, or as a function it will call inside the app:
+
+```js
+const title = await app.page.evaluate('document.title');
+const title = await app.page.evaluate(() => document.title);
+```
+
+The function is run with nothing passed to it, so one that asks for an argument
+is refused rather than quietly handed `undefined`. Close over what it needs, or
+write the value into the JavaScript itself:
+
+```js
+await app.page.evaluate(`document.title === ${JSON.stringify(expected)}`);
+```
+
 ---
 
 ## The `expect` style

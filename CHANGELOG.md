@@ -6,7 +6,35 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### The self-check corpus knows about the five false all-clears found on 2026-08-31
+
+Five defects were found and fixed that day, each of which could have blessed a broken build,
+and not one of them would have been caught by the corpus that is supposed to make that
+impossible. There is a case for each now, and every one of them was made to fail against the
+code as it stood before its fix before it was believed.
+
+- **A build that crashes on its first line is no longer a build that agrees with itself.** Two
+  builds that crash the same way used to agree at every address, and agreement is the silence
+  this tool reads as "nothing changed".
+- **Coverage this build took away is never handed back as a pass.** The engine decided that
+  correctly and the bookkeeping then assigned the verdict rather than narrowing it.
+- **A standard cut from a tree git does not have is never walked out of git.** The old build
+  was exported from the commit, walked, and a real regression was dropped as something it does
+  too.
+- **With nothing edited, nothing can be a change.** The build being checked and the build on
+  record were one build, and whatever flickered between two runs was reported as a change
+  nobody made.
+- **What "working" means moves only when somebody ships.** Re-running a check on the shipped
+  build quietly replaced the standard with whatever that run happened to see.
+
+### A guard can hand `evaluate` a function
+
+`page.evaluate` took JavaScript as text and nothing else. Passing it a function — the obvious
+thing, and what every other tool in this space accepts — answered `The app refused the request
+"Runtime.evaluate": Invalid parameters`, which is the debug protocol talking about its own wire
+format to somebody who had done nothing wrong. It now takes either, and the two things it
+genuinely cannot run — a built-in, and a function that asks for an argument it has no way to
+be given — say so in a sentence with an example in it.
 
 ## [0.12.0] — 2026-08-31
 
