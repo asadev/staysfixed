@@ -1893,7 +1893,15 @@ export async function run(ctx) {
   const others = (result.plan?.readiness ?? [])
     .map((/** @type {any} */ r) => String(r.product ?? ''))
     .filter((/** @type {string} */ n, /** @type {number} */ i, /** @type {string[]} */ all) => n !== '' && all.indexOf(n) === i);
-  if (result.written.length > 0) ok(`Written: ${result.written.map((f) => shortPath(f)).join(', ')}`);
+  if (result.written.length > 0) {
+    ok(`Written: ${result.written.map((f) => shortPath(f)).join(', ')}`);
+    // Worth one line, because of what happens if it is not done. These files are part of the
+    // build now: until they are committed the working tree is not what git has, so the first
+    // reference gets cut from a tree that has no commit of its own — and a later check cannot
+    // put that build back on the machine to walk it live. It falls back to the stored record,
+    // says so, and is weaker for it. One `git add` avoids the whole thing.
+    say('Commit them before you ship. Settings that are not committed leave the first reference tied to a build git does not have, and a later check can then only compare against the record rather than running the old build live.');
+  }
   if (others.length > 1) {
     warn(
       `Those settings describe ONE product. ${others.length} were found here (${others.join(', ')}), and the others are not covered by this file. ` +
