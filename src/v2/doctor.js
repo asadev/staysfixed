@@ -231,7 +231,16 @@ export async function capabilities(opts = {}) {
     askTheAdapters(root),
   ]);
 
-  const surfaces = describeSurfaces(tools, hosts, configFile !== null, browsers, desktopApp, drivers, phones, asked);
+  /** @type {{commands: number, imports: number}} */
+  let wires = { commands: 0, imports: 0 };
+  if (configFile) {
+    try {
+      wires = whatTheProcessBlockWires(readFileSync(configFile, 'utf8'));
+    } catch {
+      wires = { commands: 0, imports: 0 };
+    }
+  }
+  const surfaces = describeSurfaces(tools, hosts, configFile !== null, browsers, desktopApp, drivers, phones, asked, wires);
 
   /** @type {Capabilities} */
   const caps = {
@@ -1415,6 +1424,40 @@ export function readHostProbe(name, alive, look) {
 }
 
 /**
+ * How much of this project is actually wired for the command-line surface.
+ *
+ * The `cli` surface was hard-coded READY with "Fully covered here" — it never looked at the
+ * project at all. So on a settings file whose `process` block wires no commands and nothing
+ * to import, doctor said command-line tools were fully covered, and a check then answered
+ * "Nothing that worked has changed" having run not one command. Measured 2026-08-31.
+ *
+ * Counted out of the text, like everything else here, because the settings may be JavaScript
+ * and doctor never runs a person's code to answer a question about their machine.
+ *
+ * @param {string} text
+ * @returns {{commands: number, imports: number}}
+ */
+function whatTheProcessBlockWires(text) {
+  const clean = withoutComments(text);
+  const at = /["']?process["']?\s*:\s*\{/.exec(clean);
+  if (!at) return { commands: 0, imports: 0 };
+  let depth = 0;
+  let end = at.index + at[0].length;
+  for (; end < clean.length; end += 1) {
+    if (clean[end] === '{') depth += 1;
+    else if (clean[end] === '}') {
+      if (depth === 0) break;
+      depth -= 1;
+    }
+  }
+  const inside = clean.slice(at.index + at[0].length, end);
+  return {
+    commands: (inside.match(/["']?run["']?\s*:/g) ?? []).length,
+    imports: (inside.match(/["']?module["']?\s*:/g) ?? []).length,
+  };
+}
+
+/**
  * The handful of settings an adapter needs to say what it is missing, read out of a
  * JavaScript settings file WITHOUT running it.
  *
@@ -1566,9 +1609,12 @@ async function findReference(root) {
  * @param {DriverReport[]} drivers      What this copy of the tool can drive at all.
  * @param {{android: FoundApp|null, ios: FoundApp|null}} phones
  * @param {Map<string, Need[]>} asked   What each separate adapter says IT is missing.
+ * @param {{commands: number, imports: number}} [wires]
+ *   What this project's own settings wire for the command-line surface. A surface with
+ *   nothing wired covers nothing here, whatever this machine could do.
  * @returns {SurfaceReport[]}
  */
-function describeSurfaces(tools, hosts, configured, browsers, desktopApp, drivers, phones, asked) {
+function describeSurfaces(tools, hosts, configured, browsers, desktopApp, drivers, phones, asked, wires = { commands: 0, imports: 0 }) {
   /** @param {string} surface */
   const canDrive = (surface) => drivers.find((d) => d.surface === surface)?.present !== false;
   /** @param {string} surface */
@@ -1597,14 +1643,31 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
    */
   const notInThisProject = new Set();
 
+  // READY is about this PROJECT, not about this machine. Hard-coded ready meant doctor said
+  // command-line tools were "fully covered here" on a settings file that wires no commands
+  // and nothing to import — and a check then answered "Nothing that worked has changed"
+  // having run not one command.
+  const wiredForCli = configured && wires.commands + wires.imports > 0;
   surfaces.push({
     id: 'cli',
     name: 'command-line tools and libraries',
-    status: 'ready',
-    summary: 'Fully covered here. What it printed, what it exited with, what it wrote, what it called out to, and what it exports.',
+    status: wiredForCli ? 'ready' : 'partial',
+    summary: wiredForCli
+      ? 'Fully covered here. What it printed, what it exited with, what it wrote, what it called out to, and what it exports.'
+      : configured
+        ? 'This machine can cover it in full — what a command printed, what it exited with, what it wrote, what it called out to, what it exports — but these settings wire no command to run and nothing to import, so a check runs none of it and a clean result says nothing about any of it.'
+        : 'This machine can cover it in full, but nothing is set up in this folder yet, so a check cannot run here at all.',
     canCheck: withoutADriver,
     cannotCheck: ['meaning', 'pixels'],
-    needs: [],
+    needs: wiredForCli
+      ? []
+      : [{
+          what: 'a command to run, or something to import',
+          why: 'Nothing here is walked otherwise, and a run that walks nothing still finishes and still says nothing changed.',
+          fix: 'Add `process: { commands: [{ name: "help", run: "node bin/cli.js --help" }] }` to your settings, or `imports: [{ name: "the package entry", module: "index.js" }]`.',
+          automatic: true,
+          unlocks: 'Everything a command does — what it printed, what it exited with, what it wrote to disk, what it reached for.',
+        }],
   });
 
   surfaces.push({
