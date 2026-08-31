@@ -917,6 +917,13 @@ export async function sweepAbandonedScratch() {
   } catch {
     return;
   }
+  // Programs whose folder has ALREADY gone are swept first, because the loop below can never
+  // reach them: it walks folders, and theirs is not there any more. Fifteen `serve` processes
+  // were found in exactly that state on 2026-08-31, out of scratch folders deleted the day
+  // before. A folder that no longer exists is the strongest possible evidence that its run is
+  // over, so nothing that is still going is at risk here.
+  await stopRunsWhoseFolderHasGone();
+
   let taken = 0;
   for (const name of names) {
     if (taken >= MOST_PER_RUN) break;
@@ -945,6 +952,51 @@ export async function sweepAbandonedScratch() {
     await stopWhateverIsStillRunningIn(dir);
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
     taken += 1;
+  }
+}
+
+/**
+ * Stop programs still running out of a scratch folder that has already been deleted.
+ *
+ * Every one of these was started by a check and outlived it. They hold ports and memory on a
+ * machine that is usually not this tool's author's, and nothing else on it has a
+ * `staysfixed-check-` path in its command line, so the match cannot catch a stranger.
+ *
+ * A folder that still exists is left completely alone here — a run that is going right now
+ * has its folder, and stopping its own servers would be this function breaking the check that
+ * called it.
+ *
+ * POSIX only, for the same reason as {@link stopWhateverIsStillRunningIn}: asking Windows
+ * this question needs a different command, and a wrong one there could stop something else.
+ *
+ * @returns {Promise<void>}
+ */
+async function stopRunsWhoseFolderHasGone() {
+  if (process.platform === 'win32') return;
+  /** @type {string} */
+  let listing = '';
+  try {
+    listing = (await exec('/bin/ps', ['-A', '-o', 'pid=,command='], { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 })).stdout;
+  } catch {
+    return;
+  }
+  for (const line of listing.split('\n')) {
+    const folder = /(\S*staysfixed-check-[A-Za-z0-9]+)/.exec(line);
+    if (!folder) continue;
+    if (existsSync(folder[1])) continue;
+    const pid = Number.parseInt(line.trim().split(/\s+/)[0] ?? '', 10);
+    if (!Number.isFinite(pid) || pid <= 1 || pid === process.pid) continue;
+    for (const signal of /** @type {const} */ (['SIGTERM', 'SIGKILL'])) {
+      try {
+        process.kill(-pid, signal);
+      } catch {
+        try {
+          process.kill(pid, signal);
+        } catch {
+          // Gone already, or not ours to stop.
+        }
+      }
+    }
   }
 }
 

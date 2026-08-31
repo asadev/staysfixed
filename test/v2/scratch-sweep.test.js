@@ -66,4 +66,24 @@ describe('an abandoned scratch folder', () => {
     );
     await fsp.rm(dir, { recursive: true, force: true });
   });
+  test('a program whose scratch folder is already gone is stopped too', { skip: process.platform === 'win32' ? 'the process list is asked for differently on Windows' : false }, async () => {
+    // The loop that reclaims folders can never reach these: it walks folders, and theirs is
+    // not there any more. Fifteen `serve` processes were found in exactly this state on
+    // 2026-08-31, out of folders deleted the day before, still holding fifteen ports.
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-check-'));
+    const script = path.join(dir, 'server.js');
+    await fsp.writeFile(script, 'setInterval(() => {}, 1000);\n');
+    const child = spawn(process.execPath, [script], { detached: true, stdio: 'ignore' });
+    child.unref();
+    const pid = /** @type {number} */ (child.pid);
+    await wait(400);
+    assert.equal(alive(pid), true, 'the stand-in never started');
+
+    // The folder goes first, exactly as it does when a run is interrupted after cleanup.
+    await fsp.rm(dir, { recursive: true, force: true });
+    await sweepAbandonedScratch();
+    await wait(800);
+
+    assert.equal(alive(pid), false, 'its folder was long gone and it was still running — that is the leak');
+  });
 });

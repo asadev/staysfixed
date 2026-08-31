@@ -10,75 +10,113 @@ Nothing yet.
 
 ## [0.11.0] — 2026-08-31
 
-Twenty-six defects, closed by seven lanes working at once, each owning its own files and each
-required to reproduce the defect on a throwaway product before touching anything.
+Fifty-odd defects, found by running the thing rather than reading it. Two rounds of seven
+lanes, each lane required to reproduce its defect on a throwaway product before touching
+anything, and each fix held by a test that fails without it.
 
-### Fixed — it reported things as checked that were never checked
+**All eight surfaces have now actually been driven against a real product** — command-line
+tools, libraries, servers, websites, Electron, Android, iOS and, last of all, native Windows.
+That sentence was not true before this release. Each of the four that had only ever had an
+adapter and tests turned out to hold at least one defect that only running it could find.
 
-- **A root-level server went unread the moment the project also had a `src/` folder.** The
-  source reader fell back to its own default folder list, so a four-route `server.js` sitting
-  at the root was never read at all. A deleted route and a 200 turning into a 500 both came
-  back "Nothing that worked has changed", exit 0.
-- **`ship` blessed a run in which every journey REFUSED.** It was not blocked — it ran to the
-  end — and it found no differences, because there was nothing to differ. So a product that
-  throws on its first line became the definition of working, and every later check compared
-  one refusal against another, found them equal, and reported it as fine. Worse on recovery:
-  fixing the product produced thirteen findings nobody caused. The gate now lives in
-  `shouldCut`, where every caller passes through it.
-- **A surface said "fully covered here" about a project that wires nothing.** The command-line
-  surface was hard-coded ready and never looked at the project.
+### The three that could have blessed a broken build
+
+- **A refusal was stored as an ordinary value.** When a journey cannot run — the product
+  throws on its first line, a command dies before printing anything — what got written down
+  was a fact about the crash. Two builds that crash the same way agree at every address, and
+  agreement is what this tool reads as "nothing changed". So a product that did nothing at
+  all came back *"Nothing that worked has changed. 7 addresses checked"*, `ship` blessed it,
+  and the day somebody fixed the product, four findings arrived that nobody had caused. A
+  refusal is now a different kind of thing from a value: never compared to one, never
+  compared to another refusal as though both were answers, and refused at `ship` in
+  `shouldCut`, where every caller passes through.
+- **`settle()` assigned the verdict instead of narrowing it**, throwing away every not-a-pass
+  the engine had already decided — a run where the product never answered, and a run drowning
+  in wobble, both came back through that line as a pass. Accounting may take a pass away; it
+  may never hand one back.
+- **A reference cut from a tree with uncommitted changes was booted from its commit.** The
+  record is filed under a fingerprint of the tree that was walked, because the files checked
+  are not the files git has. Paired mode walked the commit and called it the old build, so an
+  address the record holds a real value for was reported as *"is there now and was not
+  before"*.
+
+### It reported things as checked that were never checked
+
+- **A root-level server went unread the moment the project also had a `src/` folder.** A
+  deleted route and a 200 turning into a 500 both came back "Nothing that worked has changed".
+- **`ship` blessed a run in which every journey refused**, and **the command-line surface was
+  hard-coded ready** and never looked at the project.
 - **`init` said a library "can be checked here now" and is "covered in full"** about an
-  `index.js` that does not exist — the entry point was read from package.json and never
-  checked against the disk.
+  `index.js` that does not exist.
+- **`init` asked the machine what it could do before working out the settings**, so on a fresh
+  project every question that is answered by reading the settings was answered against none.
+  A plain Node command-line tool was told it needed "a command to run" by the same run that
+  had just written `node cli.js --help` into its settings.
 
-### Fixed — false alarms, which cost trust just as fast
+### It stated things it had never looked for
 
-- **A guard that ran out of time was reported as "a bug that was already fixed is back"** on a
-  healthy tree. A timeout means the question could not be ANSWERED, which is not the answer
-  being no — the same distinction this tool draws everywhere else.
-- **A guard was told it "did not finish within 2 seconds"** when its own limit was 1.5.
-- **Raw Chrome DevTools Protocol text** was printed at a person as the whole reason a guard
-  failed.
+- **"No Windows desktop is reachable from here"** on a project whose settings named the
+  machine — with that machine reachable, signed in and unlocked the whole time. Nothing had
+  been dialled. Naming a machine in your own settings is the ask; the rest of your ssh config
+  is still left alone, and when nothing was dialled the sentence now says so.
+- **The live panel called every failed guard "broken again"**, with the story of the original
+  bug printed underneath as though it were proof. A guard that ran out of time did not answer
+  the question, and one that asserted nothing never asked it.
+- The HTML report said *"All 3 bugs that were fixed are still fixed"* over three guards that
+  were skipped, and *"Everything that worked still works"* over a run that checked nothing at
+  all.
 
-### Fixed — the report disagreed with itself
+### Nothing hangs, and nothing waits in silence
 
-- **Two byte-identical runs produced different `coverage.gaps`** — different doors named, a
-  different order. This tool's whole method is running the same thing twice and subtracting
-  what disagrees; a report that disagrees with itself undermines the measurement.
-- **`coverage.doorsWalked` counted doors as walked in the same report** whose only line about
-  them said "was not tried".
-- **`ship` said "nothing is being compared against anything yet"** with a reference in force,
-  and promised "the previous reference" when there had never been one.
+- **Every wait in the phone, desktop and Windows adapters now has a limit, and every limit
+  says what it was waiting for.** The cause was never a missing timeout: waits were settled by
+  a child's `close` event, which does not mean the program ended — it means nobody anywhere is
+  still holding its pipes, and one orphaned grandchild refuses that for ever. A verdict
+  printed, and then nothing, for ever. That is what the unexplained Electron deadlock was.
+- **A mistyped limit removed the limit.** `Number("10s")` is `NaN`, and every comparison
+  against `NaN` is false, so a step with a typo in its settings looped without end.
+- **A stock Vite app cost three minutes and told you nothing.** Vite ignores the port and host
+  it is handed and binds the name `localhost`, which on a Mac is the IPv6 loopback — so the
+  site came up on `[::1]` and the check knocked on `127.0.0.1` about 450 times a side. Boot
+  waits now knock on both, and a command that ignores its port, or exits, is named in seconds:
+  three minutes became ten seconds.
+- **A person at a terminal is told what the run is waiting for.** The running commentary
+  reached the live panel and nothing else, so a long wait was a blank screen — which is
+  indistinguishable from the tool being broken.
+- **Reclaiming a scratch folder now stops what is still running inside it.** Four servers from
+  the previous day were still up on this machine, out of folders that had already been deleted.
 
-### Fixed — the agent and the person were told different things
+### The report no longer disagrees with itself
 
-- **A person could not ask four of the questions an agent can.** `coverage`, `explain`,
-  `prove` and `waive` existed only over MCP. All four are commands now, plus `intent` —
-  without which a waiver could only ever be refused — and `check` now prints the finding ids,
-  without which there was nothing to hand them.
-- **`staysfixed_waive` refused the only file in the product** — the one the agent had just
-  edited — because an agent holds absolute paths and the seal expected relative ones.
-- **`staysfixed_coverage` forced the machine survey offline and then reported the forced
-  answer as a fact about the world**, telling the agent that iPhone and Android apps "cannot
-  be reached from this machine" when the truth was this project contains none.
+- **A renamed field was described only as the field that appeared**, never the one that
+  vanished — the half that breaks every caller, on the channel that exists to catch it.
+- **Two byte-identical runs produced different `coverage.gaps`**, and `coverage.doorsWalked`
+  counted doors as walked in the same report whose only line about them said "was not tried".
+- **`ship` said "nothing is being compared against anything yet"** with a reference in force.
+- **`ship` read the product name only out of a JSON settings file** — and every settings file
+  `init` writes is JavaScript. So it blessed under the package name while `check` recorded
+  under the settings name, and the two never met: a project could ship and check for ever
+  without once comparing anything.
 
-### Fixed — what a person is handed when something goes wrong
+### The person and the agent get the same truth
 
-- **An unwritable `TMPDIR` handed a raw `ENOENT ... mkdtemp`** to the block this tool tells
-  you to give a non-technical owner.
-- **A check run inside a nested project silently checked the PARENT's product**, saying
-  nothing about the switch.
-- **`flake` said "No check here has ever changed its mind"** about a register whose own JSON
-  showed a guard flipping — and the reason it gave was untrue.
-- **A monorepo container folder was announced as a product**, and the repository root was
-  named "the server" over routes belonging to a package one level down.
+- **Five commands a person did not have:** `coverage`, `explain`, `prove`, `waive` and
+  `intent`. All are commands now, `check` prints the finding ids so there is something to hand
+  them, and a test asserts the two readers get byte-identical facts.
+- **An intent sealed at the command line was recorded as "an agent, over MCP".**
+- **Six places sent a person to something only an agent can call** — a tool name, a JSON
+  field, an `include:` block — and `check --help` still said intent and waive live only on the
+  MCP server.
+- **`staysfixed_waive` refused the only file in the product**, because an agent holds absolute
+  paths and the seal expected relative ones; **`staysfixed_coverage` forced the machine survey
+  offline** and reported the forced answer as a fact about the world.
 
-### Proven
+### What a person is handed when something goes wrong
 
-The iOS surface, for the first time: built for the simulator, `doctor` went from "unavailable"
-to ready, and a check walked the app and recorded `screen.the-first-screen.walked`. Seven of
-the eight surfaces have now actually been exercised. Windows is reachable and signed in, and
-its screen is locked.
+- An unwritable `TMPDIR` handed over a raw `ENOENT ... mkdtemp`; a check run inside a nested
+  project silently checked the parent's product; `flake` said "No check here has ever changed
+  its mind" about a register whose own JSON showed a guard flipping, and gave an untrue
+  reason; a monorepo container folder was announced as a product.
 
 ## [0.10.0] — 2026-08-31
 
