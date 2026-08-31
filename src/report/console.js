@@ -44,6 +44,12 @@ const MAX_COMMANDS = 10;
 const MAX_TRACE_FILES = 12;
 
 /**
+ * How many of a check's recorded answers are printed. The register keeps twelve; six is
+ * enough to see a check flipping, and the whole row is one `staysfixed flake --json` away.
+ */
+const MAX_RECENT_STATUSES = 6;
+
+/**
  * Thousands separators, always. "1024 pixels" reads as noise; "1,024" reads as a number.
  * @param {number} n
  * @returns {string}
@@ -533,20 +539,97 @@ export function printTrace(report) {
 }
 
 /**
+ * A status that means the check actually reached a verdict.
+ *
+ * The same three as `isDecided` in src/core/history.js, which does not export it. Said
+ * again rather than guessed at, because the three it leaves out matter: 'skipped', 'new'
+ * and 'missing' are checks that never ran, and reading the move from "never ran" to
+ * "passed" as a change of mind would accuse every check somebody switched back on.
+ *
+ * @param {import('../types.js').CheckStatus} status
+ * @returns {boolean}
+ */
+function decided(status) {
+  return status === 'passed' || status === 'changed' || status === 'failed';
+}
+
+/**
+ * Checks whose own recorded answers disagree, and which nothing has counted as wobbling.
+ *
+ * This is the list the register used to have no way to mention, and its absence produced
+ * the worst sentence this tool can print. Measured 2026-08-31 on a real product: a guard
+ * recorded "passed" and then "failed", `staysfixed flake --json` printed both statuses,
+ * and `staysfixed flake` answered "No check here has ever changed its mind. That is exactly
+ * how it should be." — a clean bill of health contradicted by the very file it had just
+ * read out.
+ *
+ * The register was not lying about `flakes`. It counts a wobble only when the code can be
+ * PROVED to have stood still, which needs a commit and a clean tree, and there was no such
+ * proof. But "not counted" and "did not happen" are two different facts, and the second one
+ * was being printed for the first.
+ *
+ * These are not accused of anything here. A check that passed at one commit and failed at
+ * the next is a real break, not a wobble, and calling it flaky would be as corrosive as a
+ * false failure — which is exactly why `foldRun` refuses to count it. All this does is show
+ * what is on record and say plainly that nobody can tell which it was.
+ *
+ * @param {import('../types.js').History} history
+ * @returns {import('../types.js').HistoryEntry[]}
+ */
+function disagreedUncounted(history) {
+  return Object.values(history)
+    .filter((e) => (e.flakes ?? 0) === 0)
+    .filter((e) => new Set((e.recent ?? []).filter(decided)).size > 1);
+}
+
+/**
+ * The commit the last run pinned this check's answer to, if it could pin one.
+ *
+ * `foldRun` writes it, and writes `null` when there was nothing to pin to — no commit, or a
+ * working tree with uncommitted changes in it. It is not in the `HistoryEntry` type, which
+ * is why it is read through a cast rather than off the shape.
+ *
+ * @param {import('../types.js').HistoryEntry} entry
+ * @returns {string|null}
+ */
+function pinnedTo(entry) {
+  const sha = /** @type {{lastSha?: string|null}} */ (entry).lastSha;
+  return typeof sha === 'string' ? sha : null;
+}
+
+/**
  * The flake register, for `staysfixed flake`.
  * @param {import('../types.js').History} history
  * @param {number} [flakeLimit]
  * @returns {void}
  */
 export function printFlakes(history, flakeLimit = 2) {
-  const entries = wobbly(history ?? {});
+  const register = history ?? {};
+  const entries = wobbly(register);
+  const uncounted = disagreedUncounted(register);
   blank();
-  if (entries.length === 0) {
+  // The all-clear is now earned rather than assumed: it needs an empty register AND a
+  // record with nothing in it that disagrees with itself.
+  if (entries.length === 0 && uncounted.length === 0) {
     ok('No check here has ever changed its mind. That is exactly how it should be.');
     blank();
     return;
   }
 
+  if (entries.length > 0) printCountedFlakes(entries, flakeLimit);
+  if (uncounted.length > 0) printUncountedDisagreements(uncounted);
+  blank();
+}
+
+/**
+ * The register proper: checks that changed their mind while the code demonstrably stood
+ * still.
+ *
+ * @param {import('../types.js').HistoryEntry[]} entries
+ * @param {number} flakeLimit
+ * @returns {void}
+ */
+function printCountedFlakes(entries, flakeLimit) {
   heading('Checks that have changed their mind');
   /** @type {string[][]} */
   const rows = [[paint.grey('check'), paint.grey('wobbled'), paint.grey('last time'), paint.grey('verdict')]];
@@ -568,7 +651,46 @@ export function printFlakes(history, flakeLimit = 2) {
     say(paint.red('A condemned check is not a warning to live with. Fix it, or delete it.'));
     say(paint.grey('Once it is genuinely fixed, forgive it with: ') + paint.cyan('staysfixed flake --clear <name>'));
   }
+}
+
+/**
+ * What is on record and cannot be judged.
+ *
+ * The sequence is printed rather than summarised, because the sequence is the fact — it is
+ * what `staysfixed flake --json` shows, and a person who has read that file and then reads
+ * this needs the two to agree.
+ *
+ * @param {import('../types.js').HistoryEntry[]} entries
+ * @returns {void}
+ */
+function printUncountedDisagreements(entries) {
+  heading('Different answers on record, and nothing can say why');
+  say('  These gave one answer on one run and a different one on the next. Nothing on record');
+  say('  proves the code stood still in between, so none of it is counted as wobbling — and');
+  say('  none of it is a clean bill of health either. It may be flakiness; it may be a real');
+  say('  break somebody then fixed. Nobody can tell from here.');
   blank();
+  for (const entry of entries) {
+    const recent = (entry.recent ?? []).filter(decided).slice(-MAX_RECENT_STATUSES);
+    say(`  ${entry.name}`);
+    say(paint.grey(`      ${recent.join(' then ')}   (${countText(entry.runs)} ${plural(entry.runs, 'run', 'runs')} on record)`));
+  }
+
+  // Why the register could not judge them, and it is almost always the same reason.
+  //
+  // `staysfixed flake` used to say "this folder has no commit to pin results to", which was
+  // untrue on the product this was measured against 2026-08-31: that folder had a commit.
+  // What it had as well was an uncommitted `.staysfixed/history.json` — written by the
+  // first run — which makes the tree dirty for the second one and every one after it. So a
+  // project that does not ignore this tool's own folder is blind from run two onwards, and
+  // was being told the opposite of the reason.
+  if (entries.some((entry) => pinnedTo(entry) === null)) {
+    blank();
+    say(paint.grey('  The last run could not pin these to a commit, so it had nothing to compare them at.'));
+    say(paint.grey('  Either this folder has no commit yet, or the working tree had uncommitted changes'));
+    say(paint.grey('  when the check finished — and Stays Fixed writes .staysfixed itself, so a project'));
+    say(paint.grey('  that does not ignore that folder is dirty on every run after the first.'));
+  }
 }
 
 /**

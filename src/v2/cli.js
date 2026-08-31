@@ -26,6 +26,8 @@
  * sound the same whether a person or an agent is reading it.
  */
 
+import path from 'node:path';
+
 import { StaysFixedError, EXIT, messageOf } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, duration, setLogLevel } from '../core/log.js';
 import { openStore } from './store.js';
@@ -181,6 +183,99 @@ export const V2_COMMANDS = {
     spec: { booleans: ['json', 'offline', 'fix', 'machines'] },
     load: async () => ({ run: doctorRun }),
   },
+
+  /*
+   * The four questions only an agent could ask.
+   *
+   * `staysfixed_coverage`, `staysfixed_explain`, `staysfixed_prove` and `staysfixed_waive`
+   * have been on the MCP server since version 2 landed, and not one of them had a command.
+   * Counted 2026-08-31: seven tools for an agent, three commands for a person. So the two
+   * readers of the same run got different answers about it, and the person got the worse
+   * one — no way to see what was NOT checked, no way to open one finding, no way to test
+   * whether their own edit caused it, and no way to record a difference as intended. Every
+   * one of those is a person being told less about their own product than the agent that
+   * changed it.
+   *
+   * None of them answers anything itself. Each calls the very tool the agent calls and
+   * prints what came back — see `askTheToolSet`.
+   */
+
+  coverage: {
+    summary: 'What the last check did NOT look at. Read it before you call anything safe.',
+    usage: 'staysfixed coverage [--json]',
+    describe:
+      'A clean check only covers what was walked, and this is the other half of that\nsentence: the ways into your product no journey has ever opened, the surfaces this\nmachine cannot reach at all, anything refused because doing it twice would not have\nbeen reversible, and the few things this tool can never see on any machine.\n\nIt runs nothing and changes nothing — it reads the last check and this machine — so\nit answers instantly. It reports; it neither passes nor fails.\n\nThis is the same answer staysfixed_coverage gives an agent, from the same code.',
+    options: [['--json', 'The whole answer as one JSON object, and no prose. For scripts and agents.']],
+    examples: ['staysfixed coverage', 'staysfixed coverage --json'],
+    spec: { booleans: ['json'] },
+    load: async () => ({ run: coverageRun }),
+  },
+
+  /*
+   * `intent` is the fifth, and it is here because without it the fourth cannot work.
+   *
+   * The second waiver gate refuses anything that does not fall inside an intent sealed
+   * BEFORE the run, and sealing one was an MCP tool with no command. So a `waive` command
+   * on its own would have been a control that can only ever refuse — a person types it,
+   * reads a paragraph about why the answer is no, and has no way from a terminal to make
+   * the answer yes. Proved on a real product 2026-08-31: "Refused. You did not seal an
+   * intent before this run."
+   */
+  intent: {
+    summary: 'Seal what you meant to change, BEFORE you check.',
+    usage: 'staysfixed intent "<what you meant>" --touches <file> [--expect "<difference>"]',
+    describe:
+      'One plain sentence about what you set out to change, and the files or areas you expect\nit to affect. Seal it before you run the check.\n\nThis is what turns a later "that one was me" into something anybody can check rather\nthan a story: a difference outside what you named here cannot be waived, and an intent\nsealed after seeing what broke proves nothing, so the moment you sealed it is recorded\nagainst the state of your files at the time.\n\nIt runs nothing. Seal one, make your change, then check.',
+    options: [
+      ['--touches <file>', 'A file, folder or named area you expect this to affect. Repeat it for several. At least one is required.'],
+      ['--expect "<what>"', 'A difference you expect this to produce, in your own words. Optional, and it makes the check sharper.'],
+    ],
+    examples: [
+      'staysfixed intent "the basket total now includes VAT" --touches src/checkout/total.js',
+      'staysfixed intent "renamed the sessions folder" --touches src/sessions --expect "every session path moves"',
+    ],
+    spec: { arrays: ['touches', 'expect'] },
+    load: async () => ({ run: intentRun }),
+  },
+
+  explain: {
+    summary: 'One finding from the last check, in full.',
+    usage: 'staysfixed explain <finding> [--evidence] [--no-values] [--no-paths]',
+    describe:
+      'Every address that moved, both values in full, which class it is in, how far it sits\nfrom the code you changed, and what evidence was kept. A check reply deliberately\nleaves all of that out — it would cost more to read than it is worth on findings you\nare not going to act on — so this is where you come for the two or three you are.\n\nThe finding id is the one `staysfixed check` printed. Nothing is re-run: it reads the\nrecord of the last check, so the ids stay valid until you check again.\n\nPictures are never printed into a terminal. When one was kept, the evidence line names\nthe file and you open it yourself.',
+    options: [
+      ['--evidence', 'Also print what was kept as proof — the first 40 lines of it.'],
+      ['--no-values', 'Leave out the before-and-after values.'],
+      ['--no-paths', 'Leave out the list of every address that moved.'],
+    ],
+    examples: ['staysfixed explain f-a1b2c3', 'staysfixed explain f-a1b2c3 --evidence'],
+    spec: { booleans: ['evidence', 'values', 'paths'] },
+    load: async () => ({ run: explainRun }),
+  },
+
+  prove: {
+    summary: 'Test whether your own edit really caused a finding, by undoing it.',
+    usage: 'staysfixed prove <finding> --revert <file> [--revert <file>]',
+    describe:
+      'You believe your change to a particular file caused a difference. This puts that file\nback to the reference build, runs again, and says whether the difference went away.\nIf it survives, your edit did not cause it and you were about to fix the wrong thing.\n\nNothing is left reverted: the working tree is put back exactly as it was.\n\nIt answers 0 when it could test the claim and 2 when it could not. The answer itself —\ncaused it, or did not — is in the words, not the exit code, because "your edit was\ninnocent" is not a failure and must not be read as one.',
+    options: [
+      ['--revert <file>', 'A file to put back to the reference for one run. Repeat it for several.'],
+    ],
+    examples: ['staysfixed prove f-a1b2c3 --revert src/checkout/total.js'],
+    spec: { arrays: ['revert'] },
+    load: async () => ({ run: proveRun }),
+  },
+
+  waive: {
+    summary: 'Record that a difference was intended. It is not approval.',
+    usage: 'staysfixed waive <finding> --because "<why>"',
+    describe:
+      'Writes down that you meant this one. It makes nothing the new normal — only shipping\ndoes that — and four rules are enforced on it: a difference touching money, signing in,\nlosing data, a crash or a named guard can never be waived; it has to fall inside an\nintent that was sealed BEFORE the check ran; five are allowed between one ship and the\nnext; and every waiver dies the moment the reference moves.\n\nA refusal is this tool working, not this tool being difficult, and it answers 1 rather\nthan 0 so nothing downstream reads a refused waiver as a recorded one.',
+    options: [['--because "<why>"', 'Why this difference is what you meant, in one plain sentence. A person reads it later.']],
+    examples: ['staysfixed waive f-a1b2c3 --because "the basket total is meant to include VAT now"'],
+    spec: { strings: ['because'] },
+    load: async () => ({ run: waiveRun }),
+  },
 };
 
 /**
@@ -197,6 +292,212 @@ export async function doctorRun(ctx) {
   }
   const v2 = await import('./doctor.js');
   return await v2.run(ctx);
+}
+
+// ── the four that only an agent used to be able to ask ──────────────────────
+
+/**
+ * The tool set carries the protocol revision the two ends of an MCP conversation agreed
+ * on. Nothing here is speaking MCP — these commands call the tool functions directly — and
+ * none of these four tools reads the field today, so it is filled in with the newest
+ * revision rather than left half-built. If one of them ever shapes its answer by protocol,
+ * this is the line that has to grow a separate answer for a terminal.
+ */
+const NOT_SPEAKING_MCP = '2025-06-18';
+
+/**
+ * Ask the shared tool set one question, as a person.
+ *
+ * This is deliberately a pass-through and nothing more. Two front doors that assemble the
+ * same answer twice is precisely the fault this whole tool exists to catch, so the command
+ * line does not re-derive coverage, or re-read a finding, or re-run the four waiver gates:
+ * it calls what the agent calls and prints what came back.
+ *
+ * @param {import('../cli/index.js').CliContext} ctx
+ * @param {string} tool
+ * @param {Record<string, unknown>} args
+ * @returns {Promise<{text: string, isError: boolean, structured: Record<string, unknown>|undefined}>}
+ */
+async function askTheToolSet(ctx, tool, args) {
+  const { callTool, findRoot } = await import('./mcp/tools.js');
+  const { rootForConfig } = await import('../core/paths.js');
+
+  // A `--config` pointing somewhere else names the project, so it decides the root — the
+  // same rule `staysfixed mcp` follows in src/cli/index.js. Dropping it here would have a
+  // person and an agent answering about two different folders.
+  const root = ctx.configFile ? rootForConfig(path.resolve(ctx.cwd, ctx.configFile)) : findRoot(ctx.cwd);
+
+  const result = await callTool(tool, args, {
+    root,
+    cwd: ctx.cwd,
+    version: ctx.version,
+    protocolVersion: NOT_SPEAKING_MCP,
+  });
+
+  const text = (result.content ?? [])
+    .filter((item) => item.type === 'text')
+    .map((item) => /** @type {{text: string}} */ (item).text)
+    .join('\n');
+
+  return { text, isError: result.isError === true, structured: result.structuredContent };
+}
+
+/**
+ * Print what came back.
+ *
+ * A refusal goes to standard error, whole. Only its first line is marked, and the rest is
+ * written plainly underneath: a waiver refusal runs to eight lines, and putting a red cross
+ * on every one of them — including its blank lines — turns the paragraph that explains what
+ * to do instead into something a person's eye slides straight off. It stays on standard
+ * error rather than becoming ordinary output because `--quiet` must never be able to
+ * swallow the sentence that says the waiver was NOT recorded.
+ *
+ * @param {{text: string, isError: boolean}} reply
+ */
+function sayReply(reply) {
+  blank();
+  if (reply.isError) {
+    const [first, ...rest] = reply.text.split('\n');
+    fail(first);
+    for (const line of rest) process.stderr.write(line + '\n');
+    process.stderr.write('\n');
+    return;
+  }
+  for (const line of reply.text.split('\n')) say(line);
+  blank();
+}
+
+/**
+ * `staysfixed coverage`.
+ *
+ * @param {import('../cli/index.js').CliContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function coverageRun(ctx) {
+  const asJson = ctx.bool('json');
+  if (asJson) setLogLevel({ quiet: true });
+
+  const reply = await askTheToolSet(ctx, 'staysfixed_coverage', asJson ? { format: 'json' } : {});
+  if (reply.isError) {
+    sayReply(reply);
+    return EXIT.error;
+  }
+  if (asJson) {
+    process.stdout.write(reply.text + '\n');
+    return EXIT.ok;
+  }
+  sayReply(reply);
+  return EXIT.ok;
+}
+
+/**
+ * `staysfixed intent "<what you meant>" --touches <file>`.
+ *
+ * @param {import('../cli/index.js').CliContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function intentRun(ctx) {
+  const summary = ctx.args.join(' ').trim();
+  const touches = ctx.list('touches');
+  if (!summary) {
+    throw new StaysFixedError('Say what you meant to change, in one plain sentence.', {
+      hint: 'Write it as `staysfixed intent "the basket total now includes VAT" --touches src/checkout/total.js`.',
+    });
+  }
+  if (touches.length === 0) {
+    throw new StaysFixedError('Name at least one file, folder or area you expect this change to affect.', {
+      hint: 'Add `--touches <file>`, once per file. An empty list would leave you able to waive nothing at all, which is the whole point of sealing one.',
+    });
+  }
+
+  const reply = await askTheToolSet(ctx, 'staysfixed_intent', { summary, touches, expect: ctx.list('expect') });
+  sayReply(reply);
+  return reply.isError ? EXIT.error : EXIT.ok;
+}
+
+/**
+ * `staysfixed explain <finding>`.
+ *
+ * @param {import('../cli/index.js').CliContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function explainRun(ctx) {
+  const finding = ctx.args[0];
+  if (!finding) {
+    throw new StaysFixedError('Say which finding to explain.', {
+      hint: 'Write it as `staysfixed explain f-a1b2c3`. The ids are the ones `staysfixed check` printed.',
+    });
+  }
+
+  // Values and paths are what an ordinary reader wants, so they are on unless switched off.
+  // Evidence is off because it can be forty lines of somebody else's log.
+  /** @type {string[]} */
+  const include = [];
+  if (ctx.flags.values !== false) include.push('values');
+  if (ctx.flags.paths !== false) include.push('paths');
+  if (ctx.bool('evidence')) include.push('evidence');
+
+  const reply = await askTheToolSet(ctx, 'staysfixed_explain', { finding, include });
+  sayReply(reply);
+  return reply.isError ? EXIT.error : EXIT.ok;
+}
+
+/**
+ * `staysfixed prove <finding> --revert <file>`.
+ *
+ * The exit code says whether the claim could be TESTED, never which way it came out. "Your
+ * edit did not cause this" is one of the two right answers and it is the more useful one —
+ * exiting non-zero on it would train somebody to stop reading the sentence underneath.
+ *
+ * @param {import('../cli/index.js').CliContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function proveRun(ctx) {
+  const finding = ctx.args[0];
+  const revert = ctx.list('revert');
+  if (!finding) {
+    throw new StaysFixedError('Say which finding you are trying to explain.', {
+      hint: 'Write it as `staysfixed prove f-a1b2c3 --revert src/checkout/total.js`.',
+    });
+  }
+  if (revert.length === 0) {
+    throw new StaysFixedError('Name what to put back to the reference for one run.', {
+      hint: 'Add `--revert <file>`, once per file. Without one there is no claim to test.',
+    });
+  }
+
+  const reply = await askTheToolSet(ctx, 'staysfixed_prove', { finding, revert });
+  sayReply(reply);
+  return reply.isError ? EXIT.error : EXIT.ok;
+}
+
+/**
+ * `staysfixed waive <finding> --because "<why>"`.
+ *
+ * Anything other than a recorded waiver answers non-zero. A refusal, a bad id and a project
+ * that has never been checked all mean the same thing to whatever runs next: it was NOT
+ * recorded. Exiting 0 on any of them is the false all-clear this tool exists to prevent.
+ *
+ * @param {import('../cli/index.js').CliContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function waiveRun(ctx) {
+  const finding = ctx.args[0];
+  const because = ctx.str('because');
+  if (!finding) {
+    throw new StaysFixedError('Say which finding you are recording as intended.', {
+      hint: 'Write it as `staysfixed waive f-a1b2c3 --because "..."`.',
+    });
+  }
+  if (!because) {
+    throw new StaysFixedError('Say why this difference is what you meant, in one plain sentence.', {
+      hint: 'Add `--because "the basket total is meant to include VAT now"`. A waiver with no reason is worth nothing to whoever reads it in six months.',
+    });
+  }
+
+  const reply = await askTheToolSet(ctx, 'staysfixed_waive', { finding, because });
+  sayReply(reply);
+  return reply.isError ? EXIT.failed : EXIT.ok;
 }
 
 /**
@@ -590,6 +891,18 @@ export function report(verdict) {
     blank();
   }
 
+  // What to do with the names in square brackets.
+  //
+  // The agent's reply has always ended with the calls that open one of these up. The
+  // person's ended with the list and nothing else, so the ids were decoration: three
+  // commands exist that take one and nothing told anybody they were there.
+  if (verdict.findings.length > 0) {
+    const one = verdict.findings[0].id;
+    say(paint.grey(`  Open one of these up: ${paint.cyan(`staysfixed explain ${one}`)}`));
+    say(paint.grey(`  Test whether your own edit caused it: ${paint.cyan(`staysfixed prove ${one} --revert <file>`)}`));
+    blank();
+  }
+
   // Paths that were steady before the change and disagree with themselves now.
   // Nothing here has a "wrong" value, which is exactly why it needs its own
   // section: without it a run can come back failed with no findings and no
@@ -621,7 +934,12 @@ export function report(verdict) {
  */
 function printFinding(finding) {
   const label = finding.sealed ? paint.red(`[${finding.class}] `) : '';
-  say(`  ${label}${finding.title}`);
+  // The id, first, exactly as the agent's reply gives it. `explain`, `prove` and `waive`
+  // all take one and there was nowhere on the command line to read one from: the ids were
+  // written into the record and into every MCP reply, and a person running the same check
+  // never saw them at all.
+  const name = finding.id ? paint.grey(`[${finding.id}] `) : '';
+  say(`  ${name}${label}${finding.title}`);
 
   const example = finding.differences?.[0];
   if (example) {

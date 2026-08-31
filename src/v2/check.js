@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import { StaysFixedError, messageOf } from '../core/errors.js';
-import { warn, detail } from '../core/log.js';
+import { warn, detail, shortPath } from '../core/log.js';
 import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { sha256 } from '../core/hash.js';
 
@@ -362,6 +362,10 @@ export async function check(options = {}) {
 
     /** @type {CheckOutcome} */
     const outcome = await settle(verdict, project.store, project.product, named);
+    // FIRST, before anything the run found. Which product was walked is the frame every
+    // other sentence here has to be read inside, and a person who was told it at the end
+    // has already read the clean result as being about the folder they are standing in.
+    if (project.elsewhere !== '') outcome.summary = `${project.elsewhere} ${outcome.summary}`;
     // Only a run that really did reach the surface it was aimed at may say so. The
     // confirmation is what lets a caller tell "it went there and found nothing" from
     // "it checked something else and found nothing", and those are not the same answer.
@@ -927,6 +931,68 @@ export async function sweepAbandonedScratch() {
 }
 
 /**
+ * "There was nowhere to work", said the way every other refusal here is said.
+ *
+ * A check never runs anything against somebody's real folder: it copies the build into a
+ * throwaway folder inside the machine's temporary directory first. When that folder cannot
+ * be made, the run is over before it starts — and what a person was handed for it was the
+ * operating system's own words, `ENOENT: no such file or directory, mkdtemp
+ * '/nowhere/staysfixed-check-FHwIxx'`, pasted straight into the block this tool tells an
+ * agent to put in a summary for the person who owns the product. Measured 2026-08-31 with
+ * TMPDIR pointing at a folder that was not there, and again at one this user could not
+ * write to. Every other refusal in this file is a plain sentence; that one was a stack.
+ *
+ * The three that actually happen each get their own sentence, because the thing to DO about
+ * them is different every time: the folder is not there, the folder will not take writes, or
+ * the disk is full. Anything else keeps the machine's own words, framed as the machine's —
+ * when there is no sentence for it, the raw text is the only information there is, and
+ * dropping it would leave somebody with nothing at all.
+ *
+ * @param {unknown} e
+ * @returns {StaysFixedError}
+ */
+function noScratchFolder(e) {
+  const tmp = os.tmpdir();
+  const code = String(/** @type {any} */ (e)?.code ?? '');
+  // Worth naming only when a setting in this shell is what chose the folder. On a machine
+  // where nothing set it, saying "TMPDIR" sends somebody looking for a setting they have not
+  // got, and the folder is the operating system's own.
+  const yours = (process.env.TMPDIR ?? '').replace(/\/$/, '') === tmp.replace(/\/$/, '')
+    ? ' That folder is whatever TMPDIR is set to in this shell.'
+    : '';
+  /** @type {{why: string, hint: string}} */
+  const said =
+    code === 'ENOENT'
+      ? {
+        why: `There is no folder at ${tmp}, so there was nowhere to put it.`,
+        hint: `Make that folder, or point TMPDIR at one that exists — or unset TMPDIR to fall back to this machine's own — and run the check again.${yours}`,
+      }
+      : code === 'EACCES' || code === 'EPERM'
+        ? {
+          why: `${tmp} is there, but this user is not allowed to write in it.`,
+          hint: `Give yourself write access to that folder, or point TMPDIR at one you can write to, and run the check again.${yours}`,
+        }
+        : code === 'EROFS'
+          ? {
+            why: `${tmp} is on a disk that is mounted read-only, so nothing can be written there at all.`,
+            hint: `Point TMPDIR at a folder on a disk that takes writes and run the check again.${yours}`,
+          }
+          : code === 'ENOSPC'
+            ? {
+              why: `The disk holding ${tmp} is full.`,
+              hint: 'Free some space and run the check again. A check copies your project, so it needs about as much room as the project takes.',
+            }
+            : {
+              why: `${tmp} would not take it. The machine said: ${messageOf(e)}`,
+              hint: `Check that ${tmp} exists and that you can write in it, then run the check again.${yours}`,
+            };
+  return new StaysFixedError(
+    `Stays Fixed could not make the throwaway folder it works in, so nothing was opened, nothing was walked and nothing was compared. ${said.why}`,
+    { hint: said.hint, cause: e },
+  );
+}
+
+/**
  * Is that process still running? Signal 0 asks without sending anything.
  * @param {number} pid
  * @returns {boolean}
@@ -961,8 +1027,20 @@ function plainly(what) {
  * @returns {CheckOutcome}
  */
 function blocked(options, e, storeTrouble) {
-  const product = options.product ?? path.basename(path.resolve(options.cwd ?? options.root ?? process.cwd()));
+  // The basename of the ROOT, not of the folder the command was typed in. Those are the
+  // same folder on almost every run, and on the one where they differ this record is
+  // written into the root's store — so naming it after the folder somebody happened to be
+  // standing in filed a run under a product that store has never heard of.
+  const root = projectRootFor(options);
+  const product = options.product ?? path.basename(root);
   const empty = { id: '', product };
+  // Which folder this is about, said before the reason it could not be done. A blocked run
+  // inside a sub-project is the easiest of all to misread: nothing was walked, so there is
+  // nothing in the answer to give away that it was never about this folder in the first
+  // place. `options.product` is passed rather than the name worked out above, because a name
+  // taken from a folder is not a product name and quoting it as one would put a product in
+  // front of somebody that nothing anywhere calls that.
+  const elsewhere = aboutSomewhereElse({ from: startedIn(options), root, product: options.product })?.note ?? '';
   return {
     runId: new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14),
     product,
@@ -985,7 +1063,7 @@ function blocked(options, e, storeTrouble) {
     // The hint is the half that tells a person what to DO about it, and dropping it
     // turns a helpful error into a dead end. Anything that blocks a run has to carry
     // both halves all the way out to whoever reads the summary.
-    summary: `The check could not be run, so this is not a pass and not a failure. ${storeTrouble ? `${storeTrouble} ` : ''}${messageOf(e)}${
+    summary: `${elsewhere ? `${elsewhere} ` : ''}The check could not be run, so this is not a pass and not a failure. ${storeTrouble ? `${storeTrouble} ` : ''}${messageOf(e)}${
       e instanceof Error && /** @type {any} */ (e).hint ? ` ${/** @type {any} */ (e).hint}` : ''
     }`,
     durationMs: 0,
@@ -1393,6 +1471,10 @@ async function waitForItsWindow(pid, stopped) {
  * @property {string} storeTrouble  Empty on a normal run. A plain sentence when the store
  *   would not take this run's records — the run went ahead anyway, and every answer it
  *   produces has to carry the admission that nothing about it was kept.
+ * @property {string} elsewhere  Empty when the check is about the folder it was typed in.
+ *   Otherwise the sentence naming which product this run is really about and where it is,
+ *   which goes on the FRONT of the answer so nobody reads a clean result as being about a
+ *   folder that was never walked.
  * @property {import('./run.js').Walker} walk
  * @property {(reference: BuildFingerprint, ctx: {events?: CheckEvents, signal?: AbortSignal}) => Promise<LiveBuild|null>} bootReference
  * @property {(capture: Capture) => Capture} normalise
@@ -1409,9 +1491,96 @@ async function waitForItsWindow(pid, stopped) {
  * @returns {string}
  */
 function projectRootFor(options) {
-  const from = path.resolve(options.cwd ?? options.root ?? process.cwd());
+  const from = startedIn(options);
   const config = options.configFile ?? findConfigFile(from);
   return config ? rootForConfig(config) : from;
+}
+
+/**
+ * The folder the command was actually typed in.
+ *
+ * @param {CheckOptions} options
+ * @returns {string}
+ */
+function startedIn(options) {
+  return path.resolve(options.cwd ?? options.root ?? process.cwd());
+}
+
+/**
+ * Files that mean "this folder is a project in its own right".
+ *
+ * Any one of them is enough. They are the files a person points at when asked "where does
+ * this thing live", and every one of them is what a package manager or a language's own
+ * tooling reads as the top of a project.
+ */
+const A_PROJECT_OF_ITS_OWN = [
+  'package.json', '.git', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'pom.xml',
+  'build.gradle', 'build.gradle.kts', 'Gemfile', 'composer.json', 'deno.json',
+];
+
+/**
+ * When a check is not about the folder somebody is standing in, say so.
+ *
+ * Settings are found by walking UP from where the command was typed, which is right: a
+ * check run from `src/` is meant to be about the project `src/` is part of. But the same
+ * walk reaches out of a project and into the one above it. Stand in a sub-folder that is
+ * its own git repository with its own package.json, run a check, and the run quietly
+ * measures the PARENT'S product and comes back clean — measured 2026-08-31, where a folder
+ * holding `child-product` was reported on as `parent-product` with nothing said about the
+ * swap. Somebody reading that has been handed a clean result about a product they were not
+ * asking about, which is the exact failure this tool exists to prevent.
+ *
+ * So every run that is about somewhere else says which product it is about and where that
+ * product is, and a run that stepped out of a project of its own says it loudly and says
+ * what to do instead. Nothing is refused: reaching up is usually right, and being told what
+ * happened is what makes it safe.
+ *
+ * Exported so a test can ask the question without running a whole check.
+ *
+ * @param {{from: string, root: string, product?: string}} where
+ * @returns {{note: string, gap: CoverageGap|null}|null}  Null when the check really is
+ *   about the folder it was typed in, which is the ordinary case.
+ */
+export function aboutSomewhereElse(where) {
+  const from = path.resolve(where.from);
+  const root = path.resolve(where.root);
+  if (from === root) return null;
+  const named = where.product ? `"${where.product}"` : path.basename(root);
+
+  const itsOwn = A_PROJECT_OF_ITS_OWN.filter((name) => existsSync(path.join(from, name)));
+  if (itsOwn.length === 0) {
+    // Ordinary and usually wanted: somebody is standing inside the project they meant. One
+    // sentence, so a clean answer still carries the name of what it is a clean answer about.
+    return {
+      note: `This check was aimed at ${named}, the project at ${shortPath(root)}; you ran it from ${shortPath(from)}, which is inside it.`,
+      gap: null,
+    };
+  }
+
+  const because = itsOwn.includes('.git') && itsOwn.length > 1
+    ? `it is its own git repository and has its own ${itsOwn.filter((n) => n !== '.git').join(' and ')}`
+    : itsOwn.includes('.git')
+      ? 'it is its own git repository'
+      : `it has its own ${itsOwn.join(' and ')}`;
+  // "was aimed at", not "walked": this same sentence goes on the front of a blocked run,
+  // where nothing was walked at all, and a frame that claims more than happened would be
+  // the same kind of lie in miniature as the one it is here to stop.
+  const note =
+    `NOT THE FOLDER YOU ARE STANDING IN. This check was aimed at ${named}, the project at ${shortPath(root)} — ` +
+    `not at ${shortPath(from)}, which is where you ran it. That folder is a project in its own right (${because}) ` +
+    `and it has no Stays Fixed settings of its own, so the settings from the folder above it are what this run used. ` +
+    `Nothing inside ${shortPath(from)} was checked, so nothing below says anything about it. ` +
+    `Run \`staysfixed init\` there to check that project on its own.`;
+  return {
+    note,
+    gap: {
+      what: `Everything in ${shortPath(from)}, the folder this check was run from.`,
+      why:
+        `It is a project in its own right (${because}), and it has no Stays Fixed settings of its own. ` +
+        `Settings are found by walking up, so the ones at ${shortPath(root)} were used and ${named} was walked instead.`,
+      unlockedBy: `Run \`staysfixed init\` in ${shortPath(from)} to give that project its own settings, and check it from there.`,
+    },
+  };
 }
 
 /**
@@ -1695,9 +1864,17 @@ async function openProject(options) {
   }
 
   await sweepAbandonedScratch();
-  const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-check-'));
-  const evidenceDir = path.join(scratch, 'evidence');
-  await fsp.mkdir(evidenceDir, { recursive: true });
+  /** @type {string} */
+  let scratch;
+  /** @type {string} */
+  let evidenceDir;
+  try {
+    scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-check-'));
+    evidenceDir = path.join(scratch, 'evidence');
+    await fsp.mkdir(evidenceDir, { recursive: true });
+  } catch (e) {
+    throw noScratchFolder(e);
+  }
   // Who this belongs to, so a later run can tell an abandoned copy from one in use.
   await fsp.writeFile(path.join(scratch, 'owner.json'), JSON.stringify({ pid: process.pid, at: new Date().toISOString() })).catch(() => {});
 
@@ -1786,6 +1963,12 @@ async function openProject(options) {
       unlockedBy: `Fix package.json, or put the name you want in your settings file as product: '<name>'. Until then every comparison starts from nothing.`,
     });
   }
+  // Which folder this answer is about, when it is not the one the command was typed in.
+  // It goes in the coverage list as well as on the front of the summary because the list is
+  // what a build server's table and the closing count both read, and a fact that lives on
+  // one field somebody has to know to look for is a fact most readers never meet.
+  const elsewhere = aboutSomewhereElse({ from: startedIn(options), root, product });
+  if (elsewhere?.gap) gaps.push(elsewhere.gap);
   const stale = await builtBeforeItsSource(root, config);
   if (stale) gaps.push(stale);
   if (storeTrouble.length > 0) {
@@ -1830,6 +2013,7 @@ async function openProject(options) {
     journeys,
     gaps,
     storeTrouble: storeTrouble.join(' '),
+    elsewhere: elsewhere?.note ?? '',
     walk,
     bootReference,
     normalise,

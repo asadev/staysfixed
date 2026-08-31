@@ -386,6 +386,31 @@ function insteadFor(product, project) {
 }
 
 /**
+ * Is the file a package says other code should import actually sitting there?
+ *
+ * Asked before this command tells anybody a library "can be checked here now". The answer
+ * has to allow for the shorthands package.json is allowed to use — `"main": "index"` and
+ * `"main": "./lib"` are both perfectly ordinary and both name something real — so the same
+ * endings and the same folder entry point Node itself would try are tried here. Erring on
+ * the side of "it is there" is the safe direction for THIS question: a way in that exists
+ * and is not recognised would put a job on somebody's list that they cannot do anything
+ * about, and a way in that is missing is caught the moment a check actually runs.
+ *
+ * Exported so a test can ask about one path without building a whole project.
+ *
+ * @param {string} root      The project's own folder.
+ * @param {string} where     Which folder inside it this product lives in. '.' for the root.
+ * @param {string} module    Exactly what package.json said, e.g. './index.js'.
+ * @returns {boolean}
+ */
+export function isThereOnDisk(root, where, module) {
+  const base = path.resolve(root, where === '' ? '.' : where, module);
+  const endings = ['', '.js', '.mjs', '.cjs', '.json', '.node', '.ts'];
+  if (endings.some((end) => existsSync(base + end))) return true;
+  return ['index.js', 'index.mjs', 'index.cjs', 'index.json'].some((name) => existsSync(path.join(base, name)));
+}
+
+/**
  * What this particular product is short of, from what was actually found on disk.
  *
  * Built from facts rather than from the sentences detect wrote, because who has to fix a
@@ -549,6 +574,36 @@ function productNeeds(product, project) {
         ? 'Put {"imports": [{"name": "the package entry", "module": "./src/index.js"}]} under "process" in the settings.'
         : 'Put {"commands": [{"name": "help", "run": "your-command --help"}]} under "process" in the settings. Only ever --help: a command in a manifest could deploy or publish, and running one because it was there would be this tool causing the damage it exists to catch.',
       who: 'a person',
+      product: product.name,
+      topic: 'commands',
+    });
+  }
+
+  // A way in that package.json promises and the folder has not got.
+  //
+  // package.json is a DECLARATION, not a fact. `"exports": {".": "./index.js"}` in a
+  // repository with no index.js in it reads, to everything upstream of here, as a perfectly
+  // good library with a perfectly good entry point — so nothing was outstanding, the product
+  // came back "ready", and this command told somebody "the library other code imports can be
+  // checked here now" and "right now a check here covers it in full", about a file that was
+  // not there. Measured 2026-08-31 on a package whose entry had never been built. An import
+  // that cannot resolve walks nothing, so "in full" covered nothing at all — which is the one
+  // shape of answer this tool exists to make impossible.
+  const missingWaysIn = (Array.isArray(suggest.imports) ? suggest.imports : [])
+    .map((one) => String(one?.module ?? ''))
+    .filter((module) => module !== '' && (module.startsWith('.') || path.isAbsolute(module)))
+    .filter((module) => !isThereOnDisk(project.root, product.where, module));
+  if (missingWaysIn.length > 0) {
+    const one = missingWaysIn.length === 1;
+    const build = project.scripts.build;
+    needs.push({
+      what: `${plainList(missingWaysIn)} — the ${one ? 'file' : 'files'} other code is told to import, ${one ? 'which is' : 'which are'} not there`,
+      why: `package.json points other projects at ${one ? 'that file' : 'those files'}, and nothing is at that path. There is nothing to import, so a check would compare none of what this library exports — and a clean result would be a clean result about nothing.`,
+      unlocks: 'every name this library exports, and what those exports actually do',
+      fix: build
+        ? `Run \`${build}\` — that is what writes ${one ? 'it' : 'them'} — then \`staysfixed init --force\`. If the entry in package.json is simply pointing at the wrong path, correct it there instead.`
+        : `Either create ${plainList(missingWaysIn)}, or correct the "exports" (or "main") entry in package.json so it names the file that really is the way in.`,
+      who: build ? 'the agent' : 'a person',
       product: product.name,
       topic: 'commands',
     });
@@ -938,13 +993,18 @@ export function proposeJourneys(project) {
     }
     if (product.kind === 'library' && Array.isArray(suggest.imports)) {
       for (const entry of suggest.imports) {
+        const module = String(entry.module);
         out.push({
           name: String(entry.name),
-          what: `import ${String(entry.module)} and compare what it exports`,
+          what: `import ${module} and compare what it exports`,
           from: 'package.json',
           surface: 'library',
           automatic: false,
-          ready: true,
+          // Only if the file is really there. package.json naming an entry does not put one
+          // on the disk, and this line printed with no caveat beside it — "import ./index.js
+          // and compare what it exports" — about a file that did not exist. A journey listed
+          // as ready is a promise that a check will walk it.
+          ready: isThereOnDisk(project.root, product.where, module),
         });
       }
     }
