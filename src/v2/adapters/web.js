@@ -524,6 +524,11 @@ export const webAdapter = defineAdapter({
       tmp,
       extra: {
         PORT: String(port),
+        // Asked for, not relied on. Plenty of dev servers never look at HOST — Vite is one,
+        // measured on 2026-08-31: it ignores both HOST and PORT and binds the name
+        // `localhost`, which this Mac resolves to the IPv6 loopback. That is why the boot
+        // check knocks on both loopback addresses and uses whichever one answers, rather
+        // than trusting this line to have been obeyed.
         HOST: '127.0.0.1',
         NODE_ENV: config.nodeEnv ?? 'production',
         ...config.env,
@@ -556,7 +561,21 @@ export const webAdapter = defineAdapter({
       exited = `The app stopped before it answered - exit code ${code}${signal ? `, killed by ${signal}` : ''}.`;
     });
 
-    const up = await waitForServer(port, { timeoutMs: config.startTimeoutMs ?? 90000, crashed: () => exited });
+    // WHY THIS HANDS OVER SO MUCH. Measured on 2026-08-31 on a freshly scaffolded Vite app:
+    // this wait took 90.6 seconds and then said "the server never answered on port 64912",
+    // which names neither the command that was run nor the fact that the server was up the
+    // whole time on the other loopback address. A whole `check --paired` on that app took
+    // 3 minutes 2 seconds and reported nothing a person could act on. So the wait is now
+    // given the command, everything the command has printed, and somewhere to say what it is
+    // waiting for while it waits — that is what turns ninety seconds of silence into a
+    // sentence, usually in the first second or two.
+    const up = await waitForServer(port, {
+      timeoutMs: config.startTimeoutMs ?? 90000,
+      crashed: () => exited,
+      command: String(config.start),
+      announced: () => Buffer.concat(said).toString('utf8'),
+      say: (message) => ctx.log?.(message),
+    });
     if (!up.up) {
       await stopServer(child);
       return {
@@ -571,13 +590,17 @@ export const webAdapter = defineAdapter({
       };
     }
 
-    const baseUrl = `http://127.0.0.1:${port}`;
+    // The address that ANSWERED, not the address that was assumed. A server told to listen on
+    // `localhost` lands on whichever of the two loopback addresses this machine resolves that
+    // name to, and on this Mac that is the IPv6 one — so handing the browser a hard-coded
+    // `http://127.0.0.1:...` would open a page that cannot load even though the app is up.
+    const baseUrl = up.baseUrl ?? `http://127.0.0.1:${port}`;
     running.set(build.id, { base, baseUrl, port, child, config, playwright, paired: true, work, home, tmp });
     return {
       build,
       root: work,
       ready: true,
-      why: `${copy.why} It came up on port ${port} in ${timeBucket(up.ms)}, in a browser profile nobody else is using.${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`,
+      why: `${copy.why} It came up at ${baseUrl} in ${timeBucket(up.ms)}, in a browser profile nobody else is using.${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`,
       facts: { baseUrl, port, paired: true },
       dispose: async () => {
         const held = running.get(build.id);

@@ -167,15 +167,85 @@ export function shapeOf(value, at = '') {
 // ---------------------------------------------------------------------------
 
 /**
- * Find a port nobody is using, by briefly being the one using it.
+ * The two things "this machine" can mean, and why both have to be knocked on.
  *
- * There is a gap between letting go of the port and the server taking it, and something
- * else can slip in. Nothing can close that gap on any operating system, so the boot retries
- * instead of pretending it cannot happen.
+ * A server told to listen on `localhost` does not choose between IPv4 and IPv6 — the
+ * operating system chooses, when it resolves the name, and the two answers are different
+ * addresses. Measured on this Mac on 2026-08-31 against a stock Vite app: `vite preview`
+ * bound `[::1]:PORT` and NOTHING was listening on `127.0.0.1:PORT`. A boot check that
+ * knocked only on `127.0.0.1` was refused instantly, two hundred milliseconds apart, for
+ * the whole ninety seconds — on the most ordinary kind of project there is. So both are
+ * knocked on, and whichever one answers is the address the rest of the run uses.
+ */
+const LOOPBACK = ['127.0.0.1', '::1'];
+
+/**
+ * An address written the way a URL has to have it.
  *
+ * IPv6 needs square brackets and nothing else may have them, and getting it wrong is
+ * silent rather than loud: `http://::1:5173/` parses as a hostname nobody has.
+ *
+ * @param {string} host
+ * @param {number} port
+ * @returns {string}
+ */
+export function loopbackUrl(host, port) {
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  return bare.includes(':') ? `http://[${bare}]:${port}` : `http://${bare}:${port}`;
+}
+
+/**
+ * Knock once on one address, and say which of the three things happened.
+ *
+ * "Refused" is worth keeping apart from "timed out" because they mean opposite things.
+ * Refused is this machine answering straight away that nothing is listening on that port;
+ * no amount of waiting changes that while it stays true. Timed out is something that never
+ * answered at all, which really can be a server still starting up.
+ *
+ * @param {number} port
+ * @param {string} host
+ * @param {number} [timeoutMs]
+ * @returns {Promise<{open: boolean, refused: boolean}>}
+ */
+function knock(port, host, timeoutMs = 1000) {
+  return new Promise((resolve) => {
+    /** @type {import('node:net').Socket} */
+    let socket;
+    try {
+      socket = net.connect({ port, host });
+    } catch {
+      // No IPv6 on this machine at all, or an address that cannot be parsed. Either way
+      // nothing is listening there, which is the answer this function exists to give.
+      resolve({ open: false, refused: false });
+      return;
+    }
+    let settled = false;
+    /**
+     * @param {boolean} open
+     * @param {boolean} refused
+     */
+    const done = (open, refused) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {
+        // Already gone.
+      }
+      resolve({ open, refused });
+    };
+    socket.setTimeout(timeoutMs);
+    socket.on('connect', () => done(true, false));
+    socket.on('error', (/** @type {any} */ error) => done(false, error?.code === 'ECONNREFUSED' || error?.code === 'EADDRNOTAVAIL'));
+    socket.on('timeout', () => done(false, false));
+  });
+}
+
+/**
+ * Take one port off the operating system by briefly being the one using it.
  * @returns {Promise<number>}
  */
-export function freePort() {
+function claimPort() {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
     probe.on('error', reject);
@@ -188,30 +258,188 @@ export function freePort() {
 }
 
 /**
- * Wait until something is listening, or give up.
+ * Find a port nobody is using.
+ *
+ * There is a gap between letting go of the port and the server taking it, and something
+ * else can slip in. Nothing can close that gap on any operating system, so the boot retries
+ * instead of pretending it cannot happen.
+ *
+ * The second half of this is new on 2026-08-31, and it is here to stop a false all-clear
+ * rather than to make anything work. Claiming a port on `127.0.0.1` says nothing at all
+ * about IPv6: a port can be free on one family and held by somebody else's program on the
+ * other. Now that the boot check knocks on `::1` too, a port free on IPv4 and taken on IPv6
+ * would have this tool connect to a STRANGER'S server and walk it as though it were the
+ * build being checked — the worst kind of wrong answer this tool can give. So the port is
+ * only handed back once both families are quiet.
+ *
+ * @returns {Promise<number>}
+ */
+export async function freePort() {
+  /** @type {number} */
+  let port = 0;
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    port = await claimPort();
+    const alreadyThere = await knock(port, '::1', 250);
+    if (!alreadyThere.open) return port;
+  }
+  throw new Error(`every port this machine offered was already in use on IPv6 (the last one tried was ${port})`);
+}
+
+/** Colour codes a terminal eats, which a plain-text search should not have to see. */
+const ANSI = /\u001B\[[0-9;]*[A-Za-z]/g;
+
+/** `http://host:port` inside something a server printed. The port is the part that matters. */
+const PRINTED_ADDRESS = /https?:\/\/(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+):(\d{2,5})/g;
+
+/**
+ * Every address a starting server said about itself.
+ *
+ * This is the whole answer to "why did it wait ninety seconds". A server that came up
+ * somewhere else almost always SAYS so on its first line: Vite prints
+ * `Local:   http://localhost:5173/`, Next prints `- Local: http://localhost:3000`,
+ * uvicorn prints `Uvicorn running on http://127.0.0.1:8000`. If it printed a port that is
+ * not the port it was handed, then nothing is ever going to answer where the check is
+ * knocking, and that is knowable a second after it starts rather than a minute and a half
+ * later.
+ *
+ * @param {string|null|undefined} text  Everything the process has printed so far.
+ * @returns {{host: string, port: number, url: string}[]}
+ */
+export function announcedAddresses(text) {
+  /** @type {{host: string, port: number, url: string}[]} */
+  const found = [];
+  const seen = new Set();
+  for (const match of String(text ?? '').replace(ANSI, '').matchAll(PRINTED_ADDRESS)) {
+    const host = match[1].toLowerCase();
+    const port = Number(match[2]);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
+    const url = loopbackUrl(host, port);
+    if (seen.has(url)) continue;
+    seen.add(url);
+    found.push({ host, port, url });
+  }
+  return found;
+}
+
+/**
+ * @typedef {object} WaitResult
+ * @property {boolean} up
+ * @property {string} why            Plain English, whether it worked or not.
+ * @property {number} ms
+ * @property {'answered'|'exited'|'wrong address'|'never answered'} outcome
+ * @property {string} [host]         The address that actually answered.
+ * @property {string} [baseUrl]      That address, written as a URL.
+ */
+
+/**
+ * Wait until something is listening, or say — quickly, and in words — why it never will be.
+ *
+ * ## The defect this was rewritten for, 2026-08-31
+ *
+ * On a stock Vite app on macOS this waited the full ninety seconds and then gave back a
+ * sentence nobody could act on. Two separate things were wrong, and only the first is about
+ * Vite. The server was listening on `[::1]` while the check knocked on `127.0.0.1`; and
+ * every one of those knocks came back REFUSED in under a millisecond, which is this machine
+ * saying "there is nothing here", not "not yet". Ninety seconds of that, on each side of the
+ * comparison, is three minutes in which the tool is indistinguishable from a broken one.
+ *
+ * Three things are knowable early, and all three are now said early:
+ *
+ * 1. The command exited. That was already handled, and still is.
+ * 2. The command printed an address on a DIFFERENT port from the one it was handed. It
+ *    ignored `$PORT`, so nothing will ever answer where the check is knocking. Stop now,
+ *    and name the command, the address it printed and the address that was waited on.
+ * 3. Nothing has answered yet and every knock was refused. That one is deliberately NOT
+ *    stopped early, because a server that has not opened its port yet is refused in exactly
+ *    the same way, and cutting the wait short there would turn a slow build into a failure.
+ *    Instead the wait says out loud what it is waiting for while it waits, so that the
+ *    difference between working and hung is visible rather than guessed at.
+ *
  * @param {number} port
  * @param {object} [opts]
  * @param {number} [opts.timeoutMs]
  * @param {() => string|null} [opts.crashed]   Called between tries; a string means stop now.
- * @returns {Promise<{up: boolean, why: string, ms: number}>}
+ * @param {() => string} [opts.announced]      Everything the process has printed so far.
+ * @param {string} [opts.command]              The command that was run, for the message.
+ * @param {string[]} [opts.hosts]              Addresses to knock on. Both loopbacks by default.
+ * @param {(message: string) => void} [opts.say]  Told what is being waited for, as it waits.
+ * @returns {Promise<WaitResult>}
  */
 export async function waitForServer(port, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 60000;
+  const named = opts.command ? `\`${opts.command}\`` : 'the start command';
+  /** @type {string[]} */
+  const hosts = [...(opts.hosts ?? LOOPBACK)];
   const started = Date.now();
+  /** Every knock so far was refused outright, so nothing has ever been listening there. */
+  let onlyRefusals = true;
+  /** So the running commentary is written every few seconds, not five times a second. */
+  let saidAt = 0;
+
+  const where = () => hosts.map((host) => loopbackUrl(host, port)).join(' or ');
+
   for (;;) {
     const crash = opts.crashed?.();
-    if (crash) return { up: false, why: crash, ms: Date.now() - started };
-    const open = await new Promise((resolve) => {
-      const socket = net.connect({ port, host: '127.0.0.1' });
-      const done = (/** @type {boolean} */ answer) => { socket.destroy(); resolve(answer); };
-      socket.setTimeout(1000);
-      socket.on('connect', () => done(true));
-      socket.on('error', () => done(false));
-      socket.on('timeout', () => done(false));
-    });
-    if (open) return { up: true, why: `The server answered on port ${port}.`, ms: Date.now() - started };
-    if (Date.now() - started > timeoutMs) {
-      return { up: false, why: `The server never answered on port ${port} within ${timeoutMs / 1000} seconds.`, ms: Date.now() - started };
+    if (crash) {
+      return {
+        up: false,
+        outcome: 'exited',
+        ms: Date.now() - started,
+        why: `${crash} It was started with ${named}, and nothing ever listened at ${where()}.`,
+      };
+    }
+
+    for (const host of hosts) {
+      const hit = await knock(port, host, 1000);
+      if (hit.open) {
+        const baseUrl = loopbackUrl(host, port);
+        return {
+          up: true,
+          outcome: 'answered',
+          host,
+          baseUrl,
+          ms: Date.now() - started,
+          why: `The server answered at ${baseUrl}.`,
+        };
+      }
+      if (!hit.refused) onlyRefusals = false;
+    }
+
+    // What it said about itself. This is the fast answer, and the reason the wait no longer
+    // spends a minute and a half proving something it could have read off the first line.
+    const printed = announcedAddresses(opts.announced?.() ?? '');
+    if (printed.length > 0 && !printed.some((one) => one.port === port)) {
+      const seconds = Math.max(1, Math.round((Date.now() - started) / 1000));
+      return {
+        up: false,
+        outcome: 'wrong address',
+        ms: Date.now() - started,
+        why: `${named} came up at ${printed.map((one) => one.url).join(', ')}, not on the port it was handed (${port}). Nothing was ever going to answer at ${where()}, so the wait was stopped after ${seconds} second${seconds === 1 ? '' : 's'} instead of running out the clock. Make the command listen on the PORT it is given: for Vite that is \`--port $PORT --strictPort --host 127.0.0.1\`, and for most other things reading process.env.PORT is enough.`,
+      };
+    }
+    // It named an address on OUR port but on a host nobody is knocking on — a server told to
+    // listen on the network rather than on loopback. The port is one this tool handed out and
+    // proved free, so what is there is its own child. Knock there too rather than time out
+    // beside a server that is up.
+    for (const one of printed) {
+      if (one.port !== port) continue;
+      const bare = one.host.startsWith('[') && one.host.endsWith(']') ? one.host.slice(1, -1) : one.host;
+      if (bare === 'localhost' || bare === '0.0.0.0' || bare === '::' || hosts.includes(bare)) continue;
+      hosts.push(bare);
+    }
+
+    const waited = Date.now() - started;
+    if (waited > timeoutMs) {
+      return {
+        up: false,
+        outcome: 'never answered',
+        ms: waited,
+        why: `Nothing answered at ${where()} in ${Math.round(timeoutMs / 1000)} seconds. ${named} was still running${onlyRefusals ? ', and every single knock was refused outright — that is this machine saying nothing is listening on that port at all, rather than that the server is slow' : ''}. ${printed.length > 0 ? `The only address it printed was ${printed.map((one) => one.url).join(', ')}.` : 'It never printed an address saying where it came up.'}`,
+      };
+    }
+    if (opts.say && waited - saidAt >= 5000) {
+      saidAt = waited;
+      opts.say(`Still waiting for ${named} to answer at ${where()} — ${Math.round(waited / 1000)} seconds so far${onlyRefusals ? ', with every knock refused, which means nothing has opened that port yet' : ''}.`);
     }
     await new Promise((r) => setTimeout(r, 200));
   }
@@ -490,9 +718,17 @@ export const httpAdapter = defineAdapter({
       exited = `The server stopped before it answered — exit code ${code}${signal ? `, killed by ${signal}` : ''}.`;
     });
 
+    // The same handover the web adapter makes, for the same reason and against the same
+    // measurement of 2026-08-31: a wait that only knows a port number can only ever report a
+    // port number, and "nothing answered on 64912" is not something a person can act on. With
+    // the command and its output in hand, a server that ignored `$PORT` or came up on the
+    // other loopback address is named in the first second or two instead of the sixtieth.
     const up = await waitForServer(port, {
       timeoutMs: config.startTimeoutMs ?? 60000,
       crashed: () => exited,
+      command: String(config.start),
+      announced: () => Buffer.concat([...bootOut, ...bootErr]).toString('utf8'),
+      say: (message) => ctx.log?.(message),
     });
 
     if (!up.up) {
@@ -508,14 +744,19 @@ export const httpAdapter = defineAdapter({
     // writes one line the moment it loads, so the file existing after boot is the proof. It
     // decides whether a route the project called irreversible may be walked at all.
     const watcherInForce = (await readWatcher(reportFile)).inForce;
-    running.set(build.id, { base, work, home, tmp, port, reportFile, child, config, bootErr, watcherInForce });
+    // The address that ANSWERED, kept so every route is asked for at the place the server
+    // really is. A server that listened on `localhost` is on the IPv6 loopback on this Mac,
+    // and every request sent to a hard-coded `127.0.0.1` would be refused by a machine that
+    // is running the server perfectly well.
+    const baseUrl = up.baseUrl ?? `http://127.0.0.1:${port}`;
+    running.set(build.id, { base, work, home, tmp, port, baseUrl, reportFile, child, config, bootErr, watcherInForce });
 
     return {
       build,
       root: work,
       ready: true,
-      why: `${copy.why} ${restored} It came up on port ${port} in ${timeBucket(up.ms)}. ${watcherInForce ? 'Outbound connections are being watched and refused, so a route that calls a payment provider can be walked safely.' : 'Nothing is watching this server from the inside — it is not a Node program, or it replaced the environment it was started with — so routes that reach off this machine are left alone.'}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`,
-      facts: { port, work, base: `http://127.0.0.1:${port}` },
+      why: `${copy.why} ${restored} It came up at ${baseUrl} in ${timeBucket(up.ms)}. ${watcherInForce ? 'Outbound connections are being watched and refused, so a route that calls a payment provider can be walked safely.' : 'Nothing is watching this server from the inside — it is not a Node program, or it replaced the environment it was started with — so routes that reach off this machine are left alone.'}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`,
+      facts: { port, work, base: baseUrl },
       dispose: async () => {
         const held = running.get(build.id);
         running.delete(build.id);
@@ -582,7 +823,7 @@ export const httpAdapter = defineAdapter({
     /** @type {string|null} */
     let failure = null;
     try {
-      answer = await fetch(`http://127.0.0.1:${held.port}${detail.url}`, {
+      answer = await fetch(`${held.baseUrl ?? `http://127.0.0.1:${held.port}`}${detail.url}`, {
         method: detail.method,
         headers: { accept: '*/*', ...detail.headers },
         body: detail.body === undefined || detail.method === 'GET' || detail.method === 'HEAD'
