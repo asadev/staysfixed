@@ -1086,28 +1086,34 @@ async function stopWhateverIsStillRunningIn(dir) {
 function noScratchFolder(e) {
   const tmp = os.tmpdir();
   const code = String(/** @type {any} */ (e)?.code ?? '');
+  // The setting is not called the same thing everywhere, and naming the wrong one is advice
+  // that cannot be followed. Windows reads TEMP and TMP; everything else reads TMPDIR. All
+  // three sentences below said "TMPDIR" on every machine, so on Windows the only instruction
+  // a stuck person was given named a setting their operating system does not read. Measured
+  // on a real Windows 11 machine, 2026-08-31.
+  const setting = process.platform === 'win32' ? 'TEMP' : 'TMPDIR';
+  const trailing = process.platform === 'win32' ? /[\\/]$/ : /\/$/;
   // Worth naming only when a setting in this shell is what chose the folder. On a machine
-  // where nothing set it, saying "TMPDIR" sends somebody looking for a setting they have not
+  // where nothing set it, saying the name sends somebody looking for a setting they have not
   // got, and the folder is the operating system's own.
-  const yours = (process.env.TMPDIR ?? '').replace(/\/$/, '') === tmp.replace(/\/$/, '')
-    ? ' That folder is whatever TMPDIR is set to in this shell.'
-    : '';
+  const chosenHere = (process.env[setting] ?? '').replace(trailing, '') === tmp.replace(trailing, '');
+  const yours = chosenHere ? ` That folder is whatever ${setting} is set to in this shell.` : '';
   /** @type {{why: string, hint: string}} */
   const said =
     code === 'ENOENT'
       ? {
         why: `There is no folder at ${tmp}, so there was nowhere to put it.`,
-        hint: `Make that folder, or point TMPDIR at one that exists — or unset TMPDIR to fall back to this machine's own — and run the check again.${yours}`,
+        hint: `Make that folder, or point ${setting} at one that exists — or unset ${setting} to fall back to this machine's own — and run the check again.${yours}`,
       }
       : code === 'EACCES' || code === 'EPERM'
         ? {
           why: `${tmp} is there, but this user is not allowed to write in it.`,
-          hint: `Give yourself write access to that folder, or point TMPDIR at one you can write to, and run the check again.${yours}`,
+          hint: `Give yourself write access to that folder, or point ${setting} at one you can write to, and run the check again.${yours}`,
         }
         : code === 'EROFS'
           ? {
             why: `${tmp} is on a disk that is mounted read-only, so nothing can be written there at all.`,
-            hint: `Point TMPDIR at a folder on a disk that takes writes and run the check again.${yours}`,
+            hint: `Point ${setting} at a folder on a disk that takes writes and run the check again.${yours}`,
           }
           : code === 'ENOSPC'
             ? {
@@ -3007,6 +3013,69 @@ function nameOfReference(reference, asked) {
 }
 
 /**
+ * Put one commit's files into a folder, without a shell and without touching the repository.
+ *
+ * `git archive` writes a tar to its standard output and `tar` reads one from its standard
+ * input, so the two are joined here directly. The archive never reaches the disk, which is why
+ * a big repository does not cost twice the space to look at — the reason the shell pipeline was
+ * there in the first place. Both programs are on every machine this runs on: Windows has
+ * shipped `tar.exe` since Windows 10, and git is already required for anything here to work.
+ *
+ * @param {string} root  The repository.
+ * @param {string} sha   The commit to put back.
+ * @param {string} dir   An empty folder to put it in.
+ * @returns {Promise<void>}
+ */
+function gitArchiveInto(root, sha, dir) {
+  return new Promise((resolve, reject) => {
+    const git = spawn('git', ['-C', root, 'archive', '--format=tar', sha], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const untar = spawn('tar', ['-x', '-f', '-', '-C', dir], {
+      stdio: ['pipe', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+
+    let said = '';
+    for (const stream of [git.stderr, untar.stderr]) {
+      stream?.setEncoding('utf8');
+      stream?.on('data', (chunk) => { said = (said + chunk).slice(0, 4000); });
+    }
+
+    let done = false;
+    /** @param {Error|null} e */
+    const finish = (e) => {
+      if (done) return;
+      done = true;
+      clearTimeout(giveUp);
+      try { git.kill('SIGKILL'); } catch { /* already gone */ }
+      try { untar.kill('SIGKILL'); } catch { /* already gone */ }
+      if (e) reject(e);
+      else resolve();
+    };
+    const giveUp = setTimeout(
+      () => finish(new Error(`putting ${sha.slice(0, 7)} back took longer than two minutes.`)),
+      120_000,
+    );
+
+    git.on('error', finish);
+    untar.on('error', finish);
+    git.stdout.pipe(untar.stdin);
+    // A pipe that breaks because the other end has died is not news worth an unhandled error.
+    git.stdout.on('error', () => {});
+    untar.stdin.on('error', () => {});
+
+    git.on('exit', (code) => {
+      if (code !== 0) finish(new Error(said.trim() || `git archive stopped with code ${code}`));
+    });
+    untar.on('exit', (code) => {
+      finish(code === 0 ? null : new Error(said.trim() || `tar stopped with code ${code}`));
+    });
+  });
+}
+
+/**
  * Put the old build back on this machine so it can be walked live.
  *
  * `git archive` is used rather than a checkout or a worktree for one reason: it reads
@@ -3038,12 +3107,13 @@ async function exportBuild(root, reference, scratch) {
   const dir = path.join(scratch, `reference-${sha.slice(0, 12)}`);
   await fsp.mkdir(dir, { recursive: true });
   try {
-    // Straight through a pipe: the archive is never written to disk, so a big repository
-    // does not cost twice the space to look at.
-    await exec('/bin/sh', ['-c', `git -C ${quote(root)} archive --format=tar ${quote(sha)} | tar -x -C ${quote(dir)}`], {
-      timeout: 120_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    // Straight through a pipe: the archive is never written to disk, so a big repository does
+    // not cost twice the space to look at. The two programs are joined below rather than by a
+    // shell, because there is no `/bin/sh` on Windows — and that one word was the whole of
+    // paired mode there. Measured on a real Windows 11 machine on 2026-08-31: every `--paired`
+    // run answered "<sha> cannot be built here" and fell back to the stored record, which is
+    // the weaker comparison. The tool's strongest mode had never once run on Windows.
+    await gitArchiveInto(root, sha, dir);
   } catch (e) {
     await fsp.rm(dir, { recursive: true, force: true });
     throw new StaysFixedError(`${sha.slice(0, 7)} could not be put back on this machine, so it cannot be walked live. ${messageOf(e)}`, {
@@ -3164,10 +3234,6 @@ async function packageVersion(root) {
   return typeof pkg?.version === 'string' ? pkg.version : null;
 }
 
-/** @param {string} text */
-function quote(text) {
-  return `'${text.split("'").join(`'\\''`)}'`;
-}
 
 /** @param {string} name */
 function safeSegment(name) {

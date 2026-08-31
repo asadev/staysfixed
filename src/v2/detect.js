@@ -988,7 +988,13 @@ async function findMembers(root, globs, listing) {
     if (glob.endsWith('/*') || glob.endsWith('/**')) {
       const parent = glob.replace(/\/\*+$/, '');
       const inner = await listOnce(path.join(root, parent));
-      for (const dir of inner.dirs) folders.add(path.join(parent, dir));
+      // `${parent}/${dir}`, not path.join. This is a repository-relative ADDRESS: it comes
+      // out of the workspace globs written with forward slashes, is compared against things
+      // like `apps/` further down, is stored in the record and is shown to people. On Windows
+      // path.join gave it a backslash, so a product under `packages/api` was not found at all
+      // and `apps/` was reported as code nobody was checking while every package inside it
+      // was being checked. Measured on a real Windows 11 machine, 2026-08-31.
+      for (const dir of inner.dirs) folders.add(`${parent}/${dir}`);
     } else if (!glob.includes('*')) {
       folders.add(glob);
     }
