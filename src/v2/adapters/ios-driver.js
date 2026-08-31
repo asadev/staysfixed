@@ -56,6 +56,10 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 
+// One place for "every wait has a limit and every limit says something", shared with the
+// other adapters rather than written out three times.
+import { boundedMs, letGoOf } from './process.js';
+
 /** @typedef {import('../types.js').ObservedValue} JsonValue */
 
 // ---------------------------------------------------------------------------
@@ -96,7 +100,13 @@ function runOnce(file, args, opts = {}) {
       file,
       args,
       {
-        timeout: opts.timeoutMs ?? 60_000,
+        // `boundedMs` and not the number as handed over, and this is load-bearing. `execFile`
+        // arms its timeout only when the value is greater than zero, so a limit of NaN — which
+        // is what `Number(journey.timeoutMs)` becomes the moment somebody writes `"4m"` in
+        // their settings — does not shorten the limit, it REMOVES it. And `xcrun simctl` is
+        // already known to hang on this machine, so the result would be a check that produced
+        // no output and never came back, which is the exact symptom recorded on 2026-08-30.
+        timeout: boundedMs(opts.timeoutMs, 60_000),
         killSignal: 'SIGKILL',
         maxBuffer: 64 * 1024 * 1024,
         signal: opts.signal,
@@ -105,6 +115,10 @@ function runOnce(file, args, opts = {}) {
       (error, stdout, stderr) => {
         const err = /** @type {any} */ (error);
         if (err && (err.killed || err.signal === 'SIGKILL')) timedOut = true;
+        // Nothing this file starts may hold the tool open after the answer is in. `execFile`
+        // tears the pipes down itself when its own limit fires, but not when the program simply
+        // ends — and a simulator helper that outlived it is still holding the writing end.
+        letGoOf(child);
         resolve({
           code: err?.code === undefined ? (error ? 1 : 0) : Number(err.code),
           stdout: String(stdout ?? ''),
@@ -1007,7 +1021,11 @@ export async function openApp(opts) {
     const seq = String(sequence).padStart(5, '0');
     const reply = path.join(channel, `reply-${seq}.json`);
     await fsp.writeFile(path.join(channel, `cmd-${seq}.json`), JSON.stringify({ act, ...args }), 'utf8');
-    const until = Date.now() + timeoutMs;
+    // Guarded so the sentence at the bottom of this can never read "did not answer within NaN
+    // seconds", which is a limit nobody can act on and, on the other side of the comparison,
+    // a loop that gives up instantly and reports a working app as unreadable.
+    const limitMs = boundedMs(timeoutMs, ANSWER_TIMEOUT_MS, 10 * 60_000);
+    const until = Date.now() + limitMs;
     while (Date.now() < until) {
       if (opts.signal?.aborted) throw new Error('The run was cancelled while the app was being asked something.');
       try {
@@ -1018,7 +1036,7 @@ export async function openApp(opts) {
         await wait(40);
       }
     }
-    return { ok: false, timedOut: true, why: `The app did not answer within ${Math.round(timeoutMs / 1000)} seconds when it was asked to ${act}. It may be busy, or it may have stopped.` };
+    return { ok: false, timedOut: true, why: `The app did not answer within ${Math.round(limitMs / 1000)} seconds when it was asked to ${act}. It may be busy, or it may have stopped.` };
   };
 
   t = Date.now();
@@ -1029,7 +1047,7 @@ export async function openApp(opts) {
     // took eighteen seconds on a warm device took over seven minutes on a cold one. A
     // window that is too short does not fail loudly - it reports the screen as unreadable,
     // which is a hole where there was no problem.
-    const until = Date.now() + (opts.firstAnswerMs ?? 60_000);
+    const until = Date.now() + boundedMs(opts.firstAnswerMs, 60_000, 15 * 60_000);
     while (Date.now() < until && !probeAnswered) {
       const pong = await ask('ping', {}, 4_000);
       probeAnswered = pong?.ok === true;

@@ -503,6 +503,232 @@ export function compareTrees(before, after) {
 }
 
 // ---------------------------------------------------------------------------
+// Never waiting for ever
+// ---------------------------------------------------------------------------
+
+/**
+ * The three pieces below exist because of one measured symptom, and they are used by every
+ * adapter in this folder that starts a program.
+ *
+ * On 2026-08-30 an Electron check produced no output at all and simply never came back. On
+ * 2026-08-31 it was reproduced twice, deliberately, against a fake app that starts, prints one
+ * line and leaves a `sleep` behind that inherited its standard output:
+ *
+ *   1. `runCommand` was asked for a two second limit and had still not returned twenty
+ *      seconds later. Its limit fired exactly on time and killed the shell — but the promise
+ *      is settled by the child's `close` event, and `close` does not mean "the program ended",
+ *      it means "nobody is holding its pipes any more". The orphan was holding them, so
+ *      `close` never arrived and the limit may as well not have existed.
+ *
+ *   2. A run that had finished all of its work — the app opened, read, closed and PROVED gone,
+ *      the teardown printing "The next run starts alone" — then sat there for ever, because
+ *      the same orphan was still holding the writing end of a pipe this process was reading.
+ *      A pipe being read keeps Node's event loop awake, so the tool never exited.
+ *
+ * `child.js` says the same thing about servers started from a start command, and it is right:
+ * the whole group has to be signalled and the pipes have to be TORN DOWN rather than trusted
+ * to close. These are the same two rules for the children that adapters start directly.
+ *
+ * The reason this matters more than an ordinary bug: a tool somebody runs before a release
+ * that never comes back cannot be told apart from a tool that is broken, or from a product
+ * that is broken. A run that gives up after a bounded wait and says exactly what it was
+ * waiting for is worse news and better information.
+ */
+
+/**
+ * A number of milliseconds that is definitely a number of milliseconds.
+ *
+ * Every limit in this tool can be set from a project's own settings file, and a settings file
+ * is written by a person. `Number("30s")` is NaN — and NaN is the most dangerous value a limit
+ * can take, because `Date.now() + NaN` is NaN, `Date.now() > NaN` is false for ever, and a
+ * loop written around that runs until somebody kills it and never says why. A limit that is
+ * not a real, positive, finite number becomes the default instead, and one that is absurd is
+ * capped, because "wait thirty days" is a typo every time.
+ *
+ * @param {unknown} value
+ * @param {number} fallback
+ * @param {number} [ceiling]
+ * @returns {number}
+ */
+export function boundedMs(value, fallback, ceiling = 30 * 60_000) {
+  const asked = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(asked) || asked <= 0) return fallback;
+  return Math.min(asked, ceiling);
+}
+
+/**
+ * A count that is definitely a count. The same guard as `boundedMs`, for the numbers that are
+ * a number of times round a loop rather than a number of milliseconds.
+ *
+ * @param {unknown} value
+ * @param {number} fallback
+ * @param {number} ceiling
+ * @returns {number}
+ */
+export function boundedCount(value, fallback, ceiling) {
+  const asked = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(asked) || asked < 1) return fallback;
+  return Math.min(Math.round(asked), ceiling);
+}
+
+/**
+ * Let go of a child completely, so nothing it left behind can hold this tool open.
+ *
+ * The pipes are destroyed rather than left to close on their own, because whatever the child
+ * started inherited the writing end of them and a survivor this file did not start must not
+ * be able to keep a finished check awake. This is the same tear-down `child.js` does for a
+ * start command's server, for the same measured reason.
+ *
+ * @param {import('node:child_process').ChildProcess|null|undefined} child
+ * @returns {void}
+ */
+export function letGoOf(child) {
+  if (!child) return;
+  for (const stream of [child.stdout, child.stderr, child.stdin]) {
+    try { stream?.destroy(); } catch { /* already gone, which is the outcome wanted */ }
+  }
+  try { child.unref(); } catch { /* not every child can be unreferenced; it has been let go either way */ }
+}
+
+/**
+ * Stop a child, and everything it started, as firmly as the platform allows.
+ *
+ * Signalling a negative pid signals the whole process GROUP, which is the only way to reach
+ * the grandchildren — a start command's shell runs npm which runs node, and killing the shell
+ * leaves the other two running. That only works for a child that was started in a group of
+ * its own, so `group` is the caller's promise that it spawned with `detached`. Passing it for
+ * a child that is in OUR group would ask this process to kill itself.
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {NodeJS.Signals} signal
+ * @param {boolean} group
+ * @returns {void}
+ */
+export function tellItToStop(child, signal, group) {
+  const pid = child.pid;
+  if (group && pid && process.platform !== 'win32') {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch { /* no group of that name, or already gone; fall through and ask the one process */ }
+  }
+  try { child.kill(signal); } catch { /* already gone, which is the outcome wanted */ }
+}
+
+/**
+ * Wait for a child to be GONE, with a limit that always fires and always says something.
+ *
+ * The important line in here is that it settles on `exit` and not on `close`. `exit` means the
+ * program ended. `close` means the program ended AND nobody anywhere is holding its pipes any
+ * more, which is a completely different claim and one an orphaned grandchild can refuse for
+ * ever. Every `close`-shaped wait in this folder was a hang waiting to happen, and one of them
+ * was measured hanging on 2026-08-31.
+ *
+ * After `exit` the last of the output is still worth having, so there is a short drain — but
+ * it is a drain with a clock on it, not a wait.
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {object} [opts]
+ * @param {number} [opts.limitMs]     How long the program itself may take. Default two minutes.
+ * @param {number} [opts.drainMs]     How long to wait for the last of its output after it ends.
+ * @param {number} [opts.graceMs]     Between asking it to stop and insisting.
+ * @param {boolean} [opts.group]      True only when it was spawned with `detached`.
+ * @param {string} [opts.what]        Named in the sentence, so a give-up can be acted on.
+ * @returns {Promise<{code: number|null, signal: string|null, gaveUp: boolean, why: string}>}
+ */
+export function endOfChild(child, opts = {}) {
+  const limitMs = boundedMs(opts.limitMs, 120_000);
+  const drainMs = boundedMs(opts.drainMs, 250, 10_000);
+  const graceMs = boundedMs(opts.graceMs, 2000, 60_000);
+  const group = opts.group === true;
+  const what = opts.what ?? 'the program it started';
+
+  return new Promise((resolve) => {
+    let settled = false;
+    /** @type {ReturnType<typeof setTimeout>[]} */
+    const timers = [];
+    /** @param {number} ms @param {() => void} fn */
+    const later = (ms, fn) => {
+      const timer = setTimeout(fn, ms);
+      // The limit itself must never be the thing holding the loop open.
+      if (typeof timer.unref === 'function') timer.unref();
+      timers.push(timer);
+      return timer;
+    };
+
+    // Set the moment the limit fires, and read by every path out of here. A program that
+    // stops promptly when it is asked to still ran out of time, and reporting that as a clean
+    // exit is how a run that checked nothing comes back looking green.
+    let ranOutOfTime = false;
+    const gaveUpBecause = () => `Stays Fixed gave up waiting for ${what} after ${Math.round(limitMs / 1000)} seconds and stopped it. Nothing it would have done after that point was checked.`;
+
+    /** @param {string} why */
+    const finish = (why) => {
+      if (settled) return;
+      settled = true;
+      for (const timer of timers) clearTimeout(timer);
+      letGoOf(child);
+      resolve({ code: child.exitCode, signal: child.signalCode, gaveUp: ranOutOfTime, why: ranOutOfTime ? gaveUpBecause() : why });
+    };
+
+    child.once('close', () => finish(`${what} finished.`));
+    child.once('exit', () => {
+      later(drainMs, () => finish(`${what} finished, and the last of its output was cut off after ${Math.round(drainMs)}ms because something it started was still holding its pipes open.`));
+    });
+    child.once('error', (error) => finish(`${what} could not be run: ${error.message}`));
+
+    later(limitMs, () => {
+      ranOutOfTime = true;
+      tellItToStop(child, 'SIGTERM', group);
+      later(graceMs, () => {
+        tellItToStop(child, 'SIGKILL', group);
+        // Even SIGKILL cannot make a pipe close while an orphan holds it, so this is where
+        // the waiting stops whatever anything else does.
+        finish(gaveUpBecause());
+      });
+    });
+
+    // It may already be over before anybody looked.
+    if (child.exitCode !== null || child.signalCode !== null) {
+      later(drainMs, () => finish(`${what} had already finished.`));
+    }
+  });
+}
+
+/**
+ * Put a limit on any wait at all, and make the limit say what it was waiting for.
+ *
+ * For the waits that are not a child process: a socket that accepts a connection and then goes
+ * quiet, a window that never opens, a handler that never answers. The sentence is the whole
+ * point of it — "it timed out" and "it never came back" are the same non-answer, while "it
+ * gave up after sixty seconds waiting for the app to open its main-process debugging
+ * connection" is something a person can act on.
+ *
+ * `what` may be a function, so that a wait made of several stages can name the stage it was
+ * actually stuck in rather than the whole job. "It gave up opening the app" sends somebody
+ * looking everywhere; "it gave up while waiting for the app to open a window" sends them to one
+ * place.
+ *
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {{limitMs: number, what: string|(() => string), fallbackMs?: number}} opts
+ * @returns {Promise<T>}
+ */
+export function withLimit(promise, opts) {
+  const limitMs = boundedMs(opts.limitMs, opts.fallbackMs ?? 60_000);
+  /** @type {ReturnType<typeof setTimeout>} */
+  let timer;
+  const giveUp = new Promise((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Stays Fixed gave up after ${Math.round(limitMs / 1000)} seconds waiting for ${typeof opts.what === 'function' ? opts.what() : opts.what}.`)),
+      limitMs,
+    );
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([promise, giveUp]).finally(() => clearTimeout(timer));
+}
+
+// ---------------------------------------------------------------------------
 // Running one command
 // ---------------------------------------------------------------------------
 
@@ -521,11 +747,26 @@ export function compareTrees(before, after) {
  */
 
 /**
- * Run a command and wait for it, with a hard limit.
+ * Run a command and wait for it, with a hard limit that is actually hard.
  *
  * Killed with SIGTERM first and SIGKILL after a grace period, because a program that traps
  * SIGTERM and hangs would otherwise hold the whole run open — and killed is reported as
  * killed, never quietly as an exit code.
+ *
+ * Two things in here are not decoration, and both were measured on 2026-08-31 against a start
+ * command that leaves an orphan behind — the shape `npm run dev` has, and the shape that had
+ * already been recorded once as an Electron check that gave no output at all and never came
+ * back.
+ *
+ * The command runs in a process GROUP of its own, because the thing spawned is a shell and the
+ * program is its child or grandchild. Killing the shell leaves the program running, and the
+ * limit then achieves nothing at all. This is the same finding `child.js` made about servers.
+ *
+ * And the answer is settled by `endOfChild`, which waits for the command to END rather than
+ * for its pipes to close. Waiting for `close` was the actual bug: asked for a two second
+ * limit, this function had not returned twenty seconds later, because the orphan was still
+ * holding the writing end of the pipes and `close` will not fire until every last holder lets
+ * go. The limit fired perfectly and nobody was listening.
  *
  * @param {string} command       Run through the shell, so a project can write what it means.
  * @param {object} opts
@@ -536,69 +777,68 @@ export function compareTrees(before, after) {
  * @param {AbortSignal} [opts.signal]
  * @returns {Promise<CommandResult>}
  */
-export function runCommand(command, opts) {
-  const timeoutMs = opts.timeoutMs ?? 120000;
-  return new Promise((resolve) => {
-    const started = Date.now();
-    const child = spawn(command, {
-      shell: true,
-      cwd: opts.cwd,
-      env: opts.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    /** @type {Buffer[]} */
-    const out = [];
-    /** @type {Buffer[]} */
-    const err = [];
-    let timedOut = false;
-    let settled = false;
-
-    child.stdout?.on('data', (chunk) => out.push(chunk));
-    child.stderr?.on('data', (chunk) => err.push(chunk));
-    if (opts.stdin !== undefined) child.stdin?.end(opts.stdin);
-    else child.stdin?.end();
-
-    /** @type {string|undefined} */
-    let couldNotStart;
-
-    const finish = (/** @type {number|null} */ code, /** @type {string|null} */ signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(alarm);
-      clearTimeout(hardStop);
-      opts.signal?.removeEventListener('abort', onAbort);
-      resolve({
-        stdout: Buffer.concat(out).toString('utf8'),
-        stderr: Buffer.concat(err).toString('utf8'),
-        code,
-        signal,
-        timedOut,
-        ms: Date.now() - started,
-        ...(couldNotStart ? { couldNotStart } : {}),
-      });
-    };
-
-    /** @type {NodeJS.Timeout} */
-    let hardStop;
-    const alarm = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      hardStop = setTimeout(() => child.kill('SIGKILL'), 5000);
-    }, timeoutMs);
-
-    const onAbort = () => { child.kill('SIGTERM'); };
-    opts.signal?.addEventListener('abort', onAbort, { once: true });
-
-    child.on('error', (error) => {
-      // Nothing ran. Said out loud rather than folded into "exit code null", which is what a
-      // killed run also looks like — and which is identical on both builds, so the comparison
-      // saw no difference and the run passed for the worst possible reason.
-      couldNotStart = error.message;
-      err.push(Buffer.from(`${error.message}\n`));
-      finish(null, null);
-    });
-    child.on('close', (code, signal) => finish(code, signal));
+export async function runCommand(command, opts) {
+  const timeoutMs = boundedMs(opts.timeoutMs, 120000);
+  const started = Date.now();
+  // Its own process group, so the limit can reach the program and not only the shell in front
+  // of it. There are no groups of this kind on Windows, where signalling the child is the best
+  // that can be done.
+  const inItsOwnGroup = process.platform !== 'win32';
+  const child = spawn(command, {
+    shell: true,
+    cwd: opts.cwd,
+    env: opts.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    detached: inItsOwnGroup,
   });
+
+  /** @type {Buffer[]} */
+  const out = [];
+  /** @type {Buffer[]} */
+  const err = [];
+
+  child.stdout?.on('data', (chunk) => out.push(chunk));
+  child.stderr?.on('data', (chunk) => err.push(chunk));
+  if (opts.stdin !== undefined) child.stdin?.end(opts.stdin);
+  else child.stdin?.end();
+
+  /** @type {string|undefined} */
+  let couldNotStart;
+  child.on('error', (error) => {
+    // Nothing ran. Said out loud rather than folded into "exit code null", which is what a
+    // killed run also looks like — and which is identical on both builds, so the comparison
+    // saw no difference and the run passed for the worst possible reason.
+    couldNotStart = error.message;
+    err.push(Buffer.from(`${error.message}\n`));
+  });
+
+  // The whole group, not the shell. Stopping the shell and leaving npm and node running is
+  // how a cancelled run leaves a dev server on somebody's machine.
+  const onAbort = () => { tellItToStop(child, 'SIGTERM', inItsOwnGroup); };
+  opts.signal?.addEventListener('abort', onAbort, { once: true });
+
+  const ended = await endOfChild(child, {
+    limitMs: timeoutMs,
+    graceMs: 5000,
+    group: inItsOwnGroup,
+    // Both ends of the command, never just the first eighty characters. A command that lives
+    // under a long scratch path is all path for the first eighty characters, so cutting from
+    // the front produces a sentence naming a FOLDER and never the thing it gave up on.
+    what: `"${trimForStorage(String(command), 120).text}"`,
+  });
+  opts.signal?.removeEventListener('abort', onAbort);
+
+  if (ended.gaveUp) err.push(Buffer.from(`${ended.why}\n`));
+
+  return {
+    stdout: Buffer.concat(out).toString('utf8'),
+    stderr: Buffer.concat(err).toString('utf8'),
+    code: ended.code,
+    signal: ended.signal,
+    timedOut: ended.gaveUp,
+    ms: Date.now() - started,
+    ...(couldNotStart ? { couldNotStart } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -728,38 +968,27 @@ export async function copyForScratch(from, to, opts = {}) {
  * @param {AbortSignal} [signal]
  * @returns {Promise<boolean>}
  */
-function cloneOne(source, target, signal) {
+async function cloneOne(source, target, signal) {
   // Windows has no reflink through `cp`, and there is no `cp`. Straight to the fallback.
-  if (process.platform === 'win32') return Promise.resolve(false);
+  if (process.platform === 'win32') return false;
   const args = process.platform === 'darwin'
     ? ['-Rc', source, target]
     : ['-a', '--reflink=auto', source, target];
-  return new Promise((resolve) => {
-    let settled = false;
-    /** @param {boolean} ok */
-    const done = (ok) => {
-      if (settled) return;
-      settled = true;
-      resolve(ok);
-    };
-    let child;
-    try {
-      child = spawn('cp', args, { stdio: 'ignore', signal });
-    } catch {
-      done(false);
-      return;
-    }
-    child.on('error', () => done(false));
-    child.on('close', (code) => {
-      if (code === 0) {
-        done(true);
-        return;
-      }
-      // A half-written target from a failed clone would make the fallback copy merge into
-      // it. Clear it out so the fallback starts from nothing.
-      fsp.rm(target, { recursive: true, force: true }).then(() => done(false), () => done(false));
-    });
-  });
+  let child;
+  try {
+    child = spawn('cp', args, { stdio: 'ignore', signal });
+  } catch {
+    return false;
+  }
+  // Ten minutes is far longer than a clone of a project tree has ever taken and still a limit.
+  // `cp` on a network mount that stops answering hangs for ever otherwise, and a copy that
+  // never finishes looks to whoever ran the check exactly like the check being broken.
+  const ended = await endOfChild(child, { limitMs: 10 * 60_000, what: `copying ${path.basename(source)} into the scratch build` });
+  if (!ended.gaveUp && ended.code === 0) return true;
+  // A half-written target from a failed clone would make the fallback copy merge into it.
+  // Clear it out so the fallback starts from nothing.
+  await fsp.rm(target, { recursive: true, force: true }).catch(() => {});
+  return false;
 }
 
 // ---------------------------------------------------------------------------

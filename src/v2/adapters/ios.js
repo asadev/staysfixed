@@ -56,6 +56,7 @@ import {
   countBucket,
   sizeBucket,
 } from './contract.js';
+import { boundedMs } from './process.js';
 
 import {
   readMachine,
@@ -472,7 +473,9 @@ export function journeysFrom(input) {
       channels: ['meaning', 'effects', 'complaints', 'counters', 'pixels'],
       steps,
       irreversible: Boolean(journey.irreversible),
-      timeoutMs: Number(journey.timeoutMs ?? 240_000),
+      // Guarded rather than `Number(...)`: a journey is written by hand, and `timeoutMs: "4m"`
+      // is NaN, which every limit downstream reads as "no limit at all".
+      timeoutMs: boundedMs(journey.timeoutMs, 240_000),
     });
   }
 
@@ -973,7 +976,7 @@ async function walkObservations(journey, kept, ctx) {
     for (const step of steps) {
       if (ctx.signal?.aborted) break;
       if (step.act === 'wait') {
-        await new Promise((resolve) => setTimeout(resolve, Math.min(Number(step.ms ?? 500), 10_000)));
+        await new Promise((resolve) => setTimeout(resolve, boundedMs(step.ms, 500, 10_000)));
         continue;
       }
       if (step.act === 'open') {

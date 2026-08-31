@@ -40,6 +40,11 @@ import http from 'node:http';
 import net from 'node:net';
 import { execFile, spawn } from 'node:child_process';
 
+// Every wait in this file has a limit and every limit says what it was waiting for. The pieces
+// that do that live in process.js, next to the one function in this codebase whose whole job is
+// running a program and waiting for it.
+import { boundedMs, endOfChild, letGoOf } from './process.js';
+
 // ---------------------------------------------------------------------------
 // Finding the tools
 // ---------------------------------------------------------------------------
@@ -190,7 +195,11 @@ export function run(file, args, opts = {}) {
       file,
       args,
       {
-        timeout: opts.timeoutMs ?? 120000,
+        // `boundedMs` and not the number as handed over. `execFile` only arms its timeout when
+        // the value is greater than zero, so a limit of NaN — which is what a limit read out of
+        // a settings file as text becomes — switches the limit OFF rather than shortening it,
+        // and adb hanging on a wedged device then hangs the whole check with no output at all.
+        timeout: boundedMs(opts.timeoutMs, 120000),
         signal: opts.signal,
         cwd: opts.cwd,
         maxBuffer: opts.maxBuffer ?? 32 * 1024 * 1024,
@@ -259,18 +268,41 @@ export class Device {
 
   /**
    * Run something and get raw bytes back — a screenshot, a file.
+   *
+   * This had neither a limit nor a size cap, and it settled on `close`. All three were the same
+   * bug: `close` does not mean the program ended, it means nobody anywhere is holding its pipes
+   * any more, and `adb` keeps a server daemon of its own that inherits them. So a device that
+   * stopped answering held this open for ever, with no output and nothing to act on — measured
+   * as a shape on 2026-08-31 against a fake program that leaves an orphan behind. It now ends,
+   * says why, and hands back what it did get.
+   *
    * @param {string} command
+   * @param {{timeoutMs?: number, mostBytes?: number}} [opts]
    * @returns {Promise<Buffer>}
    */
-  bytes(command) {
-    return new Promise((resolve, reject) => {
-      const child = spawn(this.adb, ['-s', this.serial, 'exec-out', command], { signal: this.signal });
-      /** @type {Buffer[]} */
-      const chunks = [];
-      child.stdout.on('data', (b) => chunks.push(b));
-      child.on('error', reject);
-      child.on('close', () => resolve(Buffer.concat(chunks)));
+  async bytes(command, opts = {}) {
+    const mostBytes = Math.max(1, Number(opts.mostBytes) || 64 * 1024 * 1024);
+    const child = spawn(this.adb, ['-s', this.serial, 'exec-out', command], { signal: this.signal });
+    /** @type {Buffer[]} */
+    const chunks = [];
+    let held = 0;
+    let tooMuch = false;
+    child.stdout.on('data', (/** @type {Buffer} */ b) => {
+      // Kept reading even once it is too much, because a reader that stops reading is a pipe
+      // that fills up, and a full pipe blocks the writer for ever — which is the same hang
+      // wearing a different hat.
+      if (held >= mostBytes) { tooMuch = true; return; }
+      held += b.length;
+      chunks.push(b);
     });
+    child.stderr?.resume();
+    const ended = await endOfChild(child, {
+      limitMs: boundedMs(opts.timeoutMs, 60000),
+      what: `the device to finish "${command.slice(0, 60)}"`,
+    });
+    if (ended.gaveUp) throw new Error(ended.why);
+    if (tooMuch) throw new Error(`"${command.slice(0, 60)}" sent back more than ${Math.round(mostBytes / (1024 * 1024))}MB, which is more than anything this asks for should ever be. It was stopped rather than held in memory.`);
+    return Buffer.concat(chunks);
   }
 
   /**
@@ -1566,13 +1598,25 @@ export async function pidOf(device, pkg) {
 
 /**
  * Take a picture. Evidence only — never the accusation.
+ *
+ * A device that will not hand one over is a hole in the evidence and nothing more, so it is
+ * caught here and said in a sentence. Letting it throw would end the whole walk over a
+ * screenshot, and the six channels that had already read the app properly would be thrown away
+ * with it.
+ *
  * @param {Device} device
  * @param {string} to
- * @returns {Promise<{ok: boolean, bytes: number, path: string}>}
+ * @returns {Promise<{ok: boolean, bytes: number, path: string, why?: string}>}
  */
 export async function screenshot(device, to) {
-  const png = await device.bytes('screencap -p');
-  if (png.length < 8 || png[0] !== 0x89) return { ok: false, bytes: png.length, path: to };
+  /** @type {Buffer} */
+  let png;
+  try {
+    png = await device.bytes('screencap -p');
+  } catch (e) {
+    return { ok: false, bytes: 0, path: to, why: e instanceof Error ? e.message : String(e) };
+  }
+  if (png.length < 8 || png[0] !== 0x89) return { ok: false, bytes: png.length, path: to, why: 'the device sent back something that is not a picture' };
   await fsp.mkdir(path.dirname(to), { recursive: true });
   await fsp.writeFile(to, png);
   return { ok: true, bytes: png.length, path: to };
@@ -1701,6 +1745,12 @@ export async function startEmulator(spec) {
       // Falling through to the process is fine; the console may already be gone.
     }
     if (!child.killed) child.kill('SIGTERM');
+    // And let go of its pipes rather than trusting them to close. An emulator is a family of
+    // processes and the helpers inherit the writing end of these; a survivor holding one keeps
+    // Node's event loop awake, so the check finishes its work, prints its verdict and then
+    // never returns. Measured in that exact shape on 2026-08-31 for the desktop adapter, and
+    // the emulator has the same shape.
+    letGoOf(child);
   };
 
   if (!ready.ready) {

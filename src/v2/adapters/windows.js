@@ -79,6 +79,9 @@ import {
   trimForStorage,
 } from './contract.js';
 import { RemoteLinkLost, remoteRunner } from '../remote.js';
+// Every wait here has a limit and every limit says what it was waiting for; the pieces are in
+// process.js so there is one of each rather than one per adapter.
+import { endOfChild, letGoOf } from './process.js';
 
 /** @typedef {import('./contract.js').Build} Build */
 /** @typedef {import('./contract.js').PreparedBuild} PreparedBuild */
@@ -814,21 +817,35 @@ export function asList(value) {
  */
 export async function pushBuild(host, localDir, remoteDir) {
   const started = Date.now();
-  return await new Promise((resolve) => {
-    const tar = spawn('tar', ['-cf', '-', '-C', path.dirname(localDir), path.basename(localDir)]);
-    const ssh = spawn('ssh', ['-o', 'BatchMode=yes', host, `mkdir -p '${remoteDir}' && tar -xf - -C '${remoteDir}'`]);
-    let trouble = '';
-    tar.stdout.pipe(ssh.stdin);
-    ssh.stderr.on('data', (d) => { trouble += String(d); });
-    tar.stderr.on('data', (d) => { trouble += String(d); });
-    ssh.on('close', (code) => {
-      const ms = Date.now() - started;
-      resolve(code === 0
-        ? { ok: true, ms, why: `Copied to ${host} in ${timeBucket(ms)}.` }
-        : { ok: false, ms, why: `Copying to ${host} failed: ${trouble.trim().slice(0, 300) || `tar exited ${code}`}` });
-    });
-    ssh.on('error', (e) => resolve({ ok: false, ms: Date.now() - started, why: `Could not start the copy: ${e.message}` }));
-  });
+  // `ConnectTimeout` because ssh with no answer at the far end will sit on a half-open socket
+  // for as long as the network lets it, and the whole point of this pass is that nothing here
+  // is allowed to wait without a clock on it.
+  const tar = spawn('tar', ['-cf', '-', '-C', path.dirname(localDir), path.basename(localDir)]);
+  const ssh = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', host, `mkdir -p '${remoteDir}' && tar -xf - -C '${remoteDir}'`]);
+  let trouble = '';
+  tar.stdout.pipe(ssh.stdin);
+  ssh.stderr.on('data', (d) => { trouble += String(d); });
+  tar.stderr.on('data', (d) => { trouble += String(d); });
+  // Nothing wants what ssh prints on its way through, and that is exactly why it has to be
+  // read. A pipe nobody empties fills up, and a full pipe blocks its writer for ever — the
+  // same hang as an unclosed one, arriving from the other direction.
+  ssh.stdout?.resume();
+  // A pipe with nobody reading it fills up and blocks the writer for ever, so if ssh is gone
+  // tar has to be told rather than left leaning on a dead pipe.
+  ssh.on('error', () => { try { tar.kill('SIGKILL'); } catch { /* already gone */ } });
+  tar.on('error', () => { try { ssh.kill('SIGKILL'); } catch { /* already gone */ } });
+
+  // Thirty minutes for a whole build over a network, which is far longer than it has ever
+  // taken and still a limit. A copy that never finishes and never says so is the shape of the
+  // hang this whole pass exists to remove.
+  const ended = await endOfChild(ssh, { limitMs: 30 * 60_000, what: `the copy of this build to ${host}` });
+  try { tar.kill('SIGKILL'); } catch { /* it finished on its own */ }
+  letGoOf(tar);
+
+  const ms = Date.now() - started;
+  if (ended.gaveUp) return { ok: false, ms, why: `${ended.why} ${trouble.trim().slice(0, 200)}`.trim() };
+  if (ended.code === 0) return { ok: true, ms, why: `Copied to ${host} in ${timeBucket(ms)}.` };
+  return { ok: false, ms, why: `Copying to ${host} failed: ${trouble.trim().slice(0, 300) || `the copy ended with ${ended.code ?? ended.signal}`}` };
 }
 
 // ---------------------------------------------------------------------------

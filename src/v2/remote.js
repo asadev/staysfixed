@@ -39,6 +39,9 @@
 import { spawn } from 'node:child_process';
 import { StaysFixedError } from '../core/errors.js';
 import { howLongItTook, joinPath, notCovered, observation, sizeBucket, timeBucket, trimForStorage } from './adapters/contract.js';
+// Every wait here has a limit and every limit says what it was waiting for. One copy of that,
+// shared with the adapters, rather than one per file.
+import { boundedMs, letGoOf } from './adapters/process.js';
 
 /** @typedef {import('./types.js').Observation} Observation */
 /** @typedef {import('./types.js').Journey} Journey */
@@ -563,7 +566,17 @@ export function remoteRunner(opts) {
       // The program itself, on the first line of standard input, where no command-line limit
       // applies. See powerShellBootstrap for why this is not on the command line.
       proc.stdin.write(`${Buffer.from(agentSource, 'utf8').toString('base64')}\n`);
-      await hello;
+      try {
+        await hello;
+      } catch (e) {
+        // The handshake has a clock on it, but the ssh it was waiting for does not stop on its
+        // own — and while it lives, this process is reading its pipes, which keeps the event
+        // loop awake and stops the tool exiting long after it has given up and said so.
+        try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+        letGoOf(proc);
+        child = null;
+        throw e;
+      }
       say(`${host} answered: ${describeFacts(facts)}`);
       return facts;
     },
@@ -584,7 +597,10 @@ export function remoteRunner(opts) {
       if (dead) throw dead;
       if (!child) throw new StaysFixedError(`Cannot talk to ${host} before opening the connection.`);
       const id = `r${++counter}`;
-      const timeoutMs = callOpts.timeoutMs ?? opts.callTimeoutMs ?? DEFAULT_CALL_MS;
+      // Guarded, so a limit that came out of a settings file as text cannot become NaN — which
+      // `setTimeout` reads as one millisecond and which would report every call on a perfectly
+      // healthy machine as "it did not answer".
+      const timeoutMs = boundedMs(callOpts.timeoutMs ?? opts.callTimeoutMs, DEFAULT_CALL_MS);
       const promise = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           waiting.delete(id);
@@ -699,9 +715,14 @@ export function remoteRunner(opts) {
       try { proc.stdin.end(); } catch { /* nothing to end */ }
       await new Promise((resolve) => {
         const timer = setTimeout(() => { try { proc.kill(); } catch { /* gone */ } resolve(undefined); }, 3000);
-        proc.on('close', () => { clearTimeout(timer); resolve(undefined); });
+        // `exit` and not `close`: `close` means nobody anywhere is holding the pipes any more,
+        // which anything ssh left behind can refuse for ever. `exit` means ssh ended, which is
+        // the thing actually being waited for.
+        proc.on('exit', () => { clearTimeout(timer); resolve(undefined); });
         if (proc.exitCode !== null) { clearTimeout(timer); resolve(undefined); }
       });
+      // And let go of the pipes rather than trusting them to close on their own.
+      letGoOf(proc);
       child = null;
     },
   };

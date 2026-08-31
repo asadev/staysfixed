@@ -37,6 +37,12 @@ import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
+// Every wait in this file has to have a limit on it and every limit has to produce a sentence,
+// so the pieces that do that live in one place rather than three. `process.js` is where they
+// are, because it is the file that already owns running a program and waiting for it, and
+// `electron.js` already reads its folder-watching out of there too.
+import { letGoOf, withLimit } from './process.js';
+
 const execFileAsync = promisify(execFile);
 
 /**
@@ -173,6 +179,12 @@ export function appNameFor(binary) {
  *                                     holds the app open — measured, not guessed.
  * @property {(child: import('node:child_process').ChildProcess) => void} own
  *                                     Register a process this run started.
+ * @property {() => void} [markReleased]
+ *                                     Told by the teardown. After it, anything registered
+ *                                     through `closeFirst` or `own` is closed or stopped on
+ *                                     arrival instead of being added to a list nobody reads
+ *                                     again — an abandoned open can still finish connecting
+ *                                     after the sweep, and one live socket holds the tool open.
  * @property {string[]} notes          Plain English, for the run's own report.
  */
 
@@ -466,6 +478,9 @@ export async function reserveIsolation(opts) {
   const closers = [];
   /** @type {import('node:child_process').ChildProcess[]} */
   const children = [];
+  // True once the teardown has run. Anything that arrives after that has to be dealt with on
+  // the spot rather than added to a list nobody reads again — see the two handlers below.
+  let releasedAlready = false;
 
   /** @type {Isolation} */
   const isolation = {
@@ -504,8 +519,27 @@ export async function reserveIsolation(opts) {
       ...identityEnv,
       ...opts.env,
     },
-    closeFirst(close) { closers.push(close); },
-    own(child) { children.push(child); },
+    // A connection or a process that arrives AFTER the teardown has already run is not
+    // hypothetical: opening an app is a wait with a limit on it, and when that limit fires the
+    // open is abandoned while it is still half way through — so it can still finish connecting
+    // a moment later, on an isolation that has already been swept. Pushed onto these lists it
+    // would be held by nobody and closed by nobody, and one live debugging socket is all it
+    // takes to keep Node's event loop awake for ever, which is the exact hang this whole pass
+    // exists to remove. So a latecomer is closed or stopped immediately instead.
+    closeFirst(close) {
+      if (releasedAlready) { void Promise.resolve(close()).catch(() => {}); return; }
+      closers.push(close);
+    },
+    own(child) {
+      if (releasedAlready) {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        letGoOf(child);
+        return;
+      }
+      children.push(child);
+    },
+    /** Told by the teardown, so latecomers know there is nothing left to join. */
+    markReleased() { releasedAlready = true; },
     notes: [
       `This run has its own settings folder, its own cache, its own two debugging ports and the name "${identity}".`,
       'Nothing here is shared with the real app, so the two cannot displace each other.',
@@ -633,7 +667,12 @@ export function startIsolated(isolation, opts) {
  *      window, one for the network, and whatever the app itself started. They all carry this
  *      run's own folder on their command line, which is how they are told from everybody
  *      else's, and nothing without that marker is ever touched.
- *   5. Check the ports are free again, because the next run needs them and a port that is
+ *   5. Let go of the pipes. Not tidiness — the run's own survival. A survivor holding the
+ *      writing end of a pipe this process is reading keeps Node's event loop awake for ever,
+ *      and on 2026-08-31 that was measured doing exactly that: every step above succeeded, the
+ *      report said the app was proved gone, and the tool then never returned. A check that
+ *      prints a perfect verdict and hangs cannot be told apart from a check that is broken.
+ *   6. Check the ports are free again, because the next run needs them and a port that is
  *      still held is the clearest possible proof that something survived.
  *
  * @param {Isolation} isolation
@@ -647,6 +686,9 @@ export async function releaseIsolation(isolation, opts = {}) {
   const closers = held?.closers ?? [];
   const children = held?.children ?? [];
   alive.delete(isolation.id);
+  // Said before anything is torn down, so a connection that finishes opening half way through
+  // this is closed on arrival rather than added to a list that has already been walked.
+  isolation.markReleased?.();
   handedOut.delete(isolation.debugPort);
   handedOut.delete(isolation.inspectPort);
 
@@ -654,8 +696,17 @@ export async function releaseIsolation(isolation, opts = {}) {
   const leftBehind = [];
 
   // 1 — hang up, before asking anything to quit.
+  //
+  // On a clock, because a closer is a callback somebody else registered and a debugging socket
+  // that refuses to say goodbye must not be able to hold the teardown — and therefore the whole
+  // check — open. If one will not close in five seconds it is left, which is exactly what the
+  // sweep below is for.
   for (const close of closers) {
-    try { await close(); } catch { /* a connection that will not close is one we are leaving anyway */ }
+    try {
+      await withLimit(Promise.resolve(close()), { limitMs: 5000, what: `one of ${isolation.label}'s debugging connections to hang up` });
+    } catch (e) {
+      leftBehind.push(`a debugging connection would not hang up (${e instanceof Error ? e.message : String(e)})`);
+    }
   }
 
   // 2 — read the whole family while the trail still exists, then ask the app to quit.
@@ -711,7 +762,29 @@ export async function releaseIsolation(isolation, opts = {}) {
     leftBehind.push(`process ${holder.pid} is still running and still pointing at this run's folder`);
   }
 
-  // 5 — the ports have to come back.
+  // 5 — let go of the pipes, whatever else happened.
+  //
+  // This is the step that was missing, and it is the one that cost a run. Measured on
+  // 2026-08-31: with everything above done and the report reading "the app was closed and is
+  // gone ... the next run starts alone", the tool then sat there for ever. An app that started
+  // a shell of its own — which is the entire job of the app this was measured against — leaves
+  // that shell holding the writing end of the pipes this process is reading, a pipe being read
+  // keeps Node's event loop awake, and so the check never ended. It printed a perfect verdict
+  // and never came back, which is indistinguishable from the tool being broken.
+  //
+  // A short drain first, because whatever the app said on its way out is worth keeping and the
+  // exit and the last of the output can land a tick apart. Then the pipes go, on a clock,
+  // rather than being trusted to close on their own. `child.js` reaches the same conclusion for
+  // a start command's server, for the same reason.
+  for (const child of children) {
+    await Promise.race([
+      new Promise((done) => { child.once('close', done); }),
+      wait(250),
+    ]);
+    letGoOf(child);
+  }
+
+  // 6 — the ports have to come back.
   /** @type {[number, string][]} */
   const portsToCheck = [[isolation.debugPort, 'the window'], [isolation.inspectPort, 'the main process']];
   for (const [port, what] of portsToCheck) {

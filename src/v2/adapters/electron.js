@@ -54,7 +54,7 @@ import {
   countBucket, defineAdapter, howLongItTook, joinPath, notCovered, observation, sizeBucket,
   timeBucket, trimForStorage, undoOurFootprint,
 } from './contract.js';
-import { compareTrees, snapshotTree } from './process.js';
+import { boundedCount, boundedMs, compareTrees, snapshotTree, withLimit } from './process.js';
 import {
   describeIsolation, releaseEverything, releaseIsolation, reserveIsolation, startIsolated,
   verifyAlone,
@@ -377,11 +377,17 @@ async function askFor(url) {
  * @param {object} opts
  * @param {number} opts.timeoutMs
  * @param {() => string|null} opts.died   A sentence when the app has already quit, else null.
+ * @param {AbortSignal} [opts.signal]
  * @returns {Promise<{webSocketDebuggerUrl: string, title: string}>}
  */
 async function waitForMainProcess(port, opts) {
-  const until = Date.now() + opts.timeoutMs;
+  // `boundedMs` and not the number as given, because this limit comes from a project's own
+  // settings file. A limit of NaN — which is what `startTimeoutMs: "60s"` becomes — makes
+  // `Date.now() > until` false for ever, and this loop would then poll a dead port until
+  // somebody killed the tool, with no output and no explanation.
+  const until = Date.now() + boundedMs(opts.timeoutMs, 60_000);
   for (;;) {
+    if (opts.signal?.aborted) throw new Error('The run was stopped while waiting for the app to open its main-process debugging connection.');
     const gone = opts.died();
     if (gone) throw new Error(gone);
     try {
@@ -406,13 +412,17 @@ async function waitForMainProcess(port, opts) {
  * @param {object} opts
  * @param {number} opts.timeoutMs
  * @param {() => string|null} opts.died
+ * @param {AbortSignal} [opts.signal]
  * @returns {Promise<{id: string, title: string, url: string}>}
  */
 async function waitForWindow(port, match, opts) {
-  const until = Date.now() + opts.timeoutMs;
+  // Guarded for the same reason as the wait above it: a limit that is not a number turns this
+  // endless-looking loop into a genuinely endless one.
+  const until = Date.now() + boundedMs(opts.timeoutMs, 60_000);
   /** @type {any[]} */
   let pages = [];
   for (;;) {
+    if (opts.signal?.aborted) throw new Error('The run was stopped while waiting for the app to open a window.');
     const gone = opts.died();
     if (gone) throw new Error(gone);
     try {
@@ -465,10 +475,35 @@ async function waitForWindow(port, match, opts) {
  * @returns {Promise<OpenApp>}
  */
 export async function openApp(opts) {
-  const timeoutMs = opts.timeoutMs ?? 60_000;
+  // The whole open, on ONE clock, on top of the clock each individual step already has.
+  //
+  // Every step below is bounded on its own, and that was still not enough: a run that gives up
+  // on eight things in a row for sixty seconds each has waited eight minutes, and the recorded
+  // symptom this file is being fixed for — an Electron check on 2026-08-30 that produced no
+  // output at all and never came back — is indistinguishable from a very long wait. So there
+  // is an outer limit as well, and because a bare "it timed out" sends somebody looking in
+  // every wrong place first, it names the step it was actually stuck in.
+  const timeoutMs = boundedMs(opts.timeoutMs, 60_000);
+  const stage = { at: 'the app to be started' };
+  return withLimit(openTheApp(opts, timeoutMs, stage), {
+    limitMs: timeoutMs * 3,
+    what: () => `${stage.at}. Nothing about this build was checked.`,
+  });
+}
+
+/**
+ * The steps of opening one app. Wrapped by `openApp`, which owns the outer limit.
+ *
+ * @param {Parameters<typeof openApp>[0]} opts
+ * @param {number} timeoutMs
+ * @param {{at: string}} stage   Updated as it goes, so a give-up can name where it stopped.
+ * @returns {Promise<OpenApp>}
+ */
+async function openTheApp(opts, timeoutMs, stage) {
   const isolation = opts.isolation;
   const startedAt = Date.now();
 
+  stage.at = 'the previous copy of this app to be proved gone';
   const alone = await verifyAlone(isolation);
   if (!alone.alone) throw new Error(`${alone.why} Nothing was started, because two copies of one app fight over the same lock and the same settings.`);
 
@@ -480,7 +515,9 @@ export async function openApp(opts) {
   };
 
   // ---- the main process, paused at its first statement
-  const mainTarget = await waitForMainProcess(isolation.inspectPort, { timeoutMs, died });
+  stage.at = `the app to open its main-process debugging connection on port ${isolation.inspectPort}`;
+  const mainTarget = await waitForMainProcess(isolation.inspectPort, { timeoutMs, died, signal: opts.signal });
+  stage.at = 'the app to finish accepting a debugging connection to its main process';
   const main = await connect(mainTarget.webSocketDebuggerUrl, { timeoutMs: 20_000 });
   isolation.closeFirst(() => main.close());
 
@@ -499,6 +536,7 @@ export async function openApp(opts) {
     complain(`the app printed an error: ${text}`.split('\n')[0]);
   });
 
+  stage.at = 'the app to answer the first question about its main process';
   await main.send('Runtime.enable');
   await main.send('Debugger.enable');
 
@@ -507,13 +545,17 @@ export async function openApp(opts) {
   const stopListening = main.on('Debugger.paused', (params) => {
     if (frameId === null) frameId = String(params?.callFrames?.[0]?.callFrameId ?? '') || null;
   });
+  stage.at = 'the app to stop at its first line so the safety boundary can be put in place';
   await main.send('Runtime.runIfWaitingForDebugger');
+  // Five seconds, and it gives up rather than waits: an app that never stops at its first line
+  // is still worth checking, just with a hole in the report where the boundary would have been.
   for (let i = 0; i < 100 && frameId === null; i += 1) await rest(50);
 
   let watching = '';
   /** @type {string[]} */
   let couldNotWatch = [];
   if (frameId) {
+    stage.at = 'the safety boundary to be put in place inside the app';
     const result = await main.send('Debugger.evaluateOnCallFrame', {
       callFrameId: frameId,
       expression: mainProbeScript(),
@@ -531,8 +573,13 @@ export async function openApp(opts) {
   opts.log?.(watching ? `Watching ${watching}.` : 'Nothing is watching the main process from the inside.');
 
   // ---- the window
-  const window = await waitForWindow(isolation.debugPort, opts.windowMatch, { timeoutMs, died });
+  stage.at = opts.windowMatch
+    ? `the app to open a window matching "${opts.windowMatch}"`
+    : 'the app to open a window to look at';
+  const window = await waitForWindow(isolation.debugPort, opts.windowMatch, { timeoutMs, died, signal: opts.signal });
+  stage.at = 'the app to say which window connection to use';
   const version = await askFor(`http://127.0.0.1:${isolation.debugPort}/json/version`);
+  stage.at = 'the app to accept a debugging connection to its window';
   const browser = await connect(String(version.webSocketDebuggerUrl), { timeoutMs: 20_000 });
   isolation.closeFirst(() => browser.close());
   const attached = await browser.send('Target.attachToTarget', { targetId: window.id, flatten: true });
@@ -578,6 +625,7 @@ export async function openApp(opts) {
       browser.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId).catch(() => {});
     });
   });
+  stage.at = "the window to accept the boundary in front of its own network requests";
   await browser.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sessionId).catch(() => {
     couldNotWatch.push("the window's own network requests");
   });
@@ -775,8 +823,12 @@ export function readMeaning(nodes, tidy = (t) => t) {
  * @returns {Promise<{nodes: any[], settled: boolean, reads: number}>}
  */
 export async function settleTree(read, opts = {}) {
-  const tries = opts.tries ?? 8;
-  const gapMs = opts.gapMs ?? 350;
+  // Both of these are settable from a project's own settings file, so both are guarded. A
+  // gap of NaN is a `setTimeout` of one millisecond, which turns "read until it stops moving"
+  // into a spin; a count that is not a number stops the loop running at all and silently
+  // reports an empty screen. Neither says anything out loud, which is why they are pinned.
+  const tries = boundedCount(opts.tries, 8, 200);
+  const gapMs = boundedMs(opts.gapMs, 350, 60_000);
   let previous = '';
   /** @type {any[]} */
   let nodes = [];
@@ -824,16 +876,26 @@ export async function takeStep(app, step) {
 
   if (act === 'wait') {
     if (step.control) {
-      const until = Date.now() + Number(step.timeoutMs ?? 10_000);
+      // `boundedMs` and not `Number(...)`, and this is the one loop in this file that could
+      // genuinely run for ever. A journey is written by hand, and `timeoutMs: "10s"` is
+      // `Number("10s")`, which is NaN — at which point `Date.now() + NaN` is NaN, `Date.now()
+      // > NaN` is false every single time round, and this loop asks the app for its whole
+      // accessibility tree five times a second until somebody kills the tool. No output, no
+      // reason, and it looks exactly like the app hanging rather than the journey being
+      // mistyped. Capped at five minutes as well: a step that waits longer than that for a
+      // control to appear is a mistake in the journey, not patience.
+      const limitMs = boundedMs(step.timeoutMs, 10_000, 5 * 60_000);
+      const until = Date.now() + limitMs;
       for (;;) {
         const tree = await app.browser.send('Accessibility.getFullAXTree', {}, app.sessionId).catch(() => ({ nodes: [] }));
         if (readMeaning(tree.nodes ?? []).some((row) => row.name === String(step.control))) return say(`waited until "${step.control}" appeared`);
-        if (Date.now() > until) return say(`waited for "${step.control}", and it never appeared`, false);
+        if (Date.now() > until) return say(`waited ${timeBucket(limitMs)} for "${step.control}" to appear, and it never did`, false);
         await rest(200);
       }
     }
-    await rest(Number(step.ms ?? 500));
-    return say(`waited ${timeBucket(Number(step.ms ?? 500))}`);
+    const restMs = boundedMs(step.ms, 500, 5 * 60_000);
+    await rest(restMs);
+    return say(`waited ${timeBucket(restMs)}`);
   }
 
   if (act === 'click' || act === 'focus') {
@@ -924,7 +986,21 @@ export async function exerciseChannel(app, channel, args) {
     if (thrown) return { answered: false, why: 'it threw: ' + String(thrown && thrown.message || thrown) };
     return { answered: true, value: reply === undefined ? null : reply, why: 'it answered' };
   })()`;
-  const result = await app.main.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+  // On a clock of its own, and it says which door it was knocking on. This is the only place
+  // in this adapter that makes the app RUN something, so it is the only place where the app's
+  // own code can decide never to answer — a handler that awaits a promise nobody resolves
+  // holds this open, and without a name in the sentence the report would say "the app did not
+  // answer" about an app with four hundred doors.
+  /** @type {any} */
+  let result;
+  try {
+    result = await withLimit(
+      app.main.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }),
+      { limitMs: 30_000, what: `the private channel "${channel}" to answer` },
+    );
+  } catch (e) {
+    return { answered: false, value: null, why: e instanceof Error ? e.message : String(e) };
+  }
   if (result?.exceptionDetails) {
     return { answered: false, value: null, why: `asking it threw: ${String(result.exceptionDetails.text ?? '')}` };
   }
@@ -1563,7 +1639,13 @@ export const electronAdapter = defineAdapter({
         return tree?.nodes ?? [];
       }, { tries: config.settleTries ?? 8, gapMs: config.settleGapMs ?? 350 });
 
-      const read = await app.main.send('Runtime.evaluate', { expression: mainReadScript(), returnByValue: true, awaitPromise: true });
+      // Bounded, and it degrades rather than throws. Everything the window said has already
+      // been collected by this point, and losing all of it because the main process went quiet
+      // would turn one hole into a whole unchecked build.
+      const read = await withLimit(
+        app.main.send('Runtime.evaluate', { expression: mainReadScript(), returnByValue: true, awaitPromise: true }),
+        { limitMs: 30_000, what: 'the main process to say what it is, what doors it has open and what it did' },
+      ).catch((e) => ({ result: { value: { problems: [e instanceof Error ? e.message : String(e)] } } }));
       const reading = read?.result?.value ?? { problems: ['the main process would not say anything about itself'] };
       if (Array.isArray(app.couldNotWatch) && app.couldNotWatch.length > 0) {
         reading.effects = reading.effects ?? {};
