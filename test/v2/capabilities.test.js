@@ -235,7 +235,9 @@ describe('aiming a check at a web page or a desktop app', () => {
       // machine and aimed at from the settings rather than from a tool call. There is no
       // address an agent could pass for them — the settings name the machine and the built
       // program, because one tool call cannot carry both.
-      if (surface === 'windows' || surface === 'linux') continue;
+      // Mac joins them for a different reason: the app is on THIS machine and named in
+      // the settings, so there is no address a tool call could carry.
+      if (surface === 'windows' || surface === 'linux' || surface === 'macos') continue;
       assert.ok(offered.includes(surface), `the engine can walk a ${surface} journey and no agent can ask for one`);
     }
     for (const surface of offered) {

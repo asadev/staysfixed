@@ -159,6 +159,13 @@ const SEPARATE_ADAPTERS = [
       'This copy has no native-Windows adapter in it. That is usually fine: a Windows product built with Electron is driven over its own debugging port by the Electron adapter and needs nothing else.',
   },
   {
+    surface: 'macos',
+    file: './adapters/macos.js',
+    exports: ['macosAdapter', 'adapter', 'default'],
+    missing:
+      'This copy has no native-Mac adapter in it, so nothing here can open a Swift or Objective-C app and read what is on its screen. That is usually fine: a Mac product built with Electron is driven over its own debugging port by the Electron adapter and needs nothing else.',
+  },
+  {
     surface: 'linux',
     file: './adapters/linux.js',
     exports: ['linuxAdapter', 'adapter', 'default'],
@@ -204,6 +211,7 @@ export const ADAPTER_FOR_SURFACE = {
   ios: 'ios',
   windows: 'windows',
   linux: 'linux',
+  macos: 'macos',
 };
 
 /**

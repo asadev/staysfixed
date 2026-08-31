@@ -59,6 +59,7 @@ const WALKED_BY = {
   ios: 'ios',
   windows: 'windows',
   linux: 'linux',
+  macos: 'macos',
 };
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ import { POWERSHELL_PATHS, describeRemote } from './remote.js';
 import { deviceToMake } from './adapters/android.js';
 import { describeWindows } from './adapters/windows.js';
 import { describeLinuxDesktop } from './adapters/linux.js';
+import { describeMacos } from './adapters/macos.js';
 import { messageOf, EXIT } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, mark, shortPath, setLogLevel } from '../core/log.js';
 import { loadPlaywright } from './adapters/web-driver.js';
@@ -907,7 +908,7 @@ function findDesktopApp(cwd) {
  *
  * @param {string} root
  * @param {string|null} settingsText
- * @returns {Promise<{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null, linux: FoundApp|null}>}
+ * @returns {Promise<{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null, linux: FoundApp|null, macos: FoundApp|null}>}
  */
 async function phoneApps(root, settingsText) {
   // Comments taken away first, for the same reason `findDesktopApp` does it: a
@@ -924,15 +925,35 @@ async function phoneApps(root, settingsText) {
   };
 
   /**
-   * A named key whose value has to look right, so one settings word cannot be mistaken for
-   * another block's.
+   * A named key looked for INSIDE one settings block, never across the whole file.
+   *
+   * `remoteExe` means "the built program on that machine" under `windows:` and exactly the
+   * same thing under `linux:`, so a flat search finds one and reports it as the other — and
+   * doctor would tell somebody with a GTK app that they have a native Windows program.
+   * Written the day the Linux surface landed, 2026-08-31, before it could be true.
+   *
+   * @param {string} block
    * @param {string} key
-   * @param {(value: string) => boolean} looksRight
+   * @param {(value: string) => boolean} [looksRight]
    * @returns {FoundApp|null}
    */
-  const namedPath = (key, looksRight) => {
-    const found = new RegExp(`["']?${key}["']?\\s*:\\s*["'\`]([^"'\`]+)["'\`]`).exec(settings);
-    return found && looksRight(found[1]) ? { where: found[1], how: `your settings name it under ${key}` } : null;
+  const inBlock = (block, key, looksRight) => {
+    const at = new RegExp(`["']?${block}["']?\\s*:\\s*\\{`).exec(settings);
+    if (!at) return null;
+    let depth = 0;
+    let end = at.index + at[0].length;
+    for (; end < settings.length; end += 1) {
+      if (settings[end] === '{') depth += 1;
+      else if (settings[end] === '}') {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+    }
+    const inside = settings.slice(at.index + at[0].length, end);
+    const found = new RegExp(`["']?${key}["']?\\s*:\\s*["'\`]([^"'\`]+)["'\`]`).exec(inside);
+    if (!found) return null;
+    if (looksRight && !looksRight(found[1])) return null;
+    return { where: found[1], how: `your settings name it under ${block}.${key}` };
   };
 
   /**
@@ -975,7 +996,11 @@ async function phoneApps(root, settingsText) {
     // name one" about a project whose settings named one. Measured 2026-08-31 against a real
     // TerminalDeck.app. The value has to end in `.app` so a bare `app:` belonging to some
     // other block can never be mistaken for this one.
-    namedPath('app', (v) => v.endsWith('.app')) ??
+    // Scoped to the `ios` block, not searched across the whole file. `app` means an iPhone
+    // bundle under `ios:` and a Mac bundle under `macos:` — both end in `.app`, so a flat
+    // search finds one and announces the other. Written the day the Mac surface landed,
+    // 2026-08-31, before it could be true.
+    inBlock('ios', 'app', (v) => v.endsWith('.app')) ??
     named('xcworkspace') ??
     built(['dist', 'out', 'build', 'release'], (name) => name.endsWith('.app')) ??
     (there(path.join('ios', 'Podfile')) || readdirSafe(path.join(root, 'ios')).some((n) => n.endsWith('.xcodeproj') || n.endsWith('.xcworkspace'))
@@ -984,42 +1009,11 @@ async function phoneApps(root, settingsText) {
         ? { where: root, how: 'there is an Xcode project here, but nothing says where the built app is' }
         : null);
 
-  /**
-   * A named key looked for INSIDE one settings block, never across the whole file.
-   *
-   * `remoteExe` means "the built program on that machine" under `windows:` and exactly the
-   * same thing under `linux:`, so a flat search finds one and reports it as the other — and
-   * doctor would tell somebody with a GTK app that they have a native Windows program.
-   * Written the day the Linux surface landed, 2026-08-31, before it could be true.
-   *
-   * @param {string} block
-   * @param {string} key
-   * @param {(value: string) => boolean} [looksRight]
-   * @returns {FoundApp|null}
-   */
-  const inBlock = (block, key, looksRight) => {
-    const at = new RegExp(`["']?${block}["']?\\s*:\\s*\\{`).exec(settings);
-    if (!at) return null;
-    let depth = 0;
-    let end = at.index + at[0].length;
-    for (; end < settings.length; end += 1) {
-      if (settings[end] === '{') depth += 1;
-      else if (settings[end] === '}') {
-        if (depth === 0) break;
-        depth -= 1;
-      }
-    }
-    const inside = settings.slice(at.index + at[0].length, end);
-    const found = new RegExp(`["']?${key}["']?\\s*:\\s*["'\`]([^"'\`]+)["'\`]`).exec(inside);
-    if (!found) return null;
-    if (looksRight && !looksRight(found[1])) return null;
-    return { where: found[1], how: `your settings name it under ${block}.${key}` };
-  };
-
   const windows = inBlock('windows', 'remoteExe') ?? inBlock('windows', 'exe', (v) => /\.exe$/i.test(v));
   const linux = inBlock('linux', 'remoteExe') ?? inBlock('linux', 'exe');
+  const macos = inBlock('macos', 'app', (v) => v.endsWith('.app'));
 
-  return { android, ios, windows, linux };
+  return { android, ios, windows, linux, macos };
 }
 
 /**
@@ -1107,7 +1101,7 @@ function couldNotAsk(name, why) {
  * The built-in five are described by hand above, because they are older than this
  * mechanism and their wording is tested; these four answer for themselves.
  */
-const ADAPTERS_THAT_ANSWER_FOR_THEMSELVES = ['android', 'ios', 'windows', 'linux'];
+const ADAPTERS_THAT_ANSWER_FOR_THEMSELVES = ['android', 'ios', 'windows', 'linux', 'macos'];
 
 /**
  * Ask each separate adapter what IT is missing, in its own words.
@@ -1223,7 +1217,7 @@ async function whatThisCopyCanDrive() {
     // file that would not load, so a check on this copy is not running at all — and both
     // the command line and the MCP surface say that in their own words already.
     const why = `This copy could not be asked what it can drive: ${messageOf(e)}`;
-    for (const surface of ['android', 'ios', 'windows', 'linux']) out.push({ surface, present: false, why });
+    for (const surface of ['android', 'ios', 'windows', 'linux', 'macos']) out.push({ surface, present: false, why });
   }
   return out;
 }
@@ -1714,7 +1708,7 @@ async function findReference(root) {
  * @param {import('./browsers.js').BrowserSurvey} browsers
  * @param {{where: string, how: string}|null} desktopApp
  * @param {DriverReport[]} drivers      What this copy of the tool can drive at all.
- * @param {{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null, linux: FoundApp|null}} phones
+ * @param {{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null, linux: FoundApp|null, macos: FoundApp|null}} phones
  * @param {Map<string, Need[]>} asked   What each separate adapter says IT is missing.
  * @param {{commands: number, imports: number}} [wires]
  *   What this project's own settings wire for the command-line surface. A surface with
@@ -2073,6 +2067,44 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   }
   if (windowsHost && !windowsDriver) {
     impossible.set('windows', `${noDriver('windows')} Nothing you install on that machine changes it. Update Stays Fixed to a copy that has it.`);
+  }
+
+  // ── native Mac apps ───────────────────────────────────────────────────────────────────
+  //
+  // No remote option here, unlike Windows and Linux: the Accessibility API only answers
+  // inside a signed-in graphical session on the machine itself, so a Mac app is checked on
+  // the Mac it is on or not at all. And one person has to allow it once — macOS will not let
+  // any program grant itself permission to read another app's window.
+  const macDriver = canDrive('macos');
+  const onAMacHere = process.platform === 'darwin';
+  const macNeeds = asked.get('macos') ?? [];
+  const macAllowed = onAMacHere && macDriver && !macNeeds.some((n) => /permission/i.test(String(n.what)));
+  const macUsable = phones.macos !== null && macAllowed;
+  surfaces.push({
+    id: 'macos',
+    name: 'native Mac apps',
+    status: macUsable ? 'ready' : 'unavailable',
+    summary: phones.macos === null
+      ? 'Nothing to check: this project names no native Mac app in its settings. Most Mac products are Electron, and those are covered over their debug port from any machine.'
+      : !onAMacHere
+        ? 'Cannot run here: a native Mac window can only be read from a Mac.'
+        : !macDriver
+          ? `A Mac app is named in the settings, and this copy of Stays Fixed cannot drive one. ${noDriver('macos')}`
+          // The adapter's own paragraph, not a second one written here. It knows whether this
+          // Mac has been allowed to read another app's window, and that changes the answer
+          // completely.
+          : describeMacos({ darwin: true, allowed: macAllowed }),
+    canCheck: macUsable ? [...withoutADriver, 'meaning', 'pixels'] : [],
+    cannotCheck: macUsable ? [] : CHANNELS.map((c) => c.id),
+    needs: onAMacHere && macDriver && phones.macos !== null ? macNeeds : [],
+  });
+  if (phones.macos === null) {
+    notInThisProject.add('macos');
+    impossible.set('macos', 'This project names no native Mac app in its settings, so there is nothing to open. If yours is built somewhere else, name the built .app under macos.app. Most Mac products are Electron, and those are covered over their debug port from any machine.');
+  } else if (!onAMacHere) {
+    impossible.set('macos', 'A native Mac window can only be read from a Mac. Everything else on this list is unaffected — check the Mac app from a Mac, and let this machine cover the rest.');
+  } else if (!macDriver) {
+    impossible.set('macos', `${noDriver('macos')} Nothing you install on this machine changes it. Update Stays Fixed to a copy that has it.`);
   }
 
   // ── native Linux desktop apps ─────────────────────────────────────────────────────────
