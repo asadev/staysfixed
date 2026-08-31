@@ -141,6 +141,24 @@ const PLATFORM_FOLDERS = [
 const MOST_FILES = 20_000;
 
 /**
+ * The folders a project's own code normally lives in. The same list the source reader falls
+ * back to, kept here so this file can say WHICH folders it asked for instead of leaving the
+ * reader to guess — see {@link whereTheCodeIs} for why that mattered.
+ */
+const USUAL_SOURCE_FOLDERS = ['src', 'lib', 'app', 'bin', 'server', 'pages', 'api', 'electron', 'main', 'packages'];
+
+/**
+ * Root-level files that are how a project is BUILT rather than what it ships. A packaging
+ * config sitting beside `src/` is no reason to read the whole repository; a `server.js`
+ * sitting beside `src/` is every reason.
+ */
+const ROOT_TOOLING_FILES = new Set([
+  'gulpfile.js', 'gulpfile.mjs', 'gulpfile.cjs', 'gruntfile.js', 'karma.conf.js',
+  'protractor.conf.js', 'gatsby-config.js', 'gatsby-node.js', 'gatsby-browser.js',
+  'gatsby-ssr.js', 'webpack.mix.js',
+]);
+
+/**
  * Folders that are never a product of their own: either the contract channel already read
  * them as part of the root product, or they hold work about the project rather than the
  * project. Flagging one of these as "code nobody is checking" would be noise, and noise is
@@ -278,7 +296,11 @@ export async function detectProject(options = {}) {
   // The source read, once, for two answers — how many doors there are, and what the routes
   // are called. Reading Terminal Deck's 1,416 files twice because two functions each wanted
   // their own copy cost a second and a half of the two this whole detection takes.
-  const reading = readCode ? await readTheSource(root) : { doors: notRead(), routes: [], channels: [], envNames: [] };
+  // The folders are named here rather than left to the reader's own default, because the
+  // default reads `src/` and its cousins and NOTHING at the top level — see
+  // {@link whereTheCodeIs} for the server that went unread because of it.
+  const firstFolders = whereTheCodeIs(listing);
+  const reading = readCode ? await readTheSource(root, firstFolders) : { doors: notRead(), routes: [], channels: [], envNames: [] };
   const doors = reading.doors;
   const routes = reading.routes;
   const channels = reading.channels;
@@ -323,7 +345,7 @@ export async function detectProject(options = {}) {
       root, where: place.root, listing: local, pkg: place.pkg,
       // Doors and pages were read from the root, so they only describe the root. A
       // sub-package gets credited with them only when it IS the root.
-      doors: place.root === '.' ? doors : notRead(),
+      doors: place.root === '.' ? theRootsOwnDoors(doors, routes, members) : notRead(),
       pages: place.root === '.' ? pages : [],
       containers: place.root === '.' ? containers : { dockerfile: null, compose: null },
       scripts: place.pkg?.scripts ?? {},
@@ -354,6 +376,12 @@ export async function detectProject(options = {}) {
     for (const folder of listing.dirs) {
       if (SKIP_DIRS.has(folder) || folder.startsWith('.') || claimed.has(folder)) continue;
       if (members.some((m) => m.root === folder)) continue;
+      // Nor is a folder whose whole contents are already accounted for one level down. A
+      // monorepo's `apps/` is a shelf: every product in it was found, named and is being
+      // checked, and this warning would say the opposite in the plainest words on the page —
+      // "nothing in it is being checked" — about the two products directly above it.
+      const alreadyFound = (/** @type {string} */ p) => p.startsWith(`${folder}/`);
+      if (merged.some((p) => alreadyFound(p.where)) || members.some((m) => alreadyFound(m.root))) continue;
       // The root product's own source is not an unclaimed folder. These are the folders the
       // contract channel already read, plus the ones that are never a product on their own.
       if (ALREADY_COVERED.has(folder)) continue;
@@ -387,7 +415,7 @@ export async function detectProject(options = {}) {
     languages: await languagesIn(root),
     tests,
     scripts: scriptsOf(pkg?.scripts ?? {}),
-    ...(await theSourceAgain({ root, readCode, merged, listing, first: { doors, routes, channels, envNames } })),
+    ...(await theSourceAgain({ root, readCode, merged, listing, firstFolders, first: { doors, routes, channels, envNames } })),
     bulk: await measureBulk(root),
     pages,
     containers,
@@ -951,6 +979,94 @@ async function findMembers(root, globs, listing) {
     members.push({ name: String(pkg.name ?? folder), root: folder, pkg });
   }
   return members;
+}
+
+/**
+ * The doors that are the ROOT'S, once the ones belonging to sub-packages are handed back.
+ *
+ * The source is read once, from the top, which is what keeps this fast — but the routes it
+ * comes back with are the whole repository's, and the root is then judged on them. In a
+ * workspaces monorepo that made the root itself "the server", off the strength of routes
+ * written in `packages/api`: a shelf holding two packages, reported as a third product that
+ * ships nothing. `packages/api` was already in the list, correctly, one line above it.
+ *
+ * Only a clean sweep counts. The moment ONE route was read outside every member, the root has
+ * routes of its own and keeps the full count — losing a real server is far worse than listing
+ * a doubtful one, so the doubt goes that way. The route list is capped at 200 names, so this
+ * is a sample rather than a census on a repository with more than that; a root with routes of
+ * its own would have to contribute none of the first 200 to be missed, and its framework
+ * dependency or its own `server.js` says it is a server anyway.
+ *
+ * @param {ProjectShape['doors']} doors
+ * @param {ProjectShape['routes']} routes
+ * @param {{name: string, root: string}[]} members
+ * @returns {ProjectShape['doors']}
+ */
+function theRootsOwnDoors(doors, routes, members) {
+  if (members.length === 0 || routes.length === 0 || doors.route === 0) return doors;
+  const slashed = (/** @type {string} */ p) => p.split(path.sep).join('/');
+  const theirs = members.map((m) => slashed(m.root));
+  const inAMember = (/** @type {string} */ file) =>
+    theirs.some((their) => slashed(file).startsWith(`${their}/`));
+  if (!routes.every((one) => inAMember(one.file))) return doors;
+  return { ...doors, route: 0 };
+}
+
+/**
+ * Does the project keep code of its own at the top level, outside every folder below it?
+ *
+ * A repository whose whole server is one `server.js` beside `package.json` is completely
+ * normal, and it is the shape this file used to go blind on the moment somebody added a
+ * `src/` folder for something else.
+ *
+ * Only files that are the PRODUCT count. A build config, a declaration file and a test all
+ * sit at the top level of nearly every repository, and treating any of them as "the project
+ * keeps code up here" would make this true everywhere and so worth nothing.
+ *
+ * @param {{files: string[], dirs: string[]}} listing
+ * @returns {boolean}
+ */
+function rootHoldsItsOwnCode(listing) {
+  return listing.files.some((name) => {
+    if (!/\.[cm]?[jt]sx?$/.test(name)) return false;
+    if (name.startsWith('.')) return false;
+    if (/\.d\.[cm]?ts$/.test(name)) return false;              // a declaration describes, it opens nothing
+    if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(name)) return false;
+    if (/\.(config|conf)\.[cm]?[jt]sx?$/.test(name)) return false;
+    return !ROOT_TOOLING_FILES.has(name.toLowerCase());
+  });
+}
+
+/**
+ * Which folders to hand the source reader.
+ *
+ * THE FAILURE THIS EXISTS TO STOP, and it is the worst kind this tool has. The reader is
+ * pointed at a list of folders, and it reads THOSE and nothing else. So a project with its
+ * server in `server.js` at the top level and a `src/` folder holding anything at all had its
+ * server never opened: four routes read as zero, and every later question about them answered
+ * "nothing that worked has changed". A deleted route and a route that started returning 500
+ * both came back clean, exit 0. Measured on a four-route express server: 4 routes with no
+ * `src/` folder, 0 routes the moment an unrelated `src/` folder existed beside it.
+ *
+ * The reader can only be aimed at folders, never at single files, and the top-level files sit
+ * outside every folder there is. So when the project keeps code up there, the answer is the
+ * whole project — which is exactly what the reader already does for a project that has no
+ * `src/` at all. The two cases now behave the same way instead of one of them going silent.
+ *
+ * The cost of that is a wider read: an `examples/` folder gets opened too, and a route written
+ * in an example is counted. That is the right direction to be wrong in. An extra route makes a
+ * check ask for an address that answers 404 both times, which changes nothing and alarms
+ * nobody; a MISSING route makes the tool say "nothing that worked has changed" about a product
+ * whose orders endpoint has gone. Aiming the reader at single files would fix both, and that
+ * lives in `collectFiles` in the source adapter rather than here.
+ *
+ * @param {{files: string[], dirs: string[]}} listing
+ * @returns {string[]}   Folders to read. Empty means the reader falls back to the whole
+ *                       project, which is its own long-standing behaviour.
+ */
+function whereTheCodeIs(listing) {
+  if (rootHoldsItsOwnCode(listing)) return ['.'];
+  return USUAL_SOURCE_FOLDERS.filter((name) => listing.dirs.includes(name));
 }
 
 /**
@@ -1952,6 +2068,40 @@ async function foreignServerIn(dir, sources, language) {
 }
 
 /**
+ * Does this file belong to a package sitting INSIDE the folder being looked at?
+ *
+ * THE FAILURE THIS EXISTS TO STOP. Both server readings below open files three folders deep,
+ * which is right for a product folder and wrong for a shelf. In a workspaces monorepo it made
+ * `packages/api/src/server.js` count as evidence about `packages/` itself, and a folder that
+ * ships nothing at all was announced as "the server in packages/" with 0.8 confidence — a
+ * product that does not exist, sitting in the list beside four that do. The same file had
+ * already been read correctly one folder down, where it actually lives.
+ *
+ * A `package.json` on the way down is the line. Everything below it is that package's, and
+ * that package is looked at in its own right.
+ *
+ * @param {string} dir           The folder being asked about.
+ * @param {string} rel           A file inside it, relative to it.
+ * @param {Map<string, boolean>} seen   Answers already worked out, so one walk costs one look.
+ * @returns {boolean}
+ */
+function insideAnotherPackage(dir, rel, seen) {
+  const parts = rel.split(path.sep);
+  parts.pop();                                   // the filename itself is never a folder
+  let sofar = '';
+  for (const part of parts) {
+    sofar = sofar ? path.join(sofar, part) : part;
+    let itsOwn = seen.get(sofar);
+    if (itsOwn === undefined) {
+      itsOwn = fs.existsSync(path.join(dir, sofar, 'package.json'));
+      seen.set(sofar, itsOwn);
+    }
+    if (itsOwn) return true;
+  }
+  return false;
+}
+
+/**
  * Does a folder hold a server somebody wrote by hand, on node's own http module?
  *
  * A product with no framework in its package.json used to be invisible here, and the whole
@@ -1969,8 +2119,13 @@ async function foreignServerIn(dir, sources, language) {
  */
 async function handWrittenServerIn(dir) {
   const { files } = await readSome(dir, { most: 80, depth: 3 });
+  /** @type {Map<string, boolean>} */
+  const packagesInside = new Map();
   for (const one of files) {
     const where = one.rel.split(path.sep).join('/');
+    // Somebody else's package, read on the way past. It is a product in its own right and is
+    // found as one; borrowing its server for the folder above invents a second product.
+    if (insideAnotherPackage(dir, one.rel, packagesInside)) continue;
     // A server standing in a fixtures folder is a prop for somebody's test, not the product.
     // This tool's own repository has one, and without this line it reported ITSELF as a
     // server — which is exactly the kind of confident wrong answer that gets a tool switched
@@ -2007,8 +2162,13 @@ async function handWrittenServerIn(dir) {
  */
 async function looksLikeAServer(dir) {
   const { files } = await readSome(dir, { most: 60, depth: 3 });
+  /** @type {Map<string, boolean>} */
+  const packagesInside = new Map();
   for (const one of files) {
     if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(one.rel)) continue;
+    // The same line as above: a socket opened inside a package of its own says nothing about
+    // the folder that package happens to sit in. `apps/` is not a server because `apps/api` is.
+    if (insideAnotherPackage(dir, one.rel, packagesInside)) continue;
     const listens = /\.listen\s*\(|createServer\s*\(|Deno\.serve\s*\(|Bun\.serve\s*\(|serve\s*\(\s*\{[^}]*port/.test(one.text);
     if (!listens) continue;
     const readsPort = /process\.env\.PORT|Deno\.env\.get\(\s*['"]PORT|env\.PORT/.test(one.text);
@@ -2505,10 +2665,15 @@ function inGigabytes(bytes) {
  * @returns {Promise<string[]>}
  */
 async function proposeSourceFolders(root, products, listing) {
+  // Code at the top level belongs to no folder, and the reader only takes folders. So the
+  // settings this writes have to say "the whole project" rather than name a folder that would
+  // leave the project's own `server.js` unopened for good — the same silence
+  // {@link whereTheCodeIs} exists to stop, except written down and kept.
+  if (rootHoldsItsOwnCode(listing)) return ['.'];
+
   /** @type {Set<string>} */
   const folders = new Set();
-  const usual = ['src', 'lib', 'app', 'bin', 'server', 'pages', 'api', 'electron', 'main', 'packages'];
-  for (const name of usual) if (listing.dirs.includes(name)) folders.add(name);
+  for (const name of USUAL_SOURCE_FOLDERS) if (listing.dirs.includes(name)) folders.add(name);
 
   for (const product of products) {
     if (product.where === '.' || product.where === '') continue;
@@ -2772,14 +2937,16 @@ function plainly(items) {
  * @param {boolean} input.readCode
  * @param {Product[]} input.merged
  * @param {{files: string[], dirs: string[]}} input.listing
+ * @param {string[]} input.firstFolders   The folders the first read was actually given. Worked
+ *   out again from the usual list, this said "src was read" about a run that had in fact been
+ *   pointed at the whole project, and the whole project then got read a second time for nothing.
  * @param {{doors: ProjectShape['doors'], routes: ProjectShape['routes'], channels: ProjectShape['channels'], envNames: ProjectShape['envNames']}} input.first
  * @returns {Promise<{doors: ProjectShape['doors'], routes: ProjectShape['routes'], channels: ProjectShape['channels'], envNames: ProjectShape['envNames'], sourceFolders: string[]}>}
  */
 async function theSourceAgain(input) {
-  const { root, readCode, merged, listing, first } = input;
+  const { root, readCode, merged, listing, firstFolders, first } = input;
   const sourceFolders = await proposeSourceFolders(root, merged, listing);
-  const usual = ['src', 'lib', 'app', 'bin', 'server', 'pages', 'api', 'electron', 'main', 'packages'];
-  const alreadyRead = new Set(usual.filter((name) => listing.dirs.includes(name)));
+  const alreadyRead = new Set(firstFolders);
   const missed = sourceFolders.filter((folder) => !alreadyRead.has(folder));
   if (!readCode || missed.length === 0) return { ...first, sourceFolders };
 
