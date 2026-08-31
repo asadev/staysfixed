@@ -536,6 +536,41 @@ export function isolationArgs(isolation, opts = {}) {
 }
 
 /**
+ * The Windows half of "its own settings folder".
+ *
+ * Everything in the list above is POSIX — HOME, TMPDIR, the XDG folders — and a Windows
+ * program reads none of it. It reads USERPROFILE, APPDATA and LOCALAPPDATA. So on Windows the
+ * promise at the very top of this file was quietly not being kept: the run got its own
+ * folders, and the app carried on writing into the person's real ones. Found on 2026-08-31,
+ * the first day anything in this file had ever run on Windows.
+ *
+ * The second group is not isolation, it is the machine. The environment handed to a child here
+ * REPLACES the child's own rather than adding to it, and these are the variables a Windows
+ * program is entitled to assume are there — SystemRoot above all, which is where it looks for
+ * the libraries that open a socket. `node` and `npm` were measured starting perfectly well
+ * without them on 2026-08-31, so this is not a fault anybody has hit; it is a hole left open
+ * that a real desktop app is much more likely to fall into than a command-line tool is. They
+ * are copied from this process rather than invented, because they describe the machine and
+ * not the run.
+ *
+ * @param {string} homeDir  The throwaway home this run was given.
+ * @returns {Record<string, string>}
+ */
+function windowsIsolationEnv(homeDir) {
+  /** @type {Record<string, string>} */
+  const env = {
+    USERPROFILE: homeDir,
+    APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
+    LOCALAPPDATA: path.join(homeDir, 'AppData', 'Local'),
+  };
+  for (const name of ['SystemRoot', 'windir', 'SystemDrive', 'COMSPEC', 'PATHEXT', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE']) {
+    const value = process.env[name];
+    if (value) env[name] = value;
+  }
+  return env;
+}
+
+/**
  * Set one run up: its own folders, its own ports, its own identity.
  *
  * Nothing is started here. Reserving and launching are separate on purpose — the engine
@@ -569,6 +604,13 @@ export async function reserveIsolation(opts) {
   const crashDir = path.join(dir, 'crashes');
   for (const folder of [userDataDir, homeDir, tmpDir, cacheDir, crashDir]) {
     await fsp.mkdir(folder, { recursive: true });
+  }
+  // The two folders a Windows program expects to find already there. It is handed a home of
+  // its own below, and a home with no AppData in it is not one any Windows app has ever seen.
+  if (process.platform === 'win32') {
+    for (const folder of [path.join(homeDir, 'AppData', 'Roaming'), path.join(homeDir, 'AppData', 'Local')]) {
+      await fsp.mkdir(folder, { recursive: true });
+    }
   }
 
   const debugPort = await takePort();
@@ -628,6 +670,7 @@ export async function reserveIsolation(opts) {
       // Nothing being checked should be phoning home about itself.
       ELECTRON_NO_ATTACH_CONSOLE: '1',
       ELECTRON_ENABLE_LOGGING: '1',
+      ...(process.platform === 'win32' ? windowsIsolationEnv(homeDir) : {}),
       ...identityEnv,
       ...opts.env,
     },
