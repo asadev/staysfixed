@@ -41,7 +41,11 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { httpAdapter } from '../../src/v2/adapters/http.js';
-import { addressesTouched, buildLedger, doorFact, toCoverage, walkFromCapture } from '../../src/v2/coverage.js';
+import {
+  addressesTouched, buildLedger, doorFact, isAStyleValue, justTheDoors, ledger, sourceFoldersFor,
+  toCoverage, walkFromCapture,
+} from '../../src/v2/coverage.js';
+import { openStore } from '../../src/v2/store.js';
 import { scratchDir, cleanUp } from '../support.mjs';
 
 /**
@@ -233,5 +237,164 @@ describe('a door nothing knocked on is never a walked door', () => {
     );
     assert.deepEqual(one.doorAddresses, ['route.GET./reports']);
     assert.equal(one.notTried, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The denominator
+// ---------------------------------------------------------------------------
+
+/**
+ * THREE — THE TOTAL WAS DRAWN FROM A SMALLER PRODUCT THAN THE ONE BEING CHECKED.
+ *
+ * Every reassuring number this tool prints is a fraction of the door count, so a wrong door
+ * count is every number wrong at once. Three ways it was wrong were measured on 2026-08-31,
+ * on a real Next.js website somebody set up as a stranger would:
+ *
+ *   - the ledger re-read the source WITHOUT the folders the settings name, so it read 8 of
+ *     the project's 20 files and then printed "25 of the 25 doors this product has have
+ *     never been walked" — a total taken from a third of the product, offered as the whole;
+ *   - eleven CSS custom properties, `--px` and its neighbours, were counted as command-line
+ *     flags, so the total included things that are not ways into anything;
+ *   - every page was missing from the count altogether, and the two pages behind a changing
+ *     address were opened with one sample value each and counted as though the eleven real
+ *     pages behind them had been walked.
+ *
+ * These tests are the guard on all three. They are about the DENOMINATOR, which is the one
+ * number that has to be right before any of the others mean anything.
+ */
+describe('the door count is the product, all of it, and only doors', () => {
+  test('the ledger reads the folders the settings name, not the ones it would guess at', async () => {
+    const root = await scratchDir('lane-coverage-folders');
+    await fsp.mkdir(path.join(root, 'features'), { recursive: true });
+    await fsp.mkdir(path.join(root, 'app'), { recursive: true });
+    await fsp.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'shop' }));
+    // `app` is on the reader's own list of usual folders. `features` is not, and that is
+    // exactly the shape that went wrong: half the project outside the guessed list.
+    await fsp.writeFile(path.join(root, 'app', 'inside.js'), 'export function insideTheUsualFolders() { return 1; }\n');
+    await fsp.writeFile(path.join(root, 'features', 'outside.js'), 'export function outsideThem() { return 2; }\n');
+    await fsp.writeFile(
+      path.join(root, 'staysfixed.config.json'),
+      JSON.stringify({ product: 'shop', source: { folders: ['app', 'features'] } }),
+    );
+
+    const guessed = await sourceFoldersFor(root, undefined);
+    assert.deepEqual(guessed.folders, ['app', 'features'], 'the settings are the answer, and they were not being asked');
+    assert.equal(guessed.why, '', 'nothing to apologise for when the settings could be read');
+
+    const led = await ledger(openStore({ root }), 'shop', { root });
+    const names = led.entries.map((e) => e.name);
+    assert.ok(names.includes('outsideThem'), `a door outside the guessed folders is missing from the ledger:\n${names.join(', ')}`);
+    assert.ok(names.includes('insideTheUsualFolders'));
+    assert.ok(
+      led.caveats.some((c) => c.includes('files in app, features')),
+      `the ledger has to say WHICH folders its total came from:\n${led.caveats.join('\n')}`,
+    );
+    await cleanUp();
+  });
+
+  test('with no settings to read, it says the total may be smaller than the product', async () => {
+    const root = await scratchDir('lane-coverage-no-settings');
+    await fsp.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'shop' }));
+    const answer = await sourceFoldersFor(root, undefined);
+    assert.equal(answer.folders, undefined);
+    assert.match(answer.why, /no Stays Fixed settings file/i);
+    assert.match(answer.why, /not in this ledger|doors that are not/i);
+  });
+
+  test('a CSS custom property is not a command, and leaving it out is said out loud', () => {
+    const styleValue = doorFact(/** @type {any} */ ({
+      kind: 'command', name: '--px', detail: 'a flag this file mentions',
+      file: 'components/Price.tsx', line: 2, inTest: false, named: true, via: 'literal',
+    }));
+    const realFlag = doorFact(/** @type {any} */ ({
+      kind: 'command', name: '--dry-run', detail: 'a flag this file mentions',
+      file: 'src/cli.js', line: 40, inTest: false, named: true, via: 'literal',
+    }));
+    assert.equal(isAStyleValue(styleValue), true);
+    assert.equal(isAStyleValue(realFlag), false, 'a flag in a program is a real door and dropping it would be the silence this tool exists to prevent');
+
+    const only = justTheDoors([styleValue, realFlag]);
+    assert.deepEqual(only.doors.map((d) => d.name), ['--dry-run']);
+    assert.equal(only.styleValues.length, 1);
+
+    const led = buildLedger({
+      product: 'shop', doors: only.doors, walks: [], byChannel: {}, captures: 0, builds: 1, at: 'fixed',
+    });
+    assert.equal(led.doors, 1, 'a style value in the total makes the product look bigger than it is');
+    void led;
+  });
+
+  test('the same door mentioned in four files is one door, the way the contract channel already counts it', () => {
+    const mentions = ['a.js', 'b.js', 'c.js', 'd.js'].map((file) =>
+      doorFact(/** @type {any} */ ({ kind: 'env', name: 'NODE_ENV', detail: 'read', file, line: 1, inTest: false, named: true, via: 'literal' })),
+    );
+    const only = justTheDoors(mentions);
+    assert.equal(only.doors.length, 1, 'a setting read in four files is one setting');
+    assert.equal(only.folded, 3);
+
+    // And two doors that only LOOK alike stay two. GET and POST on one path are two doors,
+    // and folding them would be the ledger lying in the direction it must never lie in.
+    const both = justTheDoors([routeDoor('/basket', 'GET'), routeDoor('/basket', 'POST')]);
+    assert.equal(both.doors.length, 2);
+    assert.equal(both.folded, 0);
+  });
+
+  test('a page opened with one sample value is one page opened, and the ledger says which address', () => {
+    // The step the HTTP adapter writes when a sample value filled the gap in an address.
+    const journey = {
+      steps: [{ act: 'request', method: 'GET', route: '/blog/[slug]', url: '/blog/hello-world', unfilled: [], door: '/blog/[slug]', kind: 'route', doorDetail: 'GET' }],
+    };
+    const one = walkFromCapture(
+      /** @type {any} */ ({
+        journey: 'GET /blog/[slug]', startedAt: '2026-08-31T00:00:00.000Z', build: { id: 'b' },
+        observations: [{ path: 'api.GET /blog/[slug].status', channel: 'results', value: 200 }],
+      }),
+      /** @type {any} */ (journey),
+    );
+    assert.deepEqual(one.sampledAt, [{ door: 'route.GET./blog/[slug]', at: '/blog/hello-world' }]);
+
+    const led = buildLedger({
+      product: 'shop', doors: [routeDoor('/blog/[slug]', 'GET'), routeDoor('/about', 'GET')],
+      walks: [one], byChannel: {}, captures: 1, builds: 1, at: 'fixed',
+    });
+    const family = led.entries.find((e) => e.name === '/blog/[slug]');
+    assert.ok(family);
+    assert.equal(family.state, 'opened', 'one address really was opened, and saying otherwise would be its own lie');
+    assert.equal(family.sampled, true, 'and it must never read as the whole family being covered');
+    assert.equal(family.openedAt, '/blog/hello-world');
+    assert.match(family.how, /one address, \/blog\/hello-world/);
+    assert.equal(led.sampled, 1);
+    assert.ok(
+      led.caveats.some((c) => /changing part in the address/.test(c) && c.includes('/blog/hello-world')),
+      `the one-value opening has to be disclosed, not inferred:\n${led.caveats.join('\n')}`,
+    );
+
+    // And it has to survive into the list a person and an agent actually read.
+    const gap = toCoverage(led).gaps.find((g) => /opened at one value/.test(g.what));
+    assert.ok(gap, 'the disclosure never reached the coverage list, which is the only place anybody reads it');
+    assert.equal(gap.doors, undefined, 'a doors count here folds this line into the door arithmetic and deletes it from the summary');
+  });
+
+  test('a door with a gap nobody filled is still a door nothing opened', () => {
+    // The other half of the same rule. A step that was refused for want of a value opened
+    // nothing at all, and must not be dressed up as "opened at one address".
+    const journey = {
+      steps: [{ act: 'request', method: 'GET', route: '/blog/[slug]', url: '/blog/[slug]', unfilled: ['slug'], door: '/blog/[slug]', kind: 'route', doorDetail: 'GET' }],
+    };
+    const one = walkFromCapture(
+      /** @type {any} */ ({
+        journey: 'GET /blog/[slug]', startedAt: '2026-08-31T00:00:00.000Z', build: { id: 'b' },
+        observations: [{ path: 'api.GET /blog/[slug].status', channel: 'results', value: 200, meta: { refused: true } }],
+      }),
+      /** @type {any} */ (journey),
+    );
+    assert.equal(one.sampledAt, undefined);
+    const led = buildLedger({
+      product: 'shop', doors: [routeDoor('/blog/[slug]', 'GET')], walks: [one],
+      byChannel: {}, captures: 1, builds: 1, at: 'fixed',
+    });
+    assert.equal(led.sampled, 0);
+    assert.equal(led.opened, 0, 'nothing was asked for, so nothing was opened');
   });
 });
