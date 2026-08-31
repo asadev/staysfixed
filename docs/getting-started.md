@@ -88,9 +88,11 @@ What comes back:
 finds there — routes, commands, screens, message channels — and `--journeys <file>` names
 steps by hand. `--journeys suite` adds their own test suite: each test file runs twice inside
 the scratch copy, every check is reported by name, and it stops after 90 seconds naming every
-file it did not reach. Replaying a recorded session is written in `src/v2/journeys/` and is
-**not wired into a run**: ask for `--journeys recorded` and you are told so by name. Nothing
-quietly substitutes different steps and hands you a clean answer about them.
+file it did not reach. `--journeys recorded` walks the sessions they recorded with
+`staysfixed record` — the one source that knows which screens a person actually opens, which
+reading their source cannot work out. Ask for it in a project with no recordings and the run
+stops and says so; nothing quietly substitutes different steps and hands you a clean answer
+about them.
 
 ### 3. Take the first reading
 

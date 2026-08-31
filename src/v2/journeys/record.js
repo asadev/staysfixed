@@ -35,6 +35,18 @@ import path from 'node:path';
 /** The shape of a journeys file on disk. Version it, because a format nobody versioned is a format nobody can change. */
 export const JOURNEY_FILE_VERSION = 2;
 
+/**
+ * Where recordings live, relative to the project.
+ *
+ * One name, because three readers used to spell it out for themselves — the gatherer, the
+ * check path and the recording command — and three copies of a folder name is three chances
+ * for a recording to be written where nothing looks for it, which reads afterwards exactly
+ * like a recording that was never made.
+ *
+ * It is committed, not ignored: a recording is the promise, not the evidence.
+ */
+export const RECORDINGS_DIR = path.join('.staysfixed', 'journeys');
+
 // ---------------------------------------------------------------------------
 // Keeping secrets out
 // ---------------------------------------------------------------------------

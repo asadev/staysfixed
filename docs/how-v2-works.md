@@ -126,16 +126,39 @@ Ranked, because this is the real workload question:
 4. **The agent exploring one named gap** and freezing it into a replayable file.
 5. Never a person clicking through an app.
 
-`--journeys <source>` picks between them — and **one of those five is written and
-not wired.** A run walks (1) by default: each adapter reads your source and offers
-what it finds there. `--journeys <file>` names steps by hand, and `--journeys
-suite` adds (2), the project's own test suite — each file run twice inside the
-scratch copy, every check reported by name, held to a 90-second budget with every
-file it did not reach named. Session replay lives in `src/v2/journeys/` with tests
-around it and nothing on the check path calls it; ask for `--journeys recorded` and
-you are told that by name rather than handed a clean result about steps something
-else chose. Saying so is the point: a feature that exists in the repository and not
-in the run is not a feature you have.
+`--journeys <source>` picks between them. A run walks (1) by default: each adapter
+reads your source and offers what it finds there. `--journeys <file>` names steps
+by hand. `--journeys suite` adds (2), the project's own test suite — each file run
+twice inside the scratch copy, every check reported by name, held to a 90-second
+budget with every file it did not reach named. `--journeys recorded` adds (3), the
+sessions somebody made with `staysfixed record` and kept in `.staysfixed/journeys`.
+
+**Why (3) is worth having at all.** Everything above it was worked out by READING:
+routes out of the source, exported names out of a package, screens out of a router.
+Reading finds what the code says it does, and it is completely blind to the way a
+person actually uses the thing — the four screens they open every morning, in that
+order, with that data. A recorded session is the only channel that can learn that,
+and once learned it is checked for ever. On a two-page site whose second page is
+named nowhere in the source, breaking that page reports **nothing** through the
+journeys read out of the code and is caught immediately by the recorded one.
+
+**Nothing is recorded that has not repeated.** `staysfixed record` walks a fresh
+session twice against the same build before it writes a single byte, using the very
+same walker a later check uses, and refuses it if the two walks disagree about what
+exists or if it could not get through the steps at all. A journey that argues with
+itself would go red on somebody else's laptop for no reason, and version 1 already
+proved where that ends: a flaky check does not get fixed, it gets ignored.
+
+One trap is worth knowing about, because it is the shape of a false all-clear. When
+a person clicks a link, the browser moves. Writing both down — click the link, then
+open that address — makes a journey that opens the second page whether or not the
+link still works, so a broken button comes back clean. A page move that arrives
+right after something the person did is therefore dropped: it is the result of the
+act, and the act is the step.
+
+Asking for recorded sessions in a project that has none stops the run and says so,
+naming the folder and the command that makes one. It never falls back to the steps
+read out of the source and calls that a pass.
 
 ---
 

@@ -2378,6 +2378,65 @@ async function walkOne(req, where) {
 }
 
 /**
+ * Something that can walk one journey in this project, right now, without a whole check.
+ *
+ * A check is the only thing that walked a journey until 2026-08-31, and that left the
+ * recording command with a choice between running a full check to find out whether a fresh
+ * recording repeats — minutes, a store write, a verdict nobody asked for — or writing a
+ * second, simpler walker of its own, which would then be the walker that never gets fixed
+ * when the real one is. Neither is acceptable, so the walk is handed out instead: the same
+ * adapters, the same scratch-copy-per-walk rule, and the same normalisation a real check
+ * applies, so what a recording is judged on is exactly what a later check will see.
+ *
+ * The caller closes it. Everything it made lives in one throwaway folder and `close` takes
+ * that folder away.
+ *
+ * @param {{cwd?: string, root?: string, configFile?: string, config?: Record<string, any>}} [options]
+ * @returns {Promise<{root: string, config: Record<string, any>, walk: (req: WalkRequest) => Promise<Capture>, close: () => Promise<void>}>}
+ */
+export async function walkerFor(options = {}) {
+  await loadAdapters();
+  const root = projectRootFor(options);
+  const config = options.config ?? (await readConfig(options.configFile ?? findConfigFile(root)));
+  const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-walk-'));
+  const evidenceDir = path.join(scratch, 'evidence');
+  await fsp.mkdir(evidenceDir, { recursive: true });
+  // The same rewriting a check does, and for the same reason: every walk gets its own
+  // throwaway folder, so a product that prints where it is running from would otherwise
+  // look different on every single walk — including the two walks that are meant to prove a
+  // recording repeats, which would then never repeat and no recording would ever be
+  // accepted.
+  const rules = mergeRules(DEFAULT_RULES, [
+    ...pathRules({ root, scratch }),
+    ...(await loadRules(path.join(root, '.staysfixed', 'rules.json'))),
+  ]);
+  return {
+    root,
+    config,
+    walk: async (req) => normaliseCapture(await walkOne(req, { root, scratch, evidenceDir, config }), rules),
+    close: async () => {
+      await fsp.rm(scratch, { recursive: true, force: true }).catch(() => {});
+    },
+  };
+}
+
+/**
+ * This project's settings, found the way a check finds them.
+ *
+ * Exported so that nothing else has to re-implement "walk up from here looking for a config
+ * file, and read it whether it is JSON or a module". Two readers of one settings file that
+ * disagree about where it is, is a bug that only shows up in somebody else's repository.
+ *
+ * @param {{cwd?: string, root?: string, configFile?: string}} [options]
+ * @returns {Promise<{root: string, configFile: string|null, config: Record<string, any>}>}
+ */
+export async function settingsFor(options = {}) {
+  const root = projectRootFor(options);
+  const configFile = options.configFile ?? findConfigFile(root) ?? null;
+  return { root, configFile, config: await readConfig(configFile) };
+}
+
+/**
  * @param {Journey} journey
  * @returns {Adapter|null}
  */
@@ -2409,19 +2468,58 @@ async function gatherJourneys({ root, config, options }) {
   const gaps = [];
 
   const named =
-    options.journeys && !['code', 'config', 'suite'].includes(options.journeys) ? options.journeys : null;
-  // `recorded` is a word this tool knows and `check --help` offers it — it is simply not
-  // wired into a run yet. The MCP surface says exactly that; the command line fell through to
-  // the branch above, treated the word as a FILE PATH, and answered that a file called
-  // "recorded" was missing. The same question has to get the same answer on both.
+    options.journeys && !['code', 'config', 'suite', 'recorded'].includes(options.journeys) ? options.journeys : null;
+
+  // Sessions somebody actually performed, read back off the disk and walked like anything
+  // else. This is the one source that knows how a person really uses the product — the four
+  // screens they open every morning, in that order — and no amount of reading the source can
+  // work that out, because the source only says which doors exist, never which ones anybody
+  // opens. Until 2026-08-31 asking for it threw: the code to make a recording existed, and
+  // nothing on the check path ever read one.
+  //
+  // A run that was ASKED for recorded sessions and found none stops and says so. Carrying on
+  // with the journeys read out of the code would walk something the person did not ask for
+  // and then report "nothing that worked has broken" — a clean answer about the wrong steps,
+  // which is the one shape of reply this tool may never produce.
   if (options.journeys === 'recorded') {
-    throw new StaysFixedError(
-      'Replaying a recorded session is written and not wired into a run yet, so nothing was checked.',
-      {
-        hint: 'Leave --journeys out to use the steps each adapter reads from your source, pass `suite` to walk your own test suite, or pass the path to a journeys file.',
-      },
-    );
+    const { RECORDINGS_DIR, loadJourneyFolder, whatWillNotReplay } = await import('./journeys/record.js');
+    const dir = path.join(root, RECORDINGS_DIR);
+    const loaded = await loadJourneyFolder(dir);
+    if (loaded.journeys.length === 0) {
+      throw new StaysFixedError(
+        `You asked for recorded sessions and there are none in ${shortPath(dir)}, so nothing was checked.`,
+        {
+          hint:
+            'Make one: `staysfixed record <a-name-for-it>` opens your product, follows what you do, walks it twice to prove it repeats, and writes it there. ' +
+            `${loaded.problems.length > 0 ? `Something is already in that folder and could not be read: ${loaded.problems.join(' ')} ` : ''}` +
+            'Or leave --journeys out to use the steps each adapter reads from your source.',
+        },
+      );
+    }
+    for (const journey of loaded.journeys) {
+      // Said before it is walked, not after it fails. A recording rots quietly: the ids,
+      // ports and timestamps captured on the afternoon somebody made it go stale, and the
+      // replay then fails for a reason that has nothing to do with the product.
+      const willNotReplay = whatWillNotReplay(journey);
+      if (willNotReplay.length > 0) {
+        gaps.push({
+          what: `The recorded session "${journey.name}" may not replay.`,
+          why: willNotReplay.join(' '),
+          unlockedBy: 'Record it again with `staysfixed record`, or reach the same thing from the code or the test suite, where nothing goes stale.',
+          surface: journey.surface,
+        });
+      }
+    }
+    for (const problem of loaded.problems) {
+      gaps.push({
+        what: 'A file in the recordings folder was not walked.',
+        why: problem,
+        unlockedBy: 'Fix that file, or record the session again. A recording nothing can read is a hole, not a pass.',
+      });
+    }
+    journeys.push(...loaded.journeys);
   }
+
   if (named) journeys.push(...(await readJourneyFile(path.resolve(root, named))));
 
   // The project's own test suite, when somebody asked for it in those words and never
@@ -2501,7 +2599,11 @@ async function gatherJourneys({ root, config, options }) {
       continue;
     }
     if (!detection.applies) continue;
-    if (adapter !== sourceAdapter && named) continue;
+    // A journeys file and a recorded session both name exactly what to walk, so no adapter
+    // adds journeys of its own on top of them. The source reader is the exception: it runs
+    // nothing, it cannot break anything, and it is the only channel that sees a door nobody
+    // has ever walked through.
+    if (adapter !== sourceAdapter && (named || options.journeys === 'recorded')) continue;
     try {
       journeys.push(...(await adapter.journeys(project)));
     } catch (e) {

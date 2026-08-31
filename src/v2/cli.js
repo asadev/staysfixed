@@ -39,6 +39,7 @@ import { escalationBlock, escalationsFor, productFor, writeEscalations } from '.
 // module is still being evaluated.
 import { watchFlags } from '../cli/watch-flags.js';
 import { INIT_COMMANDS } from './init.js';
+import { RECORD_COMMANDS } from './journeys/record-session.js';
 import { whatWasNotChecked } from './check.js';
 
 /**
@@ -143,6 +144,7 @@ export const V2_COMMANDS = {
   // the new one actually does.
   ...INIT_COMMANDS,
   ...SHIP_COMMANDS,
+  ...RECORD_COMMANDS,
 
   check: {
     summary: 'Prove nothing that already worked has changed. This is the one you run.',
