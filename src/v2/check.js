@@ -1221,7 +1221,7 @@ function blocked(options, e, storeTrouble) {
  * for itself.
  *
  * @param {CheckOptions & {finding?: string, revert?: string[]}} options
- * @returns {Promise<{gone: boolean, detail?: string, verdict?: string, escalates?: boolean}>}
+ * @returns {Promise<{gone: boolean, detail?: string, verdict?: string, escalates?: boolean, reran?: number, checked?: number}>}
  */
 export async function prove(options = {}) {
   const root = projectRootFor(options);
@@ -1232,6 +1232,12 @@ export async function prove(options = {}) {
   if (!finding) {
     return {
       gone: false,
+      // Said out loud rather than left absent. An absent verdict resolves to "could not test"
+      // at the surface, deliberately, but a reader of this function should not have to know
+      // that to see which of the three answers this is.
+      verdict: 'could not test',
+      reran: 0,
+      checked: 0,
       detail: `The last check has no finding called "${options.finding ?? ''}". Run a check first, then prove one of the ids it gives you.`,
     };
   }
@@ -1247,6 +1253,27 @@ export async function prove(options = {}) {
       ? { ...changed, hunks: changed.hunks.filter((h) => wanted.some((w) => h.file === w || h.file.startsWith(`${w}/`))) }
       : changed;
 
+    // A file named for reverting that is not among the changes is NOT "nothing has changed".
+    // With an empty narrowing, proveCause said "Nothing has changed between the build you were
+    // happy with and this one" — about a working tree with two edited files in it — which
+    // sends somebody to debug their tree instead of the filename they just typed. Measured
+    // 2026-08-31.
+    if (wanted.length > 0 && narrowed.hunks.length === 0 && changed.hunks.length > 0) {
+      const names = [...new Set(changed.hunks.map((h) => h.file))];
+      return {
+        gone: false,
+        verdict: /** @type {const} */ ('could not test'),
+        escalates: false,
+        reran: 0,
+        checked: 0,
+        detail:
+          `Nothing was re-run: ${wanted.join(', ')} ${wanted.length === 1 ? 'is' : 'are'} not among the files that changed `
+          + `between the build you were happy with and this one, so there was no change in ${wanted.length === 1 ? 'it' : 'them'} `
+          + `to undo. What did change: ${names.slice(0, 10).join(', ')}${names.length > 10 ? `, and ${names.length - 10} more` : ''}. `
+          + 'Name one of those and the claim can actually be tested.',
+      };
+    }
+
     const proof = await proveCause(finding, {
       cwd: project.root,
       walk: project.walk,
@@ -1260,7 +1287,13 @@ export async function prove(options = {}) {
       gone: proof.verdict === 'caused by that change',
       verdict: proof.verdict,
       escalates: proof.escalates,
-      detail: proof.why ? `${proof.what} ${proof.why}` : proof.what,
+      // How much was really walked again, carried through rather than left in a number the
+      // reader never sees. A reply that took a second must never read like one that took ten
+      // minutes, and the only way to tell them apart is to say so.
+      reran: proof.reran,
+      checked: proof.checked,
+      // `proof.what` already ends with the reason. Gluing `why` on printed it twice.
+      detail: proof.what,
     };
   } finally {
     await project.close();
