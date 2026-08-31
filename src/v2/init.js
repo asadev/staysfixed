@@ -1954,7 +1954,18 @@ export function configText(project) {
       w(`${webOn}// the run says so by name and the fix is one word here.`);
     }
   } else if (project.pages.length > 0) {
-    w(`${webOn}// ${project.pages.length} page address${project.pages.length === 1 ? '' : 'es'} are read out of your folder names automatically — nothing to list here.`);
+    // WHY THESE ARE A COMMENT AND NOT A LIST. Every one is already turned into a journey by
+    // the page reader in adapters/web.js, so writing them under `screens:` would walk each
+    // page of the site twice and double every run for nothing. But a person who cannot SEE
+    // which pages those are cannot tell a site being covered from a site being glanced at —
+    // which on 2026-08-31 is exactly what "covers the website in full" was printed over, on a
+    // three-page site where two pages were never opened.
+    if (web?.router?.why) for (const line of wrapProse(web.router.why, 76)) w(`${webOn}// ${line}`);
+    w(`${webOn}// These ${project.pages.length} address${project.pages.length === 1 ? ' is' : 'es are'} opened automatically. The list is here so you can see them, not so you have to write them:`);
+    for (const page of project.pages.slice(0, 40)) {
+      w(`${webOn}//   ${page.url}${page.needs.length > 0 ? `  — waiting on a value for ${page.needs.join(' and ')}` : ''}`);
+    }
+    if (project.pages.length > 40) w(`${webOn}//   and ${project.pages.length - 40} more.`);
     w(`${webOn}// Add a screen only for something a walk has to DO rather than just open:`);
     // `fill:` and `with:` are not words this tool knows — the verb is `type:` and the value
     // is `text:`. An unknown key used to be skipped in silence, so this example, handed to
