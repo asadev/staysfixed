@@ -361,6 +361,29 @@ describe('nothing addressed to an agent is printed at a person', () => {
   });
 });
 
+describe('the two readers are told the same thing', () => {
+  test('one coverage answer, differing only where a next step is named', async () => {
+    // The strongest form of the promise this lane exists to keep. `coverage` is the longest
+    // reply either reader gets and it is assembled once, so the two texts must come out
+    // identical once the handful of next-step phrases are translated back. Anything else
+    // that differs is a fact that moved with the audience, which is the bug.
+    const { root } = await project('same-answer');
+    const agent = voiceFor(/** @type {any} */ ({ audience: 'agent' }));
+    const person = voiceFor(/** @type {any} */ ({ audience: 'person' }));
+
+    // offline, so nothing here depends on which machines answered today.
+    const toAgent = said(await callTool('staysfixed_coverage', { offline: true }, ctxFor(root, 'agent')));
+    const toPerson = said(await callTool('staysfixed_coverage', { offline: true }, ctxFor(root, 'person')));
+
+    let translated = toPerson;
+    for (const key of /** @type {const} */ (['check', 'capabilities', 'askForMachines', 'askForEvidence'])) {
+      translated = translated.split(/** @type {any} */ (person)[key]).join(/** @type {any} */ (agent)[key]);
+    }
+
+    assert.equal(translated, toAgent, 'a person and an agent were told different things about the same product');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The phrasebook itself
 // ---------------------------------------------------------------------------
