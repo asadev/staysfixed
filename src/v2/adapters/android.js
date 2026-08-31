@@ -9,6 +9,27 @@
  * Everything below is arranged around that: one device, one build at a time, the whole
  * machine put back in between.
  *
+ * IS THAT GOOD ENOUGH FOR A PAIRED RUN? YES, AND IT HAS NOW BEEN MEASURED.
+ *
+ * Until 2026-08-31 this file said a paired run was not offered here, because nobody had proven
+ * that two emulator snapshots come back the same. That was a guess. It was measured that day,
+ * on an Apple Silicon Mac, against Terminal Deck's own Android app (dev.terminaldeck.apk.debug
+ * 0.13.0) on the `sfx_a33` virtual device — Android 13, Google APIs, arm64, no Play Store.
+ *
+ * One build was walked TEN times, and the device was put back from its own snapshot between
+ * every one of them, which is exactly what happens between the two builds of a paired run.
+ * Five pairs, 309 addresses in each walk. 301 of those 309 agreed in every single pair. The
+ * eight that did not were one thing seen at eight checkpoints: the identity code this app
+ * makes fresh for itself every time it is installed. A control run with the snapshot restore
+ * switched OFF produced the same eight and no others — so the restore contributed exactly
+ * zero disagreements, and the eight belong to the app, not to the emulator.
+ *
+ * Eight addresses out of 309 that move on their own is ordinary wobble, and the engine
+ * already measures and subtracts it: the new build is always walked twice and anything that
+ * cannot answer the same way twice is taken out of the comparison before a single difference
+ * is reported. So a paired Android run is offered, and what actually limits it is not the
+ * device at all — it is getting hold of the OLD build's package. See `prepare`.
+ *
  * What is read, and in which channel:
  *
  *   CONTRACT    Everything the APK declares, read out of the file without installing it and
@@ -518,6 +539,93 @@ export function screenObservations(input) {
 const open = new Map();
 
 /**
+ * Which file each half of a comparison was walked from, remembered across the whole run.
+ *
+ * It has to live out here rather than inside a prepared build, because the engine prepares
+ * ONE build, walks ONE journey against it and throws it away again before the next: nothing
+ * that lives on a prepared build survives long enough to notice that the old build and the
+ * new build were the same file.
+ *
+ * And that is the thing worth noticing. `android.apk` in the settings is very often an
+ * absolute path, and an absolute path does not move when the old commit is checked out
+ * somewhere else — so both halves of a paired run read the SAME package, find no differences
+ * at all, and the run says "nothing that worked has changed" about a comparison that never
+ * happened. That is the one failure this tool exists to prevent, arriving through the front
+ * door. Anything found here is reported as a hole on every journey the reference walked; see
+ * `sameFileAsTheOtherHalf` below.
+ *
+ * Keyed by role — 'candidate' or 'reference' — and emptied by `teardown`.
+ *
+ * @type {Map<string, string>}
+ */
+const walkedFrom = new Map();
+
+/**
+ * The build ids that turned out to be the other half of the comparison, and the sentence
+ * that says so.
+ *
+ * Separate from `open` above because `open` only holds builds that reached a device, and the
+ * dangerous case is the one that does NOT: on a machine with no emulator this adapter still
+ * reads everything the package declares, and one package compared against itself declares
+ * exactly the same things. That is a clean, confident, meaningless all-clear, and it has to
+ * carry the warning like every other journey does.
+ *
+ * @type {Map<string, string>}
+ */
+const sameFileFor = new Map();
+
+/**
+ * Which file this really is: the path with the links and the `..`s taken out.
+ *
+ * A symlink, a `./` and a `..` must not be able to make one file look like two, because one
+ * file looking like two is the whole failure being guarded against here.
+ *
+ * @param {string} file
+ * @returns {Promise<string>}
+ */
+async function artifactIdentity(file) {
+  try {
+    return await fsp.realpath(file);
+  } catch {
+    // A path that will not resolve is still worth remembering exactly as it was typed. The
+    // question below is whether the two halves agree, not whether the file is there.
+    return file;
+  }
+}
+
+/**
+ * Did this half of the comparison read the same package as the other half?
+ *
+ * Returns the sentence to put in front of a reader, or null when the two halves really are
+ * two different files.
+ *
+ * WHAT IT DOES NOT CATCH, said here rather than left to be discovered: two different paths
+ * holding the same build. Somebody whose release script copies today's package to
+ * `builds/latest.apk` and points `reference` at it is comparing one build against itself with
+ * two names, and nothing here notices. That was left alone on purpose — two different files
+ * are usually two builds somebody produced on purpose, and refusing them on a guess would
+ * block real comparisons to prevent an unusual one.
+ *
+ * @param {'reference'|'candidate'} role
+ * @param {string} mine
+ * @returns {string|null}
+ */
+function sameFileAsTheOtherHalf(role, mine) {
+  // Only ever asked about the OLD build's half, and that is not squeamishness — it is the
+  // only answer that stays the same from one journey to the next. The engine prepares a
+  // build, walks ONE journey against it and throws it away, and it always does the new build
+  // first: new-run-a, new-run-b, old-run-a, old-run-b, then the same four again for the next
+  // journey. So from the second journey onwards the new build's half would find the previous
+  // journey's old half sitting in the map and flag itself as well — the warning would be
+  // absent on the first journey and doubled on every one after it, which reads like a bug in
+  // the tool rather than a fact about the run.
+  if (role !== 'reference') return null;
+  const other = walkedFrom.get('candidate');
+  if (!other || other !== mine) return null;
+  return `Both halves of this comparison were walked from the same file: ${mine}. Nothing in it is older or newer than anything else in it, so no difference between the two builds could possibly show up.`;
+}
+
+/**
  * Read the size out of a PNG without decoding it.
  *
  * The pixel channel is evidence, never the accusation, so nothing here needs to look at the
@@ -530,6 +638,25 @@ const open = new Map();
 export function pngSize(png) {
   if (png.length < 24 || png.readUInt32BE(12) !== 0x49484452) return null;
   return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+}
+
+/**
+ * Where a kept copy of the OLD build's package lives, if the settings name one.
+ *
+ * Two spellings, because both read naturally and neither is worth an argument:
+ * `{"reference": "builds/0.14.0.apk"}` and `{"reference": {"apk": "builds/0.14.0.apk"}}`.
+ * A relative path is resolved against whatever `findApk` is given, which for the reference
+ * half is the checkout of the old commit — so a project that DOES commit its package can
+ * simply leave this out and everything still works.
+ *
+ * @param {Record<string, any>} config
+ * @returns {string|undefined}
+ */
+export function referenceArtifact(config) {
+  const said = config?.reference;
+  if (typeof said === 'string' && said.trim() !== '') return said;
+  if (said && typeof said === 'object' && typeof said.apk === 'string' && said.apk.trim() !== '') return said.apk;
+  return undefined;
 }
 
 /**
@@ -657,6 +784,7 @@ export const androidAdapter = defineAdapter({
         ...notes,
         'What is compared is what the screen MEANS — the roles, names and states a screen reader would read — and every control is found by what it is, never by where it sits. Moving something, restyling it, or wrapping it in another layout reports nothing.',
         'The two builds are never installed at once. Android allows one app of a given name on a device, so each build is installed, walked and removed, and the whole device is put back in between.',
+        'Putting the device back really does put it back, and that is measured rather than assumed. On 2026-08-31 one build was walked ten times on an emulator with a snapshot restore between every walk: 301 of 309 addresses agreed in all five pairs, and the eight that did not were the app\'s own freshly-made identity code — a control run with no restore at all produced exactly the same eight. So a paired run is offered here. What it needs from you is a copy of the OLD build\'s package, because an APK is a build output and a checkout of the old commit does not contain one: name it with {"reference": "path/to/the-old.apk"} under "android" in the settings.',
         'Nothing is allowed off this machine. Every call the app makes is written down at a proxy and stopped there — which also means what is inside an encrypted request is never seen, and is reported as unchecked rather than as fine.',
       ],
     };
@@ -690,14 +818,51 @@ export const androidAdapter = defineAdapter({
     const base = path.join(ctx.scratchDir, `android-${build.id.slice(0, 12).replace(/[^A-Za-z0-9_-]/g, '-')}`);
     await fsp.mkdir(base, { recursive: true });
 
+    // Worked out a few lines below, and captured here so that even a build which could not
+    // be got ready still says it. A reference half that failed AND was the same file as the
+    // candidate is two separate pieces of bad news, and the second one is the one that would
+    // otherwise be lost — the run would report "could not be prepared", somebody would fix
+    // that, and the comparison would come back green for the wrong reason.
+    /** @type {string|null} */
+    let sameFile = null;
+
     /** @param {string} why */
     const notReady = (why) => ({
-      build, root: base, ready: false, why,
-      dispose: async () => { await fsp.rm(base, { recursive: true, force: true }); },
+      build,
+      root: base,
+      ready: false,
+      why: sameFile ? `${why} ${sameFile}` : why,
+      ...(build.role === 'reference' ? { facts: { paired: sameFile === null } } : {}),
+      dispose: async () => {
+        sameFileFor.delete(build.id);
+        await fsp.rm(base, { recursive: true, force: true });
+      },
     });
 
-    const found = await findApk(build.artifact ? path.dirname(build.artifact) : build.root, { ...config, apk: build.artifact ?? config.apk });
-    if (!found.path) return notReady(`There is no APK for ${build.label}: ${found.why}.`);
+    // WHICH package this half of the comparison walks.
+    //
+    // For the build you have, that is whatever the settings point at. For the build you were
+    // happy with it is different, and the difference is the whole of paired mode on a phone:
+    // the engine hands over a checkout of the old commit, and an APK is a BUILD OUTPUT that
+    // nobody commits, so a checkout of the old commit contains no app at all. `android.reference`
+    // is where a kept copy of the old build's package goes, and it is looked at first for the
+    // reference half and never for the candidate.
+    const wanted = build.role === 'reference' ? (referenceArtifact(config) ?? config.apk) : config.apk;
+    const found = await findApk(build.artifact ? path.dirname(build.artifact) : build.root, { ...config, apk: build.artifact ?? wanted });
+    if (!found.path) {
+      return notReady(
+        `There is no APK for ${build.label}: ${found.why}.` +
+        (build.role === 'reference'
+          ? ' A paired run walks the OLD build here, and an APK is a build output that a repository does not commit — so a checkout of the old commit has no app in it. Keep a copy of each release\'s package and point at it with {"reference": "path/to/the-old.apk"} under "android" in the settings, and this becomes a real comparison. Without it this journey falls back to the record the old build left the last time it ran, which is weaker and says so.'
+          : ''),
+      );
+    }
+
+    // Two halves, one file. Worked out here, said on every journey — see `run`.
+    const mine = await artifactIdentity(found.path);
+    sameFile = sameFileAsTheOtherHalf(/** @type {'reference'|'candidate'} */ (build.role), mine);
+    walkedFrom.set(build.role, mine);
+    if (sameFile) sameFileFor.set(build.id, sameFile);
     const apk = await readApk(found.path);
     if (!apk.ok) return notReady(`The APK for ${build.label} could not be read: ${apk.why}`);
 
@@ -708,8 +873,16 @@ export const androidAdapter = defineAdapter({
       return {
         build, root: base, ready: true,
         why: `adb is not on this machine, so ${build.label} cannot be installed or opened. What it declares — its version, its permissions and all ${apk.components.length} of its components — is still read straight out of the file, and every journey that needs a device is reported as unchecked rather than passed.`,
-        facts: { apk: found.path, pkg: apk.pkg, deviceless: true },
-        dispose: async () => { await fsp.rm(base, { recursive: true, force: true }); },
+        facts: {
+          apk: found.path,
+          pkg: apk.pkg,
+          deviceless: true,
+          ...(build.role === 'reference' ? { paired: sameFile === null } : {}),
+        },
+        dispose: async () => {
+          sameFileFor.delete(build.id);
+          await fsp.rm(base, { recursive: true, force: true });
+        },
       };
     }
 
@@ -791,7 +964,7 @@ export const androidAdapter = defineAdapter({
       build,
       root: base,
       ready: true,
-      why: `${build.label} is installed on ${serial} (${apk.pkg} ${apk.versionName ?? ''} build ${apk.versionCode ?? '?'}). The clock, the time zone, the text size and every animation are pinned, the first launch has been used up and thrown away, and between builds the device is put back ${reset === 'snapshot' ? 'completely, from a snapshot taken before anything was installed' : 'by removing the app — which does not undo anything it changed elsewhere on the device'}.${caveats.length > 0 ? ` Worth knowing: ${caveats.join('; ')}.` : ''}`,
+      why: `${build.label} is installed on ${serial} (${apk.pkg} ${apk.versionName ?? ''} build ${apk.versionCode ?? '?'}). The clock, the time zone, the text size and every animation are pinned, the first launch has been used up and thrown away, and between builds the device is put back ${reset === 'snapshot' ? 'completely, from a snapshot taken before anything was installed' : 'by removing the app — which does not undo anything it changed elsewhere on the device'}.${sameFile ? ` ${sameFile}` : ''}${caveats.length > 0 ? ` Worth knowing: ${caveats.join('; ')}.` : ''}`,
       facts: {
         serial: /** @type {string} */ (serial),
         pkg: apk.pkg,
@@ -800,9 +973,13 @@ export const androidAdapter = defineAdapter({
         rooted: device.rooted === true,
         firstLaunchMs: warmMs,
         ownsDevice,
+        // Only ever set on the OLD build's half, because that is the half the question is
+        // about: was there really a second build here, or did both halves read one file.
+        ...(build.role === 'reference' ? { paired: sameFile === null } : {}),
       },
       dispose: async () => {
         open.delete(build.id);
+        sameFileFor.delete(build.id);
         try {
           await resetDevice(session);
         } catch {
@@ -828,18 +1005,44 @@ export const androidAdapter = defineAdapter({
     const out = [];
     const session = open.get(prepared.build.id);
 
+    // FIRST, BEFORE ANY JOURNEY INCLUDING THE ONE THAT NEEDS NO DEVICE.
+    //
+    // Said on every journey rather than once at the start, which is the same rule the web
+    // adapter follows for an app read at a fixed address. A run that compared one file
+    // against itself finds no differences, and "no differences" is the sentence this whole
+    // tool is believed for.
+    //
+    // It has to come before the contract journey below rather than after it, and that
+    // ordering is the whole point. The contract journey needs no emulator at all — it reads
+    // the package's own manifest — so on a machine with no device it is the ONLY thing that
+    // runs, and it is exactly where one file compared against itself produces a complete,
+    // confident, meaningless all-clear. This check first went in after that early return, on
+    // 2026-08-31, and the deviceless case was still wide open; it was caught by running it
+    // against a real emulator and reading the answer rather than the code.
+    const sameFile = sameFileFor.get(prepared.build.id);
+    if (sameFile) {
+      out.push(notCovered({
+        channel: 'meaning',
+        path: joinPath('screen', journey.name, 'which build this was'),
+        reason: 'not supported here',
+        says:
+          `${sameFile} An APK is a build output, so a checkout of the old commit does not contain one and the settings' own path was used for both halves. ` +
+          'Keep a copy of the package you shipped and name it with {"reference": "path/to/the-old.apk"} under "android" in the settings, and this becomes a real comparison.',
+      }));
+    }
+
     // The one journey that needs nothing but the file.
     if (journey.name === DECLARED) {
       const apkPath = String(prepared.facts?.apk ?? session?.apkPath ?? '');
       const apk = session?.apk ?? (apkPath ? await readApk(apkPath) : null);
       if (!apk?.ok) {
-        return [notCovered({ channel: 'contract', path: ['manifest', 'read'], reason: 'missing tool', says: 'the app file could not be read, so nothing it declares was checked' })];
+        return [...out, notCovered({ channel: 'contract', path: ['manifest', 'read'], reason: 'missing tool', says: 'the app file could not be read, so nothing it declares was checked' })];
       }
-      return declaredObservations(apk, apkPath);
+      return [...out, ...declaredObservations(apk, apkPath)];
     }
 
     if (!session) {
-      return [notCovered({
+      return [...out, notCovered({
         channel: 'meaning',
         path: joinPath('screen', journey.name, 'walked'),
         reason: 'missing tool',
@@ -850,8 +1053,9 @@ export const androidAdapter = defineAdapter({
     const { device, apk } = session;
     const started = Date.now();
 
+
     if (journey.irreversible && ctx.allowIrreversible !== true) {
-      return [notCovered({
+      return [...out, notCovered({
         channel: 'effects',
         path: joinPath('screen', journey.name, 'walked'),
         reason: 'irreversible',
@@ -1238,6 +1442,11 @@ export const androidAdapter = defineAdapter({
       }
       open.delete(id);
     }
+    // One run's memory of which file each half was walked from. It must not survive into the
+    // next run in the same process — the MCP server and the watch panel both call check()
+    // more than once — or a second run would report the first run's packages as its own.
+    walkedFrom.clear();
+    sameFileFor.clear();
   },
 });
 

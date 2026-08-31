@@ -373,16 +373,54 @@ export async function ensureDevice(opts = {}) {
   const typeId = await pickDeviceType(opts.deviceType, { signal: opts.signal });
   if (!typeId.ok) return { ok: false, device: null, why: typeId.why };
 
-  const made = await simctl(['create', wanted, typeId.id, runtime.id], { timeoutMs: 120_000, signal: opts.signal });
-  if (!made.ok) return { ok: false, device: null, why: `A simulator called ${wanted} could not be made: ${firstLine(made.stderr) || made.why}` };
-  const udid = made.stdout.trim();
+  // EVERY kind of iPhone is tried, newest first, not just the first one.
+  //
+  // Not every phone runs on every version of iOS, and Apple says so with a number and no
+  // words: measured on this Mac on 2026-08-31, asking for an iPhone 6s on iOS 27.0 came back
+  // as `SimError 403` with an empty message. One attempt meant one number, and the sentence
+  // handed to a person was "a simulator could not be made" on a Mac that could perfectly well
+  // make several. So the loop walks down the list, and if every phone this Mac has is refused
+  // by every runtime it has, the refusal that comes back names what was tried and how many.
+  //
+  // SIX, not all of them. A refusal comes back instantly, but a simulator tool that has
+  // wedged does not — it takes the full two minutes before this gives up on it — and this Mac
+  // lists forty kinds of iPhone. Forty of those in a row is eighty minutes of a check that
+  // looks like it has hung, which is worse than a clear failure. Six covers every real case:
+  // if the six newest phones a Mac has all refuse a runtime, the seventh will too.
+  const MOST_TRIED = 6;
+  /** @type {string[]} */
+  const refused = [];
+  let udid = '';
+  let label = '';
+  for (const candidate of typeId.candidates.slice(0, MOST_TRIED)) {
+    const made = await simctl(['create', wanted, candidate.id, runtime.id], { timeoutMs: 120_000, signal: opts.signal });
+    if (made.ok && made.stdout.trim() !== '') {
+      udid = made.stdout.trim();
+      label = candidate.label;
+      break;
+    }
+    refused.push(`${candidate.label} (${firstLine(made.stderr) || made.why})`);
+  }
+  if (udid === '') {
+    return {
+      ok: false,
+      device: null,
+      why:
+        `A simulator called ${wanted} could not be made. ${refused.length} kind${refused.length === 1 ? '' : 's'} of iPhone ` +
+        `${refused.length === 1 ? 'was' : 'were'} tried on ${runtime.name}${typeId.candidates.length > MOST_TRIED ? ` (the newest ${MOST_TRIED} of the ${typeId.candidates.length} this Mac has)` : ''} and every one was refused. ` +
+        `The first was: ${refused[0] ?? 'nothing at all was tried'}. ` +
+        'This usually means the iOS version installed here is newer than every phone this Mac knows about, or older than all of them — opening Xcode once and letting it finish installing its simulator components fixes it.',
+    };
+  }
 
   const booted = await bootDevice(udid, { signal: opts.signal });
   if (!booted.ok) return { ok: false, device: null, why: booted.why };
   return {
     ok: true,
     device: { udid, name: wanted, runtimeName: runtime.name, weMadeIt: true, weBootedIt: true, why: booted.why },
-    why: `Made a new ${typeId.label} on ${runtime.name} called ${wanted}, and booted it.`,
+    why:
+      `Made a new ${label} on ${runtime.name} called ${wanted}, and booted it.` +
+      (refused.length > 0 ? ` ${refused.length} newer kind${refused.length === 1 ? '' : 's'} of iPhone would not run on ${runtime.name}, so ${label} was used instead.` : ''),
   };
 }
 
@@ -419,9 +457,25 @@ function compareVersions(a, b) {
 }
 
 /**
+ * Which kinds of iPhone this Mac could make, best first.
+ *
+ * A LIST rather than one answer, and the reason was measured on this Mac on 2026-08-31.
+ * `simctl list devicetypes` prints the newest iPhone first — iPhone 17 Pro at the top,
+ * iPhone 6s at the bottom — and this function used to take the LAST phone in that list.
+ * So on a Mac whose only iOS runtime was 27.0, it asked for an iPhone 6s on iOS 27, which
+ * Apple refuses outright: `simctl create` came back with SimError 403 and no explanation,
+ * `prepare` reported "a simulator called staysfixed-ios could not be made", and the whole
+ * iPhone surface was dark on a machine with Xcode, a runtime and a built app all sitting
+ * there ready. Nothing said the pairing was the problem, so the message read like the Mac
+ * was broken.
+ *
+ * Two things changed. The newest phone is picked first, because a runtime always supports
+ * the hardware of its own year. And every other phone is handed back behind it in order, so
+ * a caller that gets refused can try the next one instead of giving up on the platform.
+ *
  * @param {string|undefined} wanted
  * @param {{signal?: AbortSignal}} opts
- * @returns {Promise<{ok: boolean, id: string, label: string, why: string}>}
+ * @returns {Promise<{ok: boolean, id: string, label: string, why: string, candidates: {id: string, label: string}[]}>}
  */
 async function pickDeviceType(wanted, opts) {
   const listed = await simctl(['list', '-j', 'devicetypes'], { timeoutMs: 45_000, signal: opts.signal });
@@ -432,17 +486,46 @@ async function pickDeviceType(wanted, opts) {
       identifier: String(t.identifier), name: String(t.name),
     }));
   } catch {
-    return { ok: false, id: '', label: '', why: 'The list of device kinds could not be read, so no device can be made.' };
+    return { ok: false, id: '', label: '', why: 'The list of device kinds could not be read, so no device can be made.', candidates: [] };
   }
   if (wanted) {
     const found = types.find((t) => t.identifier === wanted || t.name === wanted);
-    if (found) return { ok: true, id: found.identifier, label: found.name, why: '' };
-    return { ok: false, id: '', label: '', why: `This machine has no simulator called "${wanted}".` };
+    if (found) return { ok: true, id: found.identifier, label: found.name, why: '', candidates: [{ id: found.identifier, label: found.name }] };
+    return { ok: false, id: '', label: '', why: `This machine has no simulator called "${wanted}".`, candidates: [] };
   }
-  const phones = types.filter((t) => /SimDeviceType\.iPhone-\d/.test(t.identifier) && !/Plus|Max|mini|e$/.test(t.name));
-  const pick = phones[phones.length - 1] ?? types.find((t) => t.identifier.includes('iPhone'));
-  if (!pick) return { ok: false, id: '', label: '', why: 'This machine has no iPhone simulator kind at all.' };
-  return { ok: true, id: pick.identifier, label: pick.name, why: '' };
+  const candidates = phoneKindsToTry(types);
+  const pick = candidates[0];
+  if (!pick) return { ok: false, id: '', label: '', why: 'This machine has no iPhone simulator kind at all.', candidates: [] };
+  return { ok: true, id: pick.id, label: pick.label, why: '', candidates };
+}
+
+/**
+ * Every kind of iPhone worth trying, best first.
+ *
+ * Pulled out of `pickDeviceType` so the ORDER can be tested on any machine, including one
+ * with no Xcode on it. The order is the whole bug: `simctl list devicetypes` prints the
+ * newest iPhone first and the oldest last, and taking the last one asked for an iPhone 6s on
+ * iOS 27.0, which Apple refuses with `SimError 403` and no words. Measured on this Mac on
+ * 2026-08-31, where it left the entire iPhone surface dark on a machine that had Xcode, a
+ * runtime and a built app all sitting there ready.
+ *
+ * A plain iPhone comes before a Plus, a Max, a mini or an `e`, because those are the same
+ * year's hardware in an awkward shape and a plain one is the least surprising thing to
+ * compare on; within each group the list's own order is kept, which is newest first.
+ *
+ * @param {{identifier: string, name: string}[]} types
+ * @returns {{id: string, label: string}[]}
+ */
+export function phoneKindsToTry(types) {
+  const plain = types.filter((t) => /SimDeviceType\.iPhone-\d/.test(t.identifier) && !/Plus|Max|mini|e$/.test(t.name));
+  const anyPhone = types.filter((t) => t.identifier.includes('iPhone'));
+  /** @type {{id: string, label: string}[]} */
+  const candidates = [];
+  for (const t of [...plain, ...anyPhone]) {
+    if (candidates.some((c) => c.id === t.identifier)) continue;
+    candidates.push({ id: t.identifier, label: t.name });
+  }
+  return candidates;
 }
 
 /**

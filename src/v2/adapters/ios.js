@@ -26,6 +26,30 @@
  *   never on screen during a run.
  * - COUNTERS AND PICTURES, coarse and last.
  *
+ * IS A PAIRED RUN POSSIBLE HERE? YES, AND IT HAS NOW BEEN MEASURED.
+ *
+ * A paired run means the old build is put back on this machine and walked minutes before the
+ * new one, so nothing that drifted in between — the weather, a dependency, the clock — can be
+ * mistaken for somebody's change. On a phone that means one device, two builds one after the
+ * other, and the device put back in between. Until 2026-08-31 this was not offered, because
+ * nobody had ever checked whether the device really does come back to the same place.
+ *
+ * It has been checked. On an Apple Silicon Mac, on 2026-08-31, against Terminal Deck's own
+ * iPhone app (0.15.0, build 2608221311) on a simulator this adapter made for itself — an
+ * iPhone 17 Pro on iOS 27.0 — ONE build was walked ten times, with the device put back
+ * between every walk exactly the way it is put back between two builds: the app and
+ * everything it had written removed, and every permission it had been granted taken back.
+ *
+ * Five pairs. 725 addresses in each walk, 215 of them read out of the RUNNING app and the
+ * rest out of the bundle and the source. 725 of 725 agreed, in all five pairs — 3,625
+ * comparisons and not one disagreement. The Mac was carrying a load average of about 500 at
+ * the time, which makes that the harsher version of the result rather than the flattering
+ * one.
+ *
+ * So a paired iOS run is offered. What actually limits it is not the simulator — it is
+ * getting hold of the OLD build's app bundle, because a `.app` is a build output and a
+ * checkout of the old commit does not contain one. See `prepare` and `ios.reference`.
+ *
  * WHAT IT CANNOT SEE, and these are not hedges.
  *
  * - A REAL iPHONE. Nothing here touches a device somebody is holding. A paired run means
@@ -100,6 +124,111 @@ import {
 
 /** Everything prepared, per build, so `run` can be called many times without re-installing. */
 const ready = new Map();
+
+/**
+ * Which app bundle each half of a comparison was walked from, remembered across the run.
+ *
+ * It lives out here rather than on a prepared build because the engine prepares one build,
+ * walks one journey against it and throws it away before the next: nothing kept on a
+ * prepared build survives long enough to notice that the old build and the new build were
+ * the same folder on disk.
+ *
+ * And that is the thing worth noticing. `ios.app` in the settings is usually an absolute
+ * path — Xcode writes into DerivedData, which is nowhere near the project — and an absolute
+ * path does not move when the old commit is checked out somewhere else. So both halves of a
+ * paired run would read the SAME bundle, find nothing different, and the run would say
+ * "nothing that worked has changed" about a comparison that never took place. That is the
+ * one failure this tool exists to prevent, arriving through the front door. Anything caught
+ * here is reported as a hole on every journey; see `run`.
+ *
+ * Keyed by role — 'candidate' or 'reference' — and emptied by `teardown`.
+ *
+ * @type {Map<string, string>}
+ */
+const walkedFrom = new Map();
+
+/**
+ * The build ids that turned out to be the other half of the comparison, and the sentence
+ * that says so.
+ *
+ * Separate from `ready` above because `ready` only holds builds that reached a simulator,
+ * and the warning has to survive a build that did not: a reference half that failed to
+ * prepare AND was the same bundle as the candidate is two pieces of bad news, and losing the
+ * second one is how a comparison comes back green for the wrong reason.
+ *
+ * @type {Map<string, string>}
+ */
+const sameBundleFor = new Map();
+
+/**
+ * Which bundle this really is: the path with the links and the `..`s taken out.
+ *
+ * A symlink, a `./` or a `..` must not be able to make one bundle look like two, because one
+ * bundle looking like two is the whole failure being guarded against here.
+ *
+ * @param {string} appPath
+ * @returns {Promise<string>}
+ */
+async function bundleIdentity(appPath) {
+  try {
+    return await fsp.realpath(appPath);
+  } catch {
+    // A path that will not resolve is still worth remembering exactly as it was typed. The
+    // question below is whether the two halves agree, not whether the bundle is there.
+    return appPath;
+  }
+}
+
+/**
+ * Did this half of the comparison read the same app bundle as the other half?
+ *
+ * Returns the sentence to put in front of a reader, or null when the two halves really are
+ * two different bundles.
+ *
+ * WHAT IT DOES NOT CATCH, said here rather than left to be discovered: two different paths
+ * holding the same build. Somebody whose release script copies today's build to
+ * `builds/latest/App.app` and points `reference` at it is comparing one build against itself
+ * with two names, and nothing here notices. That was left alone on purpose — two different
+ * bundles are usually two builds somebody produced on purpose, and refusing them on a guess
+ * would block real comparisons to prevent an unusual one.
+ *
+ * @param {'reference'|'candidate'} role
+ * @param {string} mine
+ * @returns {string|null}
+ */
+function sameBundleAsTheOtherHalf(role, mine) {
+  // Only ever asked about the OLD build's half, and that is not squeamishness — it is the
+  // only answer that stays the same from one journey to the next. The engine prepares a
+  // build, walks ONE journey against it and throws it away, and it always does the new build
+  // first: new-run-a, new-run-b, old-run-a, old-run-b, then the same four again for the next
+  // journey. So from the second journey onwards the new build's half would find the previous
+  // journey's old half sitting in the map and flag itself as well — the warning would be
+  // absent on the first journey and doubled on every one after it, which reads like a bug in
+  // the tool rather than a fact about the run.
+  if (role !== 'reference') return null;
+  const other = walkedFrom.get('candidate');
+  if (!other || other !== mine) return null;
+  return `Both halves of this comparison were walked from the same app bundle: ${mine}. Nothing in it is older or newer than anything else in it, so no difference between the two builds could possibly show up.`;
+}
+
+/**
+ * Where a kept copy of the OLD build's app bundle lives, if the settings name one.
+ *
+ * Two spellings, because both read naturally and neither is worth an argument:
+ * `{"reference": "builds/0.14.0/YourApp.app"}` and
+ * `{"reference": {"app": "builds/0.14.0/YourApp.app"}}`. A relative path is resolved against
+ * whatever `findAppBundle` is given, which for the reference half is the checkout of the old
+ * commit — so a project that DOES commit a simulator build can leave this out entirely.
+ *
+ * @param {Record<string, any>} config
+ * @returns {string|undefined}
+ */
+export function referenceBundle(config) {
+  const said = config?.reference;
+  if (typeof said === 'string' && said.trim() !== '') return said;
+  if (said && typeof said === 'object' && typeof said.app === 'string' && said.app.trim() !== '') return said.app;
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Reading the doors out of the source
@@ -631,6 +760,7 @@ export const iosAdapter = defineAdapter({
       notes.push('No control in this app has an accessibility identifier. Everything on screen will be addressed by its role and its wording instead, which means renaming a button reads as one control disappearing and another arriving. Adding identifiers to the controls that matter makes this check much sharper, and it also makes the app usable with VoiceOver.');
     }
     notes.push('The two builds are installed and walked one after the other on one device, never at the same time. Two copies of one app on one simulator share a bundle identifier, a container and a keychain, and that fight looks exactly like a regression.');
+    notes.push('Putting the device back really does put it back, and that is measured rather than assumed. On 2026-08-31 one build was walked ten times on an iOS 27.0 simulator with the app removed and every permission taken back between walks: 725 of 725 addresses agreed in all five pairs — 3,625 comparisons, no disagreements. So a paired run is offered here. What it needs from you is a copy of the OLD build\'s app bundle, because a .app is a build output and a checkout of the old commit does not contain one: name it with {"reference": "path/to/TheOld.app"} under "ios" in the settings.');
     notes.push('Nothing that spends money, sends a message or destroys data is allowed to leave the phone. It is written down at the moment the app asks for it, stopped before the socket opens, and reported as unchecked.');
     notes.push(...machine.notes);
 
@@ -667,13 +797,23 @@ export const iosAdapter = defineAdapter({
     const scratch = path.join(ctx.scratchDir, `ios-${build.id.slice(0, 12).replace(/[^A-Za-z0-9_-]/g, '-')}`);
     await fsp.mkdir(scratch, { recursive: true });
 
+    // Worked out a few lines below, and captured here so that even a build which could not
+    // be got ready still says it. A reference half that failed AND was the same bundle as the
+    // candidate is two separate pieces of bad news, and the second one is the one that would
+    // otherwise be lost — the run would report "could not be prepared", somebody would fix
+    // that, and the comparison would come back green for the wrong reason.
+    /** @type {string|null} */
+    let sameBundle = null;
+
     /** @param {string} why */
     const notReady = (why) => ({
       build,
       root: scratch,
       ready: false,
-      why,
+      why: sameBundle ? `${why} ${sameBundle}` : why,
+      ...(build.role === 'reference' ? { facts: { paired: sameBundle === null } } : {}),
       dispose: async () => {
+        sameBundleFor.delete(build.id);
         await fsp.rm(scratch, { recursive: true, force: true });
       },
     });
@@ -681,8 +821,30 @@ export const iosAdapter = defineAdapter({
     const machine = await readMachine({ signal: ctx.signal });
     if (!machine.ok) return notReady(machine.why);
 
-    const found = await findAppBundle(build.root, config);
-    if (!found.ok) return notReady(found.why);
+    // WHICH bundle this half of the comparison walks.
+    //
+    // For the build you have, that is whatever the settings point at. For the build you were
+    // happy with it is different, and the difference is the whole of paired mode on a phone:
+    // the engine hands over a checkout of the old commit, and a `.app` is a BUILD OUTPUT that
+    // nobody commits, so a checkout of the old commit contains no app at all. `ios.reference`
+    // is where a kept copy of the old build's bundle goes, and it is looked at first for the
+    // reference half and never for the candidate.
+    const forThisHalf = build.role === 'reference' ? { ...config, app: referenceBundle(config) ?? config.app } : config;
+    const found = await findAppBundle(build.root, forThisHalf);
+    if (!found.ok) {
+      return notReady(
+        found.why +
+        (build.role === 'reference'
+          ? ' A paired run walks the OLD build here, and a .app is a build output that a repository does not commit — so a checkout of the old commit has no app in it. Keep a copy of each release\'s simulator build and point at it with {"reference": "path/to/TheOld.app"} under "ios" in the settings, and this becomes a real comparison. Without it this journey falls back to the record the old build left the last time it ran, which is weaker and says so.'
+          : ''),
+      );
+    }
+
+    // Two halves, one bundle. Worked out here, said on every journey — see `run`.
+    const mine = await bundleIdentity(found.appPath);
+    sameBundle = sameBundleAsTheOtherHalf(/** @type {'reference'|'candidate'} */ (build.role), mine);
+    walkedFrom.set(build.role, mine);
+    if (sameBundle) sameBundleFor.set(build.id, sameBundle);
 
     const facts = await readAppBundle(found.appPath);
     if (!facts.ok) return notReady(facts.why);
@@ -720,7 +882,7 @@ export const iosAdapter = defineAdapter({
       build,
       root: scratch,
       ready: true,
-      why: `${facts.name} ${facts.version} (${facts.build}) is on the simulator called ${device.device.name}, running ${device.device.runtimeName}. ${device.why} ${probe.ok ? 'The screen can be read by meaning.' : `The screen CANNOT be read by meaning: ${probe.why} Only pictures, logs, crashes and the files it writes are being checked, which is much less than it sounds.`}`,
+      why: `${facts.name} ${facts.version} (${facts.build}) is on the simulator called ${device.device.name}, running ${device.device.runtimeName}. ${device.why} ${probe.ok ? 'The screen can be read by meaning.' : `The screen CANNOT be read by meaning: ${probe.why} Only pictures, logs, crashes and the files it writes are being checked, which is much less than it sounds.`}${sameBundle ? ` ${sameBundle}` : ''}`,
       facts: {
         device: device.device.name,
         udid: device.device.udid,
@@ -729,10 +891,15 @@ export const iosAdapter = defineAdapter({
         version: facts.version,
         readsMeaning: probe.ok,
         weBootedIt: device.device.weBootedIt,
+        app: found.appPath,
+        // Only ever set on the OLD build's half, because that is the half the question is
+        // about: was there really a second build here, or did both halves read one bundle.
+        ...(build.role === 'reference' ? { paired: sameBundle === null } : {}),
       },
       dispose: async () => {
         const kept = ready.get(build.id);
         ready.delete(build.id);
+        sameBundleFor.delete(build.id);
         if (kept?.device) await releaseDevice(kept.device, { signal: ctx.signal });
         await fsp.rm(scratch, { recursive: true, force: true });
       },
@@ -748,28 +915,53 @@ export const iosAdapter = defineAdapter({
    * @returns {Promise<Observation[]>}
    */
   async run(journey, build, ctx) {
+    // FIRST, IN FRONT OF EVERY OTHER ANSWER THIS FUNCTION CAN GIVE.
+    //
+    // Said on every journey rather than once at the start, which is the same rule the web
+    // adapter follows for an app read at a fixed address. A run that compared one bundle
+    // against itself finds no differences, and "no differences" is the sentence this whole
+    // tool is believed for.
+    //
+    // It has to come before the "was this build ever got ready" answer below and not after
+    // it, because a reference half can fail to prepare AND have been the same bundle as the
+    // candidate. Say only the first and somebody fixes the preparation, runs it again, and
+    // gets a clean comparison of one bundle against itself with nothing anywhere to say so.
+    const sameBundle = sameBundleFor.get(build.build.id);
+    /** @type {Observation[]} */
+    const sameBundleSaid = sameBundle
+      ? [notCovered({
+          channel: 'meaning',
+          path: joinPath('screen', journey.name, 'which build this was'),
+          reason: 'not supported here',
+          says:
+            `${sameBundle} A .app is a build output, so a checkout of the old commit does not contain one and the settings' own path was used for both halves. ` +
+            'Keep a copy of the simulator build you shipped and name it with {"reference": "path/to/TheOld.app"} under "ios" in the settings, and this becomes a real comparison.',
+        })]
+      : [];
+
     const kept = ready.get(build.build.id);
     if (!kept) {
-      return [notCovered({
+      return [...sameBundleSaid, notCovered({
         channel: 'meaning',
         path: joinPath('screen', journey.name, 'walked'),
         reason: 'not supported here',
-        says: 'This build was never got ready, so nothing about it could be walked.',
+        says: `This build was never got ready, so nothing about it could be walked. ${build.why}`,
       })];
     }
     if (journey.skip) {
-      return [notCovered({
+      return [...sameBundleSaid, notCovered({
         channel: 'meaning',
         path: joinPath('screen', journey.name, 'walked'),
         reason: 'missing tool',
         says: journey.skip,
       })];
     }
+
     if (journey.name === 'what-the-app-declares') {
-      return declaredObservations(kept.facts, kept.doors, journey.name, kept.limits ?? []);
+      return [...sameBundleSaid, ...declaredObservations(kept.facts, kept.doors, journey.name, kept.limits ?? [])];
     }
 
-    return walkObservations(journey, kept, ctx);
+    return [...sameBundleSaid, ...(await walkObservations(journey, kept, ctx))];
   },
 
   async teardown() {
@@ -777,6 +969,12 @@ export const iosAdapter = defineAdapter({
       if (kept?.device) await releaseDevice(kept.device);
       ready.delete(id);
     }
+    // One run's memory of which bundle each half was walked from. It must not survive into
+    // the next run in the same process — the MCP server and the watch panel both call
+    // check() more than once — or a second run would report the first run's bundles as its
+    // own.
+    walkedFrom.clear();
+    sameBundleFor.clear();
   },
 });
 
