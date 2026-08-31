@@ -671,6 +671,13 @@ export const iosAdapter = defineAdapter({
     /** @type {string[]} */
     const notes = [];
 
+    // What was MEASURED goes on before the machine is asked, so it survives every early
+    // return below. These notes are what `doctor` prints and what an agent reads, and on a
+    // machine that is not a Mac they were dropped entirely — so somebody planning where to
+    // run their checks was told only "not here", never what a Mac would actually do or what
+    // it would need from them. A fact that exists only in a comment is a fact nobody sees.
+    notes.push('Putting the device back really does put it back, and that is measured rather than assumed. On 2026-08-31 one build was walked ten times on an iOS 27.0 simulator with the app removed and every permission taken back between walks: 725 of 725 addresses agreed in all five pairs — 3,625 comparisons, no disagreements. So a paired run is offered here. What it needs from you is a copy of the OLD build\'s app bundle, because a .app is a build output and a checkout of the old commit does not contain one: name it with {"reference": "path/to/TheOld.app"} under "ios" in the settings.');
+
     const machine = await readMachine();
     if (!machine.isMac) {
       return {
@@ -760,7 +767,6 @@ export const iosAdapter = defineAdapter({
       notes.push('No control in this app has an accessibility identifier. Everything on screen will be addressed by its role and its wording instead, which means renaming a button reads as one control disappearing and another arriving. Adding identifiers to the controls that matter makes this check much sharper, and it also makes the app usable with VoiceOver.');
     }
     notes.push('The two builds are installed and walked one after the other on one device, never at the same time. Two copies of one app on one simulator share a bundle identifier, a container and a keychain, and that fight looks exactly like a regression.');
-    notes.push('Putting the device back really does put it back, and that is measured rather than assumed. On 2026-08-31 one build was walked ten times on an iOS 27.0 simulator with the app removed and every permission taken back between walks: 725 of 725 addresses agreed in all five pairs — 3,625 comparisons, no disagreements. So a paired run is offered here. What it needs from you is a copy of the OLD build\'s app bundle, because a .app is a build output and a checkout of the old commit does not contain one: name it with {"reference": "path/to/TheOld.app"} under "ios" in the settings.');
     notes.push('Nothing that spends money, sends a message or destroys data is allowed to leave the phone. It is written down at the moment the app asks for it, stopped before the socket opens, and reported as unchecked.');
     notes.push(...machine.notes);
 
@@ -818,9 +824,6 @@ export const iosAdapter = defineAdapter({
       },
     });
 
-    const machine = await readMachine({ signal: ctx.signal });
-    if (!machine.ok) return notReady(machine.why);
-
     // WHICH bundle this half of the comparison walks.
     //
     // For the build you have, that is whatever the settings point at. For the build you were
@@ -845,6 +848,15 @@ export const iosAdapter = defineAdapter({
     sameBundle = sameBundleAsTheOtherHalf(/** @type {'reference'|'candidate'} */ (build.role), mine);
     walkedFrom.set(build.role, mine);
     if (sameBundle) sameBundleFor.set(build.id, sameBundle);
+
+    // The machine is asked AFTER all of that, and the order is the point. Working out which
+    // bundle each half walks needs nothing but the filesystem, and it is true on every
+    // machine. Asking the machine first meant that anywhere an iPhone app cannot run — any
+    // Linux box, any Windows box, a Mac without Xcode — the reference half returned before
+    // the check and reported `paired: true`, which is a claim about a comparison it had not
+    // made. Caught by CI on Linux against a green Mac suite, 2026-08-31.
+    const machine = await readMachine({ signal: ctx.signal });
+    if (!machine.ok) return notReady(machine.why);
 
     const facts = await readAppBundle(found.appPath);
     if (!facts.ok) return notReady(facts.why);
