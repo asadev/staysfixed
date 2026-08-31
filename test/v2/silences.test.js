@@ -643,3 +643,152 @@ describe('a phone check cannot stop counting without saying so', () => {
     }
   });
 });
+
+describe('a proof that measured nothing does not get to sound like one that did', () => {
+  /**
+   * Measured on 2026-08-31, by somebody using the tool as a stranger on a real website.
+   *
+   * `staysfixed prove <finding> --revert <file>` was asked about a one-line heading change
+   * that had definitely caused the finding, and answered "Your edit did not cause this, so
+   * fixing that file will not help." Two controls settle what that sentence was worth:
+   * naming a completely unrelated file produced the word-for-word identical denial, and the
+   * other half of the same edit came back PROVEN. It returned in five seconds on a project
+   * where a real check takes eleven to twenty minutes, and the run log recorded zero server
+   * starts. It had not re-run anything at all.
+   *
+   * The cause was already written down in the code. `cannot()` in src/v2/cause.js carries a
+   * comment saying "not proven either way is not the same as proven innocent, and it must
+   * never be reported as if it were" — and `toolProve` in src/v2/mcp/tools.js branched on
+   * `gone === true`, so everything that was not a proof, including "could not test", got the
+   * confident denial. Three genuinely different outcomes, two sentences, and the missing one
+   * was the only one that was not an answer.
+   */
+
+  /**
+   * A git project with exactly one uncommitted change in it.
+   *
+   * @param {string} edited  What app.js is changed to. Leave it as the committed text and
+   *                         there is nothing to undo, which is one of the ways this used to
+   *                         come back as a confident denial.
+   * @returns {Promise<string>}
+   */
+  async function projectWithOneChange(edited) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-cause-ran-'));
+    await fsp.writeFile(path.join(dir, 'app.js'), 'export const answer = 1;\n');
+    await run('git', ['init', '-q'], { cwd: dir });
+    await run('git', ['config', 'user.email', 'test@staysfixed.local'], { cwd: dir });
+    await run('git', ['config', 'user.name', 'test'], { cwd: dir });
+    await run('git', ['add', '-A'], { cwd: dir });
+    await run('git', ['commit', '-q', '-m', 'the build that worked'], { cwd: dir });
+    await fsp.writeFile(path.join(dir, 'app.js'), edited);
+    return dir;
+  }
+
+  /** @returns {any} */
+  const oneFinding = () => ({
+    id: 'f-1',
+    title: 'the heading changed',
+    why: 'One address.',
+    class: 'ordinary',
+    rank: 1,
+    nearFiles: ['app.js'],
+    differences: [
+      { path: 'cli.head.out', channel: 'results', kind: 'changed', journey: 'the walk', reference: 'was', candidate: 'now' },
+    ],
+  });
+
+  /** @returns {any} */
+  const oneJourney = () => ({ name: 'the walk', describe: 'the walk', surface: 'cli', steps: [] });
+
+  test('a proof that never walked anything says so, and says it in its own sentence', async () => {
+    const dir = await projectWithOneChange('export const answer = 1;\n');
+    try {
+      let walks = 0;
+      const proof = await proveCause(oneFinding(), {
+        cwd: dir,
+        journeys: [oneJourney()],
+        candidate: /** @type {any} */ ({ id: 'candidate' }),
+        walk: async () => {
+          walks += 1;
+          throw new Error('this must never be reached: there was no change to undo');
+        },
+      });
+
+      assert.equal(walks, 0, 'the fixture has to actually reach the give-up path, or this test proves nothing');
+      assert.equal(proof.verdict, 'could not test');
+      assert.equal(proof.reran, 0, 'nothing was walked again, and the number that says so is what tells a five-second reply from an eleven-minute one');
+      assert.equal(proof.checked, 0);
+      assert.match(
+        proof.what,
+        /Nothing was re-run/,
+        'the fact has to be in the sentence as well as in the field: src/v2/check.js forwards only the words to the MCP surface, so a fact kept only in a number never reaches the person reading it',
+      );
+      assert.match(proof.what, /neither cleared nor blamed/, 'it must not read as an acquittal of the file that was named');
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a proof that did walk the journey counts the walking', async () => {
+    const dir = await projectWithOneChange('export const answer = 2;\n');
+    try {
+      const proof = await proveCause(oneFinding(), {
+        cwd: dir,
+        journeys: [oneJourney()],
+        candidate: /** @type {any} */ ({ id: 'candidate' }),
+        walk: async () =>
+          /** @type {any} */ ({
+            id: 'without',
+            journey: 'the walk',
+            build: { id: 'without' },
+            observations: [{ path: 'cli.head.out', channel: 'results', value: 'was' }],
+          }),
+      });
+
+      assert.equal(proof.verdict, 'caused by that change');
+      assert.equal(proof.reran, 1, 'one journey was walked again and the answer rests on it');
+      assert.match(proof.what, /1 journey was walked again/, 'a verdict that cost a real re-run should say what it cost');
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a walk that threw halfway does not claim nothing was run', async () => {
+    // The catch block in `proveCause` answers with `cannot()` too, and it is reached AFTER a
+    // walk may already have happened. Saying "nothing was re-run" there would be its own
+    // small lie, of exactly the kind this whole file exists to stop.
+    const dir = await projectWithOneChange('export const answer = 2;\n');
+    try {
+      let walks = 0;
+      // The finding has to REACH both journeys, or the second one is filtered out before
+      // anything is walked and the throw never happens.
+      const across = oneFinding();
+      across.differences.push({
+        path: 'cli.foot.out', channel: 'results', kind: 'changed',
+        journey: 'the second walk', reference: 'was', candidate: 'now',
+      });
+      const proof = await proveCause(across, {
+        cwd: dir,
+        journeys: [oneJourney(), { ...oneJourney(), name: 'the second walk' }],
+        candidate: /** @type {any} */ ({ id: 'candidate' }),
+        walk: async () => {
+          walks += 1;
+          if (walks > 1) throw new Error('the browser fell over');
+          return /** @type {any} */ ({
+            id: 'without',
+            journey: 'the walk',
+            build: { id: 'without' },
+            observations: [{ path: 'cli.head.out', channel: 'results', value: 'was' }],
+          });
+        },
+      });
+
+      assert.equal(proof.verdict, 'could not test');
+      assert.equal(proof.reran, 1, 'one journey really was walked before it fell over');
+      assert.doesNotMatch(proof.what, /Nothing was re-run/, 'a walk did happen, and saying otherwise is the same defect pointing the other way');
+      assert.match(proof.what, /1 journey was walked again/);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+});

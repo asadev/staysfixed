@@ -35,7 +35,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 
-import { callTool, voiceFor, renderCheck } from '../../src/v2/mcp/tools.js';
+import { callTool, loadEngine, voiceFor, renderCheck } from '../../src/v2/mcp/tools.js';
 import { sayRefusal, classify } from '../../src/v2/sealed.js';
 import { sealIntent } from '../../src/v2/intent.js';
 import { openStore } from '../../src/v2/store.js';
@@ -476,5 +476,113 @@ describe('nothing written for a terminal is handed to an agent', () => {
 
     assert.doesNotMatch(text, ANSI, 'the check reply an agent reads carries terminal colour');
     assert.doesNotMatch(text, DRAWN, 'the check reply an agent reads is drawn as a box');
+  });
+});
+
+describe('prove gives three answers, and only two of them are answers', () => {
+  /**
+   * Measured 2026-08-31 on a real website, by somebody using the tool as a stranger.
+   *
+   * `staysfixed prove <finding> --revert <file>`, asked about a one-line heading change that
+   * had definitely caused the finding, replied: "Your edit did not cause this, so fixing
+   * that file will not help." Naming a completely unrelated file produced the word-for-word
+   * identical denial. It came back in five seconds on a project where a real check takes
+   * eleven to twenty minutes, with zero server starts in the run log — it had re-run nothing.
+   *
+   * `toolProve` branched on `gone === true`, so the engine's three-state verdict was read as
+   * a boolean and "could not test" was printed as "your edit is innocent". That is the false
+   * all-clear this product exists to prevent, wearing the smallest possible hat: not a clean
+   * check over a broken product, but a clean bill of health for one file, which sends
+   * somebody to go and look somewhere else.
+   *
+   * These tests hold the three apart by their words, because the words are what anybody
+   * acts on.
+   */
+
+  /**
+   * Ask `staysfixed_prove` with the engine's answer pinned to one verdict.
+   *
+   * `loadEngine` caches and hands back the same object every time, so replacing one part on
+   * it is enough to put a known answer in front of the wording — which is the half under
+   * test here. Running a real proof would test src/v2/cause.js, which has its own tests in
+   * test/v2/silences.test.js.
+   *
+   * @param {any} answer  What the engine's `prove` facade returns.
+   * @returns {Promise<{text: string, isError: boolean, structured: any}>}
+   */
+  async function proveSaying(answer) {
+    const { root, store } = await project('prove-three');
+    await rememberACheck(store, [finding()]);
+    const engine = await loadEngine();
+    const before = engine.parts.prove;
+    engine.parts.prove = async () => answer;
+    try {
+      const result = await callTool('staysfixed_prove', { finding: 'f-a1b2c3', revert: ['src/total.js'] }, ctxFor(root, 'person'));
+      return { text: said(result), isError: result.isError === true, structured: result.structuredContent };
+    } finally {
+      if (before) engine.parts.prove = before;
+      else delete engine.parts.prove;
+    }
+  }
+
+  const CAUSED = { verdict: 'caused by that change', gone: true, detail: 'Undoing that one change in src/total.js made this go away.', reran: 1, checked: 1 };
+  const NOT_CAUSED = { verdict: 'not caused by that change', gone: false, escalates: true, detail: 'This is still here with that change undone.', reran: 1, checked: 1 };
+  const COULD_NOT = { verdict: 'could not test', gone: false, detail: 'Nothing in the working tree has changed, so there is no change to undo. Nothing was re-run: no build was started and no journey was walked again.', reran: 0, checked: 0 };
+
+  test('the three verdicts are three different sentences', async () => {
+    const caused = await proveSaying(CAUSED);
+    const notCaused = await proveSaying(NOT_CAUSED);
+    const couldNot = await proveSaying(COULD_NOT);
+
+    const heads = [caused, notCaused, couldNot].map((r) => r.text.split('\n')[0].trim());
+    assert.equal(new Set(heads).size, 3, `all three outcomes have to open differently, and two of them used to be identical: ${JSON.stringify(heads)}`);
+  });
+
+  test('"could not test" never says the edit did not cause it', async () => {
+    const { text } = await proveSaying(COULD_NOT);
+
+    // The exact sentence measured on 2026-08-31, and the shape of it.
+    assert.doesNotMatch(
+      text,
+      /Your edit did not cause this, so fixing that file will not help/,
+      'this is the word-for-word denial an untested claim used to come back wearing, and an unrelated file got the same one',
+    );
+    assert.doesNotMatch(text, /^NOT PROVEN: it survived the revert/m, 'nothing survived a revert, because no revert happened');
+    assert.match(text, /NOT TESTED/, 'it has to name itself as the outcome it is');
+    assert.match(text, /has not been cleared/, 'the file named must be left under suspicion, not acquitted');
+  });
+
+  test('"could not test" says nothing was re-run, and comes back non-zero', async () => {
+    const { text, isError, structured } = await proveSaying(COULD_NOT);
+
+    assert.match(text, /Nothing was re-run/, 'five seconds is not a measurement of an eleven-minute product, and the reply has to say which it was');
+    assert.equal(isError, true, 'the CLI turns this into exit 2, which is the promise `staysfixed prove --help` has always made: 0 when it could test the claim, 2 when it could not');
+    assert.equal(structured.verdict, 'could not test');
+    assert.equal(structured.reran, 0);
+  });
+
+  test('the two real answers say what they were measured on, and come back clean', async () => {
+    const caused = await proveSaying(CAUSED);
+    const notCaused = await proveSaying(NOT_CAUSED);
+
+    for (const { text, isError } of [caused, notCaused]) {
+      assert.match(text, /1 journey walked again/, 'a verdict that cost a real re-run says what it cost, so a cheap reply cannot pass for an expensive one');
+      assert.equal(isError, false, 'both of these are answers — "your edit was innocent" is not a failure and must not be read as one');
+    }
+    assert.match(notCaused.text, /PROVEN NOT CAUSED/);
+    assert.match(caused.text, /PROVEN CAUSED/);
+  });
+
+  test('an engine that forgets to say which verdict is treated as not tested', async () => {
+    // An older facade returning only `{gone: false}` cannot tell the two apart, and the
+    // unknown has to fall to the answer that claims nothing. Reporting "could not test"
+    // about something that was really tested costs one more command; reporting "your edit
+    // did not cause this" about something nobody measured is what sent somebody to fix the
+    // wrong file.
+    const { text, isError } = await proveSaying({ gone: false, detail: 'no verdict field here' });
+
+    assert.match(text, /NOT TESTED/);
+    assert.equal(isError, true);
+    assert.doesNotMatch(text, /did not cause this/);
   });
 });
