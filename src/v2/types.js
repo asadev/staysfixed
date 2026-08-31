@@ -239,6 +239,11 @@
  *                                    False when we had no stability record for the reference,
  *                                    so `newlyUnstable` is empty for lack of evidence rather
  *                                    than because nothing became unstable.
+ * @property {boolean} [sameBuild]    True when the build being checked and the build on record
+ *                                    as working are the same build. Nothing has been edited, so
+ *                                    the two runs compared are two runs of ONE build and no
+ *                                    difference between them can be a change. Everything found
+ *                                    is in `noise`, still counted and still named.
  * @property {boolean} [couldNotTell] True when the wobble measurement was too big to be a
  *                                    measurement — the same build answered differently at
  *                                    most of its own addresses, so subtracting it subtracts

@@ -879,13 +879,43 @@ export function wobbleStorm(wobble) {
  * and wobbles now is a finding in itself: the change made something unpredictable. Nothing is
  * "wrong" at that address and it still needs fixing.
  *
+ * AND THE CASE WHERE THERE IS NOTHING TO SUBTRACT FROM, because there was no change. When
+ * nobody has edited anything, the build being checked and the build on record as working are
+ * the same build — the same id, the same folder of stored runs — and the record of "the old
+ * build" is read back as the newest run in that folder, which is the run the LAST check left
+ * there. So an everyday check on an untouched tree compares this run against the previous run
+ * of one build and reports whatever flickered between them as a change nobody asked for.
+ *
+ * Measured 2026-08-31 on a stock Next.js app with two pages and a link between them. Next's
+ * own link prefetch is started by the browser and cancelled when the page is torn down at the
+ * end of the walk, so it lands in about four runs in five; ten checks of that untouched app,
+ * minutes apart, gave three reports of a difference, one report that "the change made
+ * something non-deterministic", and six clean ones. Identical bytes, four different answers.
+ *
+ * Two runs of one build are a wobble measurement — that is this tool's own word for it, and
+ * `measureWobble` above refuses to be handed two different builds precisely because the
+ * distinction matters. So when both sides carry the same build id, nothing here may be called
+ * a change, and nothing may be called newly unpredictable either: the address was already
+ * unpredictable and all that happened is that it was watched for longer.
+ *
+ * Nothing is hidden by this and the count does not shrink. Every difference is still counted
+ * and still named — it moves from the change list to the wobble list, where it says the true
+ * thing about the product: this address does not sit still. That is more than "1 thing
+ * behaves differently" told anybody, not less. Tell it the reference build id and it applies;
+ * leave that out and every existing caller behaves exactly as it did before.
+ *
  * @param {Difference[]} differences
  * @param {Wobble} wobble                                Measured on the candidate build.
- * @param {{referenceWobble?: Wobble, steadyInReference?: string[]}} [opts]
+ * @param {{referenceWobble?: Wobble, steadyInReference?: string[], referenceBuildId?: string, candidateBuildId?: string}} [opts]
  * @returns {WobbleSubtraction}
  */
 export function subtractWobble(differences, wobble, opts = {}) {
   const unstableNow = new Set(wobble.unstable);
+  const candidateBuildId = opts.candidateBuildId ?? wobble.buildId;
+  // Both sides have to actually name a build. An empty id means "we do not know", and two
+  // things we do not know are not the same thing — reading them as a match would quietly
+  // silence every real comparison that failed to record its build.
+  const sameBuild = Boolean(opts.referenceBuildId) && opts.referenceBuildId === candidateBuildId;
   // NOT symmetric, and that is deliberate. Subtracting the OLD build's wobble as well was
   // tried on 2026-08-30 and taken straight back out: a path the old build answered randomly
   // and the new build now answers the same way every time is a REAL change — somebody made
@@ -899,7 +929,11 @@ export function subtractWobble(differences, wobble, opts = {}) {
   const noise = [];
 
   for (const d of differences) {
-    const wobbling = unstableNow.has(d.path);
+    // Same build on both sides means the two runs being compared are two runs of ONE build,
+    // so the disagreement is the build arguing with itself whether or not this check's own
+    // two runs happened to catch it doing so. It is wobble by definition, and it is filed as
+    // wobble rather than dropped, so the address is still counted and still named.
+    const wobbling = sameBuild || unstableNow.has(d.path);
     // Copy rather than mutate: the caller's list is often the stored diff, and a flag written
     // into it becomes a fact nobody can trace back to whoever decided it.
     const flagged = { ...d, real: !wobbling, wobbling };
@@ -909,7 +943,11 @@ export function subtractWobble(differences, wobble, opts = {}) {
 
   const referenceWobble = opts.referenceWobble;
   const steadyBefore = opts.steadyInReference ? new Set(opts.steadyInReference) : null;
-  const couldTell = Boolean((referenceWobble && referenceWobble.measured) || steadyBefore);
+  // "The change made something unpredictable" needs a change to blame. With one build on both
+  // sides there was none, and the run that used to say it was reading the previous check of
+  // the same build as though it were the old build. It could not tell, and saying so is the
+  // honest answer — never "nothing became unpredictable", which claims a measurement.
+  const couldTell = !sameBuild && Boolean((referenceWobble && referenceWobble.measured) || steadyBefore);
 
   /** @type {WobbleEntry[]} */
   let newlyUnstable = [];
@@ -930,8 +968,9 @@ export function subtractWobble(differences, wobble, opts = {}) {
     noise,
     newlyUnstable,
     couldTellNewlyUnstable: couldTell,
-    note: subtractionNote(wobble, couldTell, real.length, noise.length, newlyUnstable.length),
+    note: subtractionNote(wobble, couldTell, real.length, noise.length, newlyUnstable.length, sameBuild),
   };
+  if (sameBuild) out.sameBuild = true;
   if (storm.stormy) {
     out.couldNotTell = true;
     out.couldNotTellWhy = storm.why;
@@ -949,9 +988,22 @@ export function subtractWobble(differences, wobble, opts = {}) {
  * @param {number} realCount
  * @param {number} noiseCount
  * @param {number} newlyUnstableCount
+ * @param {boolean} [sameBuild]        Both sides are one build, so none of this is a change.
  * @returns {string}
  */
-function subtractionNote(wobble, couldTell, realCount, noiseCount, newlyUnstableCount) {
+function subtractionNote(wobble, couldTell, realCount, noiseCount, newlyUnstableCount, sameBuild = false) {
+  if (sameBuild) {
+    // Said first and said plainly, because a quiet answer nobody can account for is worth
+    // nothing. This is not "we found no differences" — it is "the two things compared were
+    // one build, so a difference between them could only ever have been the build arguing
+    // with itself", and the reader needs the second sentence to trust the first.
+    const n = noiseCount;
+    return (
+      `${n === 0 ? 'Two runs of one build, and they agreed about everything.' : `${n} address${n === 1 ? '' : 'es'} answered differently across two runs of one build, which is this build disagreeing with itself and not a change anybody made.`} ` +
+      'Nothing has been edited since it was shipped, so there was nothing here that could have been a change. ' +
+      'Change the code, or ship again to cut a fresh record, to have something to compare against.'
+    );
+  }
   if (!wobble.measured) {
     return `The new build was only run once, so none of its own noise has been subtracted. All ${realCount} difference${realCount === 1 ? '' : 's'} here may include things that change on every run. Run it twice for a clean list.`;
   }

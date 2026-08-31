@@ -666,9 +666,16 @@ export async function runCheck(opts) {
         unlockedBy: 'Run that one journey on its own and see what stops it. Nothing behind it is being watched until it runs.',
       });
     }
+    // The two build ids, because whether they are the SAME build decides whether any of this
+    // can be a change at all. When nothing has been edited they match, the stored record of
+    // "the old build" is the previous check's own run out of that build's folder, and every
+    // flicker between the two runs used to be reported as a change nobody asked for. See the
+    // long note on subtractWobble: it files them as this build arguing with itself instead.
     const subtraction = subtractWobble(raw, wobble, {
       referenceWobble: referenceWobbles.length > 0 ? mergeWobble(referenceWobbles) : undefined,
       steadyInReference: referenceWobbleMeasured && steadyInReference.length > 0 ? steadyInReference : undefined,
+      referenceBuildId: reference.id,
+      candidateBuildId: opts.candidate.id,
     });
     say({
       type: 'suspicion',
@@ -1238,7 +1245,17 @@ function summarise(findings, subtraction, warning, notes, reference, provedLive,
     missed > 0
       ? ` ${how.compared} of ${how.asked} journeys had anything on the old build's side to be compared against; the other ${missed} ${plural(missed, 'was', 'were')} not compared at all, and ${plural(missed, 'is', 'are')} named in the coverage list.`
       : '';
-  if (findings.length === 0 && subtraction.newlyUnstable.length > 0) {
+  if (subtraction.sameBuild === true) {
+    // The first sentence is the only one some readers get, so it may not be "Nothing that
+    // worked has changed. N addresses checked against the stored record of 1.0.0" when the
+    // record and the run are the same build. Nothing was held against anything: the tool ran
+    // the shipped build again and compared it with itself. Measured 2026-08-31 on an untouched
+    // Next.js app, where that sentence sat on top of a comparison that had no other side.
+    parts.push(
+      `This is the build that is already on record as working, run again and compared with itself, so nothing here could be a change. ` +
+        `${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} watched.${reach}`,
+    );
+  } else if (findings.length === 0 && subtraction.newlyUnstable.length > 0) {
     // Findings and newly unpredictable addresses are two different lists, and only the first
     // one was ever in the headline. A run with no findings and four addresses that have
     // stopped sitting still opened with "Nothing that worked has changed", which is the
