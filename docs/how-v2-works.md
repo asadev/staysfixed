@@ -309,6 +309,16 @@ RUN`, and the reason is in the coverage as a hole. This is not a tolerance — n
 number here decides whether any single difference is real. It decides one thing:
 whether this run has earned the right to use the word clean.
 
+**It is asked once per journey, not once per run.** Asking it only of everything
+added together is how a page that told you nothing gets averaged away by nine
+pages that behaved: 179 unsteady addresses out of 2849 is not a storm, while four
+of that run's twelve journeys were unsteady at 69%, 75% and twice 100% of their
+own. `noAnswerJourneys(wobbles)` is the same one comparison asked journey by
+journey, and any journey it names takes the pass away and is listed by name in the
+summary's first sentence. A journey walked twice that came back with no addresses
+at all is in that list too — two empty walks agree about everything, and that is
+not a measurement.
+
 ### A finding
 
 A cluster of differences that share a cause, which is what the agent reads:
