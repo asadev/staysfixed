@@ -30,7 +30,9 @@ import {
   subtractWobble,
   sameValue,
   indexByPath,
-  wobbleStorm,
+  noAnswerJourneys,
+  populationDriftNote,
+  wobbleShape,
 } from './observation.js';
 // `diffCaptures` is no longer called from here directly. Everything goes through
 // `compareAnswers`, which is that same comparison with one rule around it: an address where
@@ -268,6 +270,20 @@ export async function runCheck(opts) {
     const comparedJourneys = [];
     /** @type {Wobble[]} */
     const wobbles = [];
+    // JOURNEYS THAT PRODUCED NO ANSWER, kept as a list rather than folded into a total.
+    //
+    // This is the scope fix of 2026-08-31. The storm rule — more addresses wobbled than held
+    // still — was asked once, of every journey added together, and on a real Next.js site
+    // 179 unsteady addresses out of 2849 is not a storm by any reading. Underneath that
+    // total sat four journeys unsteady at 69%, 75% and twice 100% of their own addresses,
+    // every one of them printed in the coverage list as "could not be compared... there is
+    // no answer here" — while the run exited 0 and said `ok`. A page where every single
+    // address disagreed with itself was folded into a pass by the pages that behaved.
+    // Reproduced here the same day on a six-page Next.js site with two pages made unsteady
+    // on the server, where the browser freeze cannot reach them: four journeys at 61%, 98%,
+    // 98% and 100%, one timed-out walk, `ok: true`, exit code 0.
+    /** @type {{journey: string, why: string, looked: number}[]} */
+    const noAnswer = [];
     /** @type {Wobble[]} */
     const referenceWobbles = [];
     /** @type {string[]} */
@@ -312,11 +328,19 @@ export async function runCheck(opts) {
           surface: journey.surface,
         });
       }
-      const weather = wobbleStorm(wobble);
-      if (weather.stormy) {
+      // ASKED OF THIS ONE JOURNEY, and the answer is kept. The same call used to happen
+      // here and go nowhere but the coverage list: the gap was written, the verdict never
+      // read it, and the run went out `ok: true` with "there is no answer here" printed
+      // four times inside it. A hole nothing refuses to pass over is a hole nobody acts on.
+      for (const dead of noAnswerJourneys([wobble])) {
+        noAnswer.push({ journey: journey.describe || journey.name, why: dead.why, looked: dead.looked });
+        // A journey that came back with nothing at all already has its own line, three
+        // lines above, in words that fit it better. Saying it twice teaches the reader to
+        // skim the one list in this tool that must never be skimmed.
+        if (dead.looked === 0) continue;
         gaps.push({
           what: `"${journey.describe || journey.name}" could not be compared: the new build did not answer it the same way twice.`,
-          why: weather.why,
+          why: dead.why,
           unlockedBy: 'Run it again on a quiet machine. If it happens twice, something in the product does not survive being started a second time.',
           surface: journey.surface,
         });
@@ -488,6 +512,42 @@ export async function runCheck(opts) {
     // in the gap list is a fact most readers will never meet.
     /** @type {string[]} */
     const runNotes = [];
+    // THE NUMBER OF ADDRESSES THIS RUN LOOKED AT IS NOT ALLOWED TO MOVE IN SILENCE.
+    //
+    // Measured 2026-08-31, three checks of one untouched Next.js site minutes apart with
+    // nothing edited between them: 2364, 2684 and 2861 addresses looked at, and 0, 179 and
+    // 500 of them unsteady. A tool whose whole method is running one thing twice and
+    // subtracting what disagrees cannot give three answers to one question and expect to be
+    // believed. Part of that spread is the product genuinely wobbling, which is exactly what
+    // the measurement is for and is reported as wobble. The ADDRESS COUNT moving by five
+    // hundred is not the product: it is the two passes of one build walking over different
+    // ground, because a request was cancelled on one of them, a page finished loading on one
+    // of them, or the walk ran out of time on one of them. Every one of those already has a
+    // line in this list; what had no line at all was the drift itself, so the total simply
+    // came out different each run with nothing anywhere saying why.
+    //
+    // It cannot be made steady from here — the causes are in the walk, not the arithmetic —
+    // so it is named, and the count both passes actually reached is named beside it as the
+    // number worth quoting. A number that moves and says nothing is worse than a smaller one
+    // that is honest.
+    const drift = populationDriftNote(wobble);
+    if (drift) {
+      const worst = wobbles
+        .map((w) => ({ journey: w.journey, drifted: wobbleShape(w).drifted }))
+        .filter((w) => w.drifted > 0)
+        .sort((x, y) => y.drifted - x.drifted);
+      const named = worst.slice(0, 4).map((w) => `${w.journey} (${w.drifted})`).join(', ');
+      runNotes.push(drift);
+      gaps.push({
+        what: 'The two runs of the new build did not walk over the same addresses, so the number this run says it looked at will not be the same number next time.',
+        why:
+          `${drift} Worst in ${named}${worst.length > 4 ? `, and ${worst.length - 4} more` : ''}. ` +
+          'Every address that only one of the two passes reached was never compared with anything, on either side.',
+        unlockedBy:
+          'Find what makes an address turn up on one pass and not the other — a request the browser cancels when the page is torn down, a page that only sometimes finishes loading, a walk that runs out of time — and either make it steady or take it out of what is watched. The timeouts and torn walks that cause it are named separately in this same list.',
+      });
+    }
+
     const kept = await remember(opts, walked);
     if (kept.why) {
       runNotes.push(
@@ -798,6 +858,16 @@ export async function runCheck(opts) {
         subtraction.newlyUnstable.length === 0 &&
         subtraction.couldNotTell !== true &&
         answersLost === 0 &&
+        // AND NOT ONE JOURNEY MAY HAVE COME BACK WITH NO ANSWER. `couldNotTell` above is
+        // this same law asked of the whole run added together, and adding is what hid it:
+        // 179 unsteady addresses out of 2849 is not a storm, and four of that run's twelve
+        // journeys were unsteady at 69%, 75% and twice 100% of their own. Whatever those
+        // four disagreed with themselves about was dropped before it could be compared, so
+        // the quiet underneath them is the quiet of nothing having been looked at — and it
+        // was being counted towards a pass by the journeys that behaved. Measured on a real
+        // Next.js site, 2026-08-31, where the run exited 0 and printed `ok` with "there is
+        // no answer here" written inside it four times.
+        noAnswer.length === 0 &&
         // AND SOMETHING HAS TO HAVE BEEN COMPARED. There is already a branch above for the
         // case where no journey had an old-build side at all; this is the same law one notch
         // finer, for the run where every journey HAD a record and every address in it holds
@@ -825,6 +895,12 @@ export async function runCheck(opts) {
           // for as long as it did is that the silence looked exactly like agreement.
           unanswered: uncompared.length,
           lost: answersLost,
+          // Named, not counted. "4 journeys could not be compared" sends the reader to a
+          // list of thirty-odd coverage lines to find out which four; the names cost one
+          // line and are what somebody acts on. `looked` rides along because a journey that
+          // disagreed with itself and a journey that saw nothing at all are two different
+          // pieces of news and must not be described in one borrowed sentence.
+          noAnswer: noAnswer.map((d) => ({ journey: d.journey, looked: d.looked })),
         }),
       startedAt,
       started,
@@ -1304,15 +1380,44 @@ function warningGaps(mode, provedLive) {
  * @param {BuildFingerprint} reference
  * @param {boolean} provedLive
  * @param {number} dropped   Suspicions the old build turned out to have as well.
- * @param {{compared: number, asked: number, addresses: number, unanswered?: number, lost?: number}} how
+ * @param {{compared: number, asked: number, addresses: number, unanswered?: number, lost?: number, noAnswer?: {journey: string, looked: number}[]}} how
  *   How much of the run this sentence covers: journeys that were really put beside the old
- *   build, journeys asked for, the addresses really compared, and the addresses that could
- *   not be compared because one side of them was a refusal rather than an answer.
+ *   build, journeys asked for, the addresses really compared, the addresses that could not
+ *   be compared because one side of them was a refusal rather than an answer, and the
+ *   journeys that produced no answer at all because the new build would not answer them the
+ *   same way twice.
  * @returns {string}
  */
 function summarise(findings, subtraction, warning, notes, reference, provedLive, dropped, how) {
   const against = provedLive ? `${nameOf(reference)}, run live` : `the stored record of ${nameOf(reference)}`;
   const parts = [];
+  // FIRST, ALWAYS, AND BEFORE THE HEADLINE. A journey with no answer in it is the one thing
+  // that must not be reachable by reading one more sentence: the headline is all some
+  // readers get, and "Nothing that worked has changed" sitting on top of four journeys that
+  // were never compared is the exact false all-clear this whole tool exists to refuse.
+  // Until 2026-08-31 that sentence was printed, `ok` was true, and the run exited 0.
+  const dead = how.noAnswer ?? [];
+  if (dead.length > 0) {
+    const names = dead.map((d) => d.journey);
+    const empty = dead.filter((d) => d.looked === 0).length;
+    const stormy = dead.length - empty;
+    const because = [];
+    if (stormy > 0) {
+      because.push(
+        `The new build disagreed with itself about most of what ${stormy === dead.length ? plural(stormy, 'that journey looks', 'those journeys look') : `${stormy} of them look`} at, so almost everything ${plural(stormy, 'it', 'they')} saw was dropped before it could be compared with anything.`,
+      );
+    }
+    if (empty > 0) {
+      because.push(
+        `${empty === dead.length ? `${plural(empty, 'It was', 'They were')}` : `${empty} of them ${plural(empty, 'was', 'were')}`} walked twice and came back with nothing at all to look at.`,
+      );
+    }
+    parts.push(
+      `NO ANSWER FOR ${dead.length} OF THE ${how.asked} ${plural(how.asked, 'JOURNEY', 'JOURNEYS')} HERE: ${names.slice(0, 4).join(', ')}${names.length > 4 ? `, and ${names.length - 4} more` : ''}. ` +
+        `${because.join(' ')} ` +
+        `The quiet underneath ${plural(dead.length, 'it', 'them')} is the quiet of nothing having been looked at, not of nothing having changed. This is not a pass and not a failure, and the journeys that did answer do not make it one.`,
+    );
+  }
   // How much of the run this sentence is actually about. A run that compared four of its
   // seventeen journeys is not a run that found nothing; it is a run that mostly did not look,
   // and the first sentence is the only one some readers get.
@@ -1358,6 +1463,13 @@ function summarise(findings, subtraction, warning, notes, reference, provedLive,
     const n = how.lost ?? 0;
     parts.push(
       `Nothing that COULD be compared has changed — but ${n} ${plural(n, 'address', 'addresses')} the old build answers at could not be answered by this build at all, so ${plural(n, 'it was', 'they were')} not compared. That is coverage this build has taken away, and it is not a pass. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against}.${reach}`,
+    );
+  } else if (findings.length === 0 && dead.length > 0) {
+    // "Nothing that worked has changed" is not available to a run that could not read part
+    // of itself. What IS true is said instead, with the size of the hole beside it, so the
+    // sentence cannot be quoted as an all-clear by anybody who reads only this far.
+    parts.push(
+      `Nothing that COULD be compared has changed. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against} — and the ${plural(dead.length, 'journey', 'journeys')} named above ${plural(dead.length, 'is', 'are')} not among them, so a break inside ${plural(dead.length, 'it', 'them')} would look exactly like this.${reach}`,
     );
   } else if (findings.length === 0) {
     // A WHOLE JOURNEY WITH NOTHING ON THE OTHER SIDE IS NOT A PASS, and the headline is the

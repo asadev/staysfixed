@@ -829,6 +829,21 @@ export function mergeWobble(wobbles) {
  * here decides whether any difference is real. It decides one thing only — whether this run is
  * entitled to say the word "clean".
  *
+ * IT IS ASKED PER JOURNEY, NOT ONLY ONCE OVER THE WHOLE RUN, and that is the scope this rule
+ * was missing until 2026-08-31. Measured on a real Next.js site: 179 of 2849 addresses were
+ * unsteady across the run, which is nowhere near half, so the whole-run answer was "no storm"
+ * and the run exited 0 saying `ok` — while four of its twelve journeys had been unsteady at
+ * 69%, 75% and twice 100% of their own addresses. A page where EVERY address disagreed with
+ * itself was folded into a passing total by nine pages that behaved. The rule was right and
+ * the scope was wrong: applied per journey, the same one comparison catches all four. Whoever
+ * calls this owes it one call per journey; `noAnswerJourneys` below is that call.
+ *
+ * A MEASUREMENT OVER NOTHING IS ALSO NOT A MEASUREMENT. Two runs that each came back with no
+ * addresses at all agree about everything, which arithmetically is nought unsteady and nought
+ * steady, and `unstable <= steady` waved it through as calm weather. That is the same false
+ * all-clear wearing the opposite clothes — a journey with no answer in it counted towards a
+ * pass — so it is answered here rather than left to whichever caller thinks to look.
+ *
  * @param {Wobble} wobble
  * @returns {{stormy: boolean, share: number, looked: number, vanished: number, why: string}}
  */
@@ -837,6 +852,21 @@ export function wobbleStorm(wobble) {
   const looked = unstable + wobble.steady;
   const vanished = wobble.entries.filter((e) => e.kind === 'vanished').length;
   const share = looked === 0 ? 0 : unstable / looked;
+  // NOTHING WAS LOOKED AT, so there is nothing here to be steady or unsteady about. A walk
+  // that ran, came back empty, and was run again and came back empty a second time produces
+  // nought unsteady out of nought — which reads as perfect agreement to every count below
+  // and is the emptiest possible sentence to build a pass on. Said out loud instead.
+  if (wobble.measured && looked === 0) {
+    return {
+      stormy: true,
+      share: 0,
+      looked: 0,
+      vanished: 0,
+      why:
+        'The new build was run twice here and neither run found a single address to look at, so there was nothing to measure and nothing to compare. ' +
+        'Two empty walks agree with each other about everything, which is why this used to count towards a clean run. It is not a pass and not a failure — there is no answer here.',
+    };
+  }
   // MORE OF IT WOBBLED THAN HELD STILL, and that one comparison is the whole rule. There is
   // no threshold here to tune and no number to defend: half is the point past which more of
   // the comparison has been thrown away than kept, and no answer computed from what is left
@@ -864,6 +894,121 @@ export function wobbleStorm(wobble) {
     (vanished > 0 ? `, and ${vanished} address${vanished === 1 ? '' : 'es'} the first run answered were missing from the second altogether` : '') +
     '. That is not a product wobbling; that is a run that went wrong. Everything it disagreed with itself about is dropped before anything is compared, so on this run the comparison covered almost nothing. This is not a pass and not a failure — there is no answer here. Run it again on a quiet machine, and if it happens twice, something in the product or its setup does not survive being started a second time.';
   return { stormy: true, share, looked, vanished, why };
+}
+
+/**
+ * Which journeys have no answer in them, asked ONE AT A TIME.
+ *
+ * This is `wobbleStorm` with the scope it should always have had. The rule inside it — more
+ * addresses wobbled than held still — is right, and it was being asked once, of everything
+ * added together. Measured 2026-08-31 on a real Next.js site: 179 unsteady addresses out of
+ * 2849 across twelve journeys is not a storm by any reading, and underneath that total sat
+ * four journeys that were unsteady at 69%, 75% and twice 100% of their own addresses. Two
+ * whole pages where every single address disagreed with itself were folded into a passing
+ * run by the nine pages that behaved.
+ *
+ * Adding journeys together is what did it. Each journey is its own measurement — its own
+ * pages, its own two walks, its own chance of falling over — and averaging a page that told
+ * you nothing with nine that told you plenty produces a number that describes no page at
+ * all. So the wobbles come in one per journey and the answer is a list, not a share.
+ *
+ * A journey in this list is NOT a failure and NOT a pass: whatever it disagreed with itself
+ * about was dropped before it could be compared, so the quiet underneath it is the quiet of
+ * nothing having been looked at. The caller owes it a named hole in the coverage and a
+ * verdict that is not `ok`.
+ *
+ * @param {Wobble[]} wobbles   One per journey, in the order they were walked.
+ * @returns {{journey: string, why: string, looked: number, unstable: number, steady: number, share: number}[]}
+ */
+export function noAnswerJourneys(wobbles) {
+  /** @type {{journey: string, why: string, looked: number, unstable: number, steady: number, share: number}[]} */
+  const out = [];
+  for (const wobble of wobbles) {
+    // The merged record is the whole run wearing one journey's shape, and asking it here
+    // would put the very scope bug this function exists to fix straight back in.
+    if (wobble.journey === '*') continue;
+    const storm = wobbleStorm(wobble);
+    if (!storm.stormy) continue;
+    out.push({
+      journey: wobble.journey,
+      why: storm.why,
+      looked: storm.looked,
+      unstable: wobble.unstable.length,
+      steady: wobble.steady,
+      share: storm.share,
+    });
+  }
+  return out;
+}
+
+/**
+ * WHAT KIND of disagreement this was: the answers moving, or the addresses themselves coming
+ * and going between the two passes.
+ *
+ * The two are folded into one number everywhere else — `unstable` — and they are not the
+ * same news. An answer that changed is the product wobbling, which is what the measurement
+ * is for. An address that only one of the two passes ever saw is the WALK not covering the
+ * same ground twice, and it is why the run's own headline count moves.
+ *
+ * Measured 2026-08-31, three checks of one untouched Next.js site, minutes apart, nothing
+ * edited between them: 2364, 2684 and 2861 addresses looked at, and 0, 179 and 500 of them
+ * unsteady. A tool whose whole method is running one thing twice and subtracting what
+ * disagrees cannot give three answers to one question and expect to be believed. Some of
+ * that spread is the product being genuinely unsteady, which is the measurement working;
+ * the ADDRESS COUNT moving by five hundred is not the product at all. Separating the two is
+ * what lets the run say which is which instead of quoting one number that means neither.
+ *
+ * @param {Wobble} wobble
+ * @returns {{changed: number, appeared: number, vanished: number, drifted: number, bothPasses: number, steady: number, looked: number}}
+ */
+export function wobbleShape(wobble) {
+  let changed = 0;
+  let appeared = 0;
+  let vanished = 0;
+  for (const e of wobble.entries) {
+    if (e.kind === 'changed') changed += 1;
+    else if (e.kind === 'appeared') appeared += 1;
+    else vanished += 1;
+  }
+  return {
+    changed,
+    appeared,
+    vanished,
+    // The addresses that exist on one pass and not the other. This is the part of the total
+    // that is the walk rather than the product, and the part that moves between runs.
+    drifted: appeared + vanished,
+    // The addresses BOTH passes actually reached. The steadiest count this run owns, and
+    // the honest one to quote.
+    bothPasses: wobble.steady + changed,
+    steady: wobble.steady,
+    looked: wobble.steady + wobble.unstable.length,
+  };
+}
+
+/**
+ * The sentence that names the drifting count, so no run has to invent its own wording for
+ * the one number readers were quoting at each other.
+ *
+ * It is said whenever the two passes of one build did not look at the same addresses. Empty
+ * when they did, because a sentence that appears on every single run is a sentence people
+ * learn to skip, and this one has to land when it is true.
+ *
+ * @param {Wobble} wobble
+ * @returns {string}   Empty when both passes covered the same ground.
+ */
+export function populationDriftNote(wobble) {
+  if (!wobble.measured) return '';
+  const shape = wobbleShape(wobble);
+  if (shape.drifted === 0) return '';
+  const parts = [];
+  if (shape.vanished > 0) parts.push(`${shape.vanished} ${shape.vanished === 1 ? 'address' : 'addresses'} the first pass saw ${shape.vanished === 1 ? 'was' : 'were'} not there on the second`);
+  if (shape.appeared > 0) parts.push(`${shape.appeared} ${shape.appeared === 1 ? 'address' : 'addresses'} turned up only on the second`);
+  return (
+    `THE TWO PASSES DID NOT LOOK AT THE SAME ADDRESSES: ${parts.join(', and ')}. ` +
+    `That is the walk moving, not the product answering differently — ${shape.changed} ${shape.changed === 1 ? 'address' : 'addresses'} really did give two different answers. ` +
+    `So the total of ${shape.looked} addresses is not a number that will be the same on the next run of the identical build; ` +
+    `${shape.bothPasses} is the count both passes actually reached, and it is the one to quote.`
+  );
 }
 
 /**
