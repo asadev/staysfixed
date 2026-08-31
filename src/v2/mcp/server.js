@@ -219,7 +219,10 @@ export async function serveMcp(opts = {}) {
         }
         await enqueue(async () => {
           try {
-            const result = await callTool(name, args, { root, cwd, version, protocolVersion });
+            // `audience: 'agent'` is the default in tools.js and is written out anyway: it is
+            // the field that decides whose name goes on a sealed intent and on a waiver, and
+            // a record of who declared something must never rest on a default being right.
+            const result = await callTool(name, args, { root, cwd, version, protocolVersion, audience: 'agent' });
             reply(id, result);
           } catch (e) {
             // A tool that blows up is still a RESULT, not a protocol error: the

@@ -76,15 +76,113 @@ import {
 /**
  * What every tool call is handed.
  *
+ * `audience` is who is on the other end of this particular call. It is NOT a second set of
+ * answers - see THE TWO AUDIENCES below - and nothing in this file is allowed to decide a
+ * fact by it.
+ *
  * @typedef {object} ToolContext
  * @property {string} root
  * @property {string} cwd
  * @property {string} version
  * @property {string} protocolVersion
+ * @property {'agent'|'person'} [audience]  Who asked. Defaults to an agent: over MCP is what
+ *                                          this file is for, and only the command line, which
+ *                                          calls these functions directly, says otherwise.
  */
 
 /** @typedef {{type: 'text', text: string}|{type: 'image', data: string, mimeType: string}} ContentItem */
 /** @typedef {{content: ContentItem[], structuredContent?: Record<string, unknown>, isError?: boolean}} ToolResult */
+
+// ---------------------------------------------------------------------------
+// THE TWO AUDIENCES
+// ---------------------------------------------------------------------------
+
+/**
+ * The same truth, in the words the reader can act on.
+ *
+ * Every tool here assembles its answer exactly once, and that must never change: a person
+ * and an agent told different things about the same product is the precise bug this whole
+ * tool exists to catch, and shipping it inside the tool itself would be a poor joke. What
+ * genuinely differs is the handful of sentences naming a NEXT STEP, because the two readers
+ * cannot take the same one. An agent calls `staysfixed_check`. A person types
+ * `staysfixed check` and has no MCP tool at all.
+ *
+ * Measured 2026-08-31, after `coverage`, `explain`, `prove`, `waive` and `intent` were given
+ * commands of their own: `staysfixed intent "..." --touches src/total.js` printed, as its
+ * closing line, "Now run staysfixed_check." - the name of a tool the reader does not have,
+ * cannot type, and will not find in `staysfixed --help`. `explain` offered `include:
+ * ["evidence"]`, `prove` asked for `{ "revert": ["..."] }`, and `coverage` sent a person to
+ * `staysfixed_capabilities`. Four commands, each ending in an instruction addressed to
+ * somebody else.
+ *
+ * So: facts are written once, and any sentence naming a step asks this phrasebook for the
+ * words. Nothing in here may change what is true - only how it is reached. The one field
+ * that is not wording is `by`, and it is here for the same reason: it records which of these
+ * two actually made the call, and it has to agree with everything else in the reply.
+ *
+ * @typedef {object} Voice
+ * @property {'agent'|'person'} who
+ * @property {boolean} isPerson
+ * @property {string} by            What goes on the record as who did this.
+ * @property {string} check         How this reader runs a check.
+ * @property {string} capabilities  How this reader asks what the machine can do.
+ * @property {string} explainCall   A whole example call to explain one finding.
+ * @property {string} proveCall     A whole example call to prove a cause.
+ * @property {string} revertArg     Just the "what to put back" part of that call.
+ * @property {string} waiveCall     A whole example call to record one as intended.
+ * @property {string} askForEvidence
+ * @property {string} askForMachines
+ * @property {string} budgetEnds   What happens when the five run out, said to this reader.
+ */
+
+/** @type {Record<'agent'|'person', Voice>} */
+const VOICES = {
+  agent: {
+    who: 'agent',
+    isPerson: false,
+    by: 'an agent, over MCP',
+    check: 'staysfixed_check',
+    capabilities: 'staysfixed_capabilities',
+    explainCall: '{ "finding": "f-a1b2c3" }',
+    proveCall: '{ "finding": "f-a1b2c3", "revert": ["src/checkout/total.js"] }',
+    revertArg: '{ "revert": ["src/checkout/total.js"] }',
+    waiveCall: '{ "finding": "f-a1b2c3", "because": "..." }',
+    askForEvidence: 'Ask with include: ["evidence"].',
+    askForMachines: 'A person can run `staysfixed doctor --machines` to ask',
+    budgetEnds: 'before a person has to look',
+  },
+  person: {
+    who: 'person',
+    isPerson: true,
+    by: 'a person, at the command line',
+    check: 'staysfixed check',
+    capabilities: 'staysfixed doctor',
+    explainCall: 'staysfixed explain f-a1b2c3',
+    proveCall: 'staysfixed prove f-a1b2c3 --revert src/checkout/total.js',
+    revertArg: '--revert src/checkout/total.js',
+    waiveCall: 'staysfixed waive f-a1b2c3 --because "..."',
+    askForEvidence: 'Add --evidence to see it.',
+    askForMachines: 'Run `staysfixed doctor --machines` to ask',
+    // "before a person has to look" is the agent's version of this, and read by the person
+    // themselves it says nothing at all - they ARE the person, sitting right there.
+    budgetEnds: 'before this refuses and the rest have to be fixed rather than recorded',
+  },
+};
+
+/**
+ * Which of the two asked.
+ *
+ * Anything that did not say is a program: over MCP is what this file is for, and the only
+ * caller that is not speaking MCP is `askTheToolSet` in src/v2/cli.js, which says so.
+ * Defaulting the other way would put "a person, at the command line" on records sealed by
+ * an agent, which is the same untrue record in the opposite direction.
+ *
+ * @param {ToolContext} ctx
+ * @returns {Voice}
+ */
+export function voiceFor(ctx) {
+  return ctx?.audience === 'person' ? VOICES.person : VOICES.agent;
+}
 
 // ---------------------------------------------------------------------------
 // Constants that are policy, not preference
@@ -211,16 +309,21 @@ export async function loadEngine(refresh = false) {
 }
 
 /**
- * What an agent gets when it asks for something only the engine can do and the
+ * What a caller gets when it asks for something only the engine can do and the
  * engine is not there. Written as instructions to whoever is integrating,
  * because that is the only person who will ever read it.
+ *
+ * The last line names a next step, so it is the one line that has to know who is reading:
+ * `staysfixed_capabilities` is a tool a person at a terminal does not have, and `staysfixed
+ * doctor` is the same question asked in the words they can type.
  *
  * @param {Engine} engine
  * @param {string} part
  * @param {string} needs   The exact signature the missing function must have.
+ * @param {Voice} voice
  * @returns {ToolResult}
  */
-function engineMissing(engine, part, needs) {
+function engineMissing(engine, part, needs, voice) {
   const names = (/** @type {Record<string, string[]>} */ (ENGINE_PARTS)[part] ?? []).join(' or ');
   return problem(
     [
@@ -231,7 +334,7 @@ function engineMissing(engine, part, needs) {
       '',
       `It needs: ${needs}`,
       '',
-      'Everything else still works. Call staysfixed_capabilities for what this copy can do.',
+      `Everything else still works. ${voice.isPerson ? 'Run' : 'Call'} ${voice.capabilities} for what this copy can do.`,
     ].join('\n')
   );
 }
@@ -769,11 +872,20 @@ async function toolIntent(ctx, input) {
 
   const store = storeFor(ctx);
   const product = await productFor(ctx.root);
+  const voice = voiceFor(ctx);
 
   // src/v2/intent.js does the sealing, and it does more than write a file down: it
   // fingerprints the working tree at this moment, so whether the intent was written before
   // the edits or after them stops being a promise and becomes something anybody can check.
-  const intent = await sealIntent(store, { product, summary, touches, expect, by: 'an agent, over MCP' });
+  //
+  // WHO SEALED IT IS PART OF THE EVIDENCE. `by` used to be the constant string 'an agent,
+  // over MCP' whoever called, so from the day `staysfixed intent` became a command every
+  // intent a person sealed at their own terminal went on the record as an agent's - measured
+  // 2026-08-31, the first CLI run wrote exactly that into
+  // .staysfixed/v2/intents/<product>.json. This record is what a waiver is judged against
+  // months later, by somebody deciding whether a claim of "I meant that" is worth anything,
+  // and a record naming the wrong actor is a record nobody can use.
+  const intent = await sealIntent(store, { product, summary, touches, expect, by: voice.by });
 
   // Sealing a new intent does NOT hand out a fresh five. The budget is counted
   // against the reference, precisely so an agent that has spent its waivers
@@ -792,8 +904,8 @@ async function toolIntent(ctx, input) {
           expect.length ? `Expecting to see: ${expect.join('; ')}.` : '',
           intent.ordering,
           '',
-          `You may waive at most ${WAIVER_BUDGET} differences before a person has to look, and ${spent} of those are already spent since the last time a build shipped. Sealing another intent does not give you more, and you can only waive a difference that falls inside what you just named.`,
-          'Now run staysfixed_check.',
+          `You may waive at most ${WAIVER_BUDGET} differences ${voice.budgetEnds}, and ${spent} of those are already spent since the last time a build shipped. Sealing another intent does not give you more, and you can only waive a difference that falls inside what you just named.`,
+          `Now run ${voice.check}.`,
         ]
           .filter(Boolean)
           .join('\n'),
@@ -815,7 +927,7 @@ async function toolCheck(ctx, input) {
   const engine = await loadEngine();
   const run = engine.parts.check;
   if (!run) {
-    return engineMissing(engine, 'check', 'check({cwd, configFile, against, paired, journeys, only}) returning a CheckResult - the shape at the top of src/v2/cli.js.');
+    return engineMissing(engine, 'check', 'check({cwd, configFile, against, paired, journeys, only}) returning a CheckResult - the shape at the top of src/v2/cli.js.', voiceFor(ctx));
   }
 
   const store = storeFor(ctx);
@@ -1323,11 +1435,12 @@ function renderFinding(f) {
  * @returns {Promise<ToolResult>}
  */
 async function toolExplain(ctx, input) {
+  const voice = voiceFor(ctx);
   const id = text(input.finding);
-  if (!id) return problem('Say which finding to explain, e.g. { "finding": "f-a1b2c3" }. The ids come from staysfixed_check.');
+  if (!id) return problem(`Say which finding to explain, e.g. ${voice.explainCall}. The ids come from ${voice.check}.`);
 
   const last = await readCheckRecord(storeFor(ctx));
-  if (!last) return problem('No check has run in this copy yet, so there is nothing to explain. Run staysfixed_check first.');
+  if (!last) return problem(`No check has run in this copy yet, so there is nothing to explain. Run ${voice.check} first.`);
   const f = last.findings.find((x) => x.id === id);
   if (!f) {
     const ids = last.findings.slice(0, 12).map((x) => x.id);
@@ -1397,7 +1510,7 @@ async function toolExplain(ctx, input) {
     }
   } else if (f.evidence) {
     out.push('');
-    out.push('Evidence was kept and not sent. Ask with include: ["evidence"].');
+    out.push(`Evidence was kept and not shown. ${voice.askForEvidence}`);
   }
 
   if (deep?.error) {
@@ -1420,7 +1533,15 @@ async function toolExplain(ctx, input) {
       content.push({ type: 'image', data: png.toString('base64'), mimeType: 'image/png' });
     }
   } else if (pictures.length) {
-    content.push({ type: 'text', text: `${pictures.length} picture(s) were kept as evidence and not sent. Ask with include: ["pixels"] if a picture would settle it.` });
+    // A terminal cannot be handed a PNG, so "ask with include: [\"pixels\"]" is not an
+    // instruction a person can carry out - and telling them a picture exists without saying
+    // WHERE leaves them worse off than saying nothing. They get the paths and open them.
+    content.push({
+      type: 'text',
+      text: voice.isPerson
+        ? `${pictures.length} picture(s) were kept as evidence: ${pictures.slice(0, MAX_IMAGES).join(', ')}${pictures.length > MAX_IMAGES ? `, and ${pictures.length - MAX_IMAGES} more` : ''}. Open them if a picture would settle it.`
+        : `${pictures.length} picture(s) were kept as evidence and not sent. Ask with include: ["pixels"] if a picture would settle it.`,
+    });
   }
 
   return { content };
@@ -1449,24 +1570,26 @@ function picturesFrom(f, deep) {
  * @returns {Promise<ToolResult>}
  */
 async function toolProve(ctx, input) {
+  const voice = voiceFor(ctx);
   const engine = await loadEngine();
   const run = engine.parts.prove;
   if (!run) {
     return engineMissing(
       engine,
       'prove',
-      'prove({cwd, configFile, finding, revert}) returning {gone: boolean, detail?: string}. src/v2/cause.js already has proveCause(), but it takes an engine-internal finding and a loaded project, which this surface does not have - a small facade in src/v2/check.js is all that is needed.'
+      'prove({cwd, configFile, finding, revert}) returning {gone: boolean, detail?: string}. src/v2/cause.js already has proveCause(), but it takes an engine-internal finding and a loaded project, which this surface does not have - a small facade in src/v2/check.js is all that is needed.',
+      voice
     );
   }
 
   const id = text(input.finding);
   const revert = stringList(input.revert);
-  if (!id) return problem('Say which finding you are trying to explain, e.g. { "finding": "f-a1b2c3", "revert": ["src/total.js"] }.');
-  if (!revert) return problem('Name what to put back to the reference for one run, e.g. { "revert": ["src/checkout/total.js"] }. Without that there is no claim to test.');
+  if (!id) return problem(`Say which finding you are trying to explain, e.g. ${voice.proveCall}.`);
+  if (!revert) return problem(`Name what to put back to the reference for one run, e.g. ${voice.revertArg}. Without that there is no claim to test.`);
 
   const last = await readCheckRecord(storeFor(ctx));
   const f = last?.findings.find((x) => x.id === id);
-  if (!f) return problem(`The last check has no finding called "${id}". Run staysfixed_check first, then prove one of the ids it gives you.`);
+  if (!f) return problem(`The last check has no finding called "${id}". Run ${voice.check} first, then prove one of the ids it gives you.`);
 
   /** @type {any} */
   const result = (await run({ cwd: ctx.root, finding: id, revert })) ?? {};
@@ -1507,14 +1630,15 @@ async function toolProve(ctx, input) {
  * @returns {Promise<ToolResult>}
  */
 async function toolWaive(ctx, input) {
+  const voice = voiceFor(ctx);
   const id = text(input.finding);
   const because = text(input.because);
-  if (!id) return problem('Say which finding, e.g. { "finding": "f-a1b2c3", "because": "..." }.');
+  if (!id) return problem(`Say which finding, e.g. ${voice.waiveCall}.`);
   if (!because) return problem('Say why this difference is what you meant, in one plain sentence. A waiver with no reason is worth nothing to whoever reads it later.');
 
   const store = storeFor(ctx);
   const last = await readCheckRecord(store);
-  if (!last) return problem('No check has run in this copy yet, so there is no difference to waive. Run staysfixed_check first.');
+  if (!last) return problem(`No check has run in this copy yet, so there is no difference to waive. Run ${voice.check} first.`);
   const f = last.findings.find((x) => x.id === id);
   if (!f) return problem(`The last check has no finding called "${id}". You can only waive something this tool actually reported.`);
 
@@ -1530,7 +1654,13 @@ async function toolWaive(ctx, input) {
     finding: f,
     why: because,
     check: { at: last.at, runId: last.result?.runId },
-    by: 'an agent, over MCP',
+    // Same reason as the intent above: from the day `staysfixed waive` became a command,
+    // a constant here would have put an agent's name on every waiver a person recorded at
+    // their own terminal, and a waiver is read months later by somebody weighing exactly
+    // that. `audience` rides along so the sealed-class refusal is worded at whoever is
+    // actually reading it - see sayRefusal in src/v2/sealed.js.
+    by: voice.by,
+    audience: voice.who,
   });
 
   // A refusal is the tool working, not the tool being difficult, and the wording is the
@@ -1577,6 +1707,7 @@ async function toolWaive(ctx, input) {
  * @returns {Promise<ToolResult>}
  */
 async function toolCoverage(ctx, input) {
+  const voice = voiceFor(ctx);
   const engine = await loadEngine();
   const last = await readCheckRecord(storeFor(ctx));
 
@@ -1744,13 +1875,13 @@ async function toolCoverage(ctx, input) {
   } else if (notDialled.length) {
     out.push('');
     out.push(
-      `${notDialled.length} ${notDialled.length === 1 ? 'machine is named in your ssh config and was' : 'machines are named in your ssh config and were'} not dialled, so nothing above rests on having asked ${notDialled.length === 1 ? 'it' : 'them'}: ${notDialled.map((/** @type {any} */ h) => h.name).join(', ')}. A person can run \`staysfixed doctor --machines\` to ask; this tool does not connect to anybody's machines on its own.`
+      `${notDialled.length} ${notDialled.length === 1 ? 'machine is named in your ssh config and was' : 'machines are named in your ssh config and were'} not dialled, so nothing above rests on having asked ${notDialled.length === 1 ? 'it' : 'them'}: ${notDialled.map((/** @type {any} */ h) => h.name).join(', ')}. ${voice.askForMachines}; this tool does not connect to anybody's machines on its own.`
     );
   }
 
   if (partial.length) {
     out.push('');
-    out.push(`Reachable, but not everything on them can be watched: ${partial.map((/** @type {any} */ s) => s.name).join(', ')}. staysfixed_capabilities says what each limit is.`);
+    out.push(`Reachable, but not everything on them can be watched: ${partial.map((/** @type {any} */ s) => s.name).join(', ')}. ${voice.capabilities} says what each limit is.`);
   }
 
   if (Array.isArray(caps?.limits) && caps.limits.length) {

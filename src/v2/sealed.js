@@ -299,11 +299,21 @@ export function classify(finding, opts = {}) {
  * The refusal, written out for whoever reads it — an agent that has just been told no, or a
  * person reading the closing summary.
  *
+ * The verdict is identical either way; only the last line moves. It used to read "No agent
+ * can wave this through … put it in front of a person", which is exactly right for an agent
+ * and says nothing to the person who has just typed `staysfixed waive` themselves — they ARE
+ * the person it points at, and the sentence reads as a rule about somebody else with an
+ * obvious loophole. The rule has no loophole: a sealed class is refused to everybody, and
+ * from 2026-08-31, when `waive` became a command, it has had to say so to both readers.
+ *
  * @param {SealedVerdict} verdict
  * @param {Finding} [finding]
+ * @param {'agent'|'person'} [audience]  Defaults to an agent: this file is called from the
+ *                                       gate, and the gate is reached over MCP unless the
+ *                                       command line says otherwise.
  * @returns {string}
  */
-export function sayRefusal(verdict, finding) {
+export function sayRefusal(verdict, finding, audience) {
   const lines = [`Refused. ${verdict.why}`];
   if (finding?.title) lines.push(`  ${trim(finding.title, 200)}`);
   if (verdict.matched.length > 0) {
@@ -311,7 +321,9 @@ export function sayRefusal(verdict, finding) {
   }
   lines.push(
     '',
-    'No agent can wave this through, whatever the reason, and asking again in different words will get the same answer. Fix it, or put it in front of a person and say plainly what changed.'
+    audience === 'person'
+      ? 'Nothing can wave this through — not you here, and not an agent — and asking again in different words will get the same answer. Fix it, or take it to whoever owns this and say plainly what changed.'
+      : 'No agent can wave this through, whatever the reason, and asking again in different words will get the same answer. Fix it, or put it in front of a person and say plainly what changed.'
   );
   return lines.join('\n');
 }

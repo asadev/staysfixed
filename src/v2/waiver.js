@@ -174,8 +174,15 @@ const KEEP_EXPIRED = 50;
 /**
  * Try to record a difference as intended.
  *
+ * `audience` changes no rule and no verdict — every gate below runs identically whoever
+ * asked — and reaches exactly one sentence: the sealed-class refusal, which used to open
+ * "No agent can wave this through". Read by a person who has just typed `staysfixed waive`
+ * that is an answer about somebody else, and it invites the obvious follow-up: fine, but how
+ * do I? The rule is that NOBODY waives a sealed class, and it has to say so to whoever is
+ * reading. Measured 2026-08-31, when `waive` first became a command a person could type.
+ *
  * @param {Store} store
- * @param {{product: string, finding: Finding, why: string, intentId?: string, check?: CheckStamp, guards?: string[], by?: string}} what
+ * @param {{product: string, finding: Finding, why: string, intentId?: string, check?: CheckStamp, guards?: string[], by?: string, audience?: 'agent'|'person'}} what
  * @returns {Promise<WaiverDecision>}
  */
 export async function waive(store, what) {
@@ -196,7 +203,7 @@ export async function waive(store, what) {
   // anything else so that no amount of good paperwork can get a look-in first.
   const sealed = classify(finding, { guards: what.guards ?? [] });
   if (sealed) {
-    return { ok: false, gate: 'sealed', say: sayRefusal(sealed, finding), sealed };
+    return { ok: false, gate: 'sealed', say: sayRefusal(sealed, finding, what.audience), sealed };
   }
 
   const fingerprint = fingerprintFinding(finding);

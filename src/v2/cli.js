@@ -148,7 +148,7 @@ export const V2_COMMANDS = {
     summary: 'Prove nothing that already worked has changed. This is the one you run.',
     usage: 'staysfixed check [--against <ref>] [--paired] [--journeys <source>] [--watch] [--json]',
     describe:
-      'Runs your product through the same steps twice, compares it against the build you\nwere last happy with, subtracts anything the product disagrees with itself about,\nand reports only the differences that are left. Nothing that was already the same\nis mentioned at all — that is the point, and it is what keeps the answer short\nenough for an agent to read every word of it.\n\nSaying what you meant to change, and marking a difference as intended, are not\ndone from here. They need the files you expect to touch, and they are checked\nand counted, so they live where an agent works: the staysfixed_intent and\nstaysfixed_waive tools on the MCP server.\n\nWith --watch it opens a window beside what is being checked and draws the run as\nit happens. Nothing this tool opens is allowed to keep taking your screen: it may\ncome up once, and from the moment you pick something else it stays behind you.\n\nThe version 1 picture check is still here: add --pictures or --guards and nothing\nabout your old command changes.',
+      'Runs your product through the same steps twice, compares it against the build you\nwere last happy with, subtracts anything the product disagrees with itself about,\nand reports only the differences that are left. Nothing that was already the same\nis mentioned at all — that is the point, and it is what keeps the answer short\nenough for an agent to read every word of it.\n\nSaying what you meant to change, and marking a difference as intended, have\ncommands of their own: `staysfixed intent` before you start, and `staysfixed\nwaive` afterwards. They are checked and counted — an intent has to name the\nfiles, and it has to be sealed before the run, or nothing can be waived.\n\nWith --watch it opens a window beside what is being checked and draws the run as\nit happens. Nothing this tool opens is allowed to keep taking your screen: it may\ncome up once, and from the moment you pick something else it stays behind you.\n\nThe version 1 picture check is still here: add --pictures or --guards and nothing\nabout your old command changes.',
     options: [...V2_OPTIONS, ...WATCH_OPTIONS, ...V1_OPTIONS],
     examples: [
       'staysfixed check',
@@ -204,7 +204,7 @@ export const V2_COMMANDS = {
     summary: 'What the last check did NOT look at. Read it before you call anything safe.',
     usage: 'staysfixed coverage [--json]',
     describe:
-      'A clean check only covers what was walked, and this is the other half of that\nsentence: the ways into your product no journey has ever opened, the surfaces this\nmachine cannot reach at all, anything refused because doing it twice would not have\nbeen reversible, and the few things this tool can never see on any machine.\n\nIt runs nothing and changes nothing — it reads the last check and this machine — so\nit answers instantly. It reports; it neither passes nor fails.\n\nThis is the same answer staysfixed_coverage gives an agent, from the same code.',
+      'A clean check only covers what was walked, and this is the other half of that\nsentence: the ways into your product no journey has ever opened, the surfaces this\nmachine cannot reach at all, anything refused because doing it twice would not have\nbeen reversible, and the few things this tool can never see on any machine.\n\nIt runs nothing and changes nothing — it reads the last check and this machine — so\nit answers instantly. It reports; it neither passes nor fails.\n\nAn agent asking over MCP gets this same answer, from the same code.',
     options: [['--json', 'The whole answer as one JSON object, and no prose. For scripts and agents.']],
     examples: ['staysfixed coverage', 'staysfixed coverage --json'],
     spec: { booleans: ['json'] },
@@ -332,6 +332,13 @@ async function askTheToolSet(ctx, tool, args) {
     cwd: ctx.cwd,
     version: ctx.version,
     protocolVersion: NOT_SPEAKING_MCP,
+    // Who is reading. The answer is assembled once, by the same code the agent calls — that
+    // is the whole point of this function — but the sentences naming a NEXT step have to be
+    // in words this reader can use. Without this line `staysfixed intent` signed off with
+    // "Now run staysfixed_check.", `explain` offered `include: ["evidence"]`, and every
+    // intent sealed at a terminal went on the record as "an agent, over MCP". Measured
+    // 2026-08-31, the day after these five commands existed at all.
+    audience: 'person',
   });
 
   const text = (result.content ?? [])
