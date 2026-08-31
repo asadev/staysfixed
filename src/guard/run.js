@@ -16,7 +16,7 @@
  * this one is not" is most of the value of running it at all.
  */
 
-import { makeGuardApi, ExpectationFailed } from './api.js';
+import { makeGuardApi, ExpectationFailed, GuardAbandoned } from './api.js';
 import { resetWindow } from '../drive/launch.js';
 import { emitEvent } from '../core/events.js';
 
@@ -165,10 +165,13 @@ export async function runGuards(project, app, guards, opts = {}) {
 
     if (assertedNothing) {
       result.assertedNothing = true;
+      // The story of the bug is not repeated in here. It travels on `because`, and the console,
+      // the HTML report, the MCP answer and the live panel each print it themselves — so
+      // putting it in the message too printed it twice on one screen.
       result.message =
         `This guard checked nothing. Its \`run()\` finished without asking a single question, so it cannot fail ` +
         `and it is not protecting anything — it would report "still holds" every day for ever. ` +
-        `Give it at least one \`expect(...)\`. ${guard.because ? `What it is meant to protect: ${guard.because}` : ''}`.trim();
+        `Give it at least one \`expect(...)\`.`;
     } else if (outcome.timedOut) {
       // A third thing wearing the same status, for the same reason as the second one.
       // Measured on 2026-08-31 against a healthy shop with three guards — one genuinely broken,
@@ -194,7 +197,11 @@ export async function runGuards(project, app, guards, opts = {}) {
       if (attempts > 1) result.retriedToPass = true;
     } else {
       if (outcome.failedAt) result.failedAt = outcome.failedAt;
-      result.message = withStory(outcome.message ?? 'This guard failed.', guard.because);
+      // Said once. The story of the original bug used to be appended here as well, and every
+      // renderer prints `because` on its own line underneath — so a failing guard showed the
+      // same sentence twice, with a blank line in the middle of the message that broke the
+      // one-line-per-guard layout and the results table under it. Measured 2026-08-31.
+      result.message = outcome.message ?? 'This guard failed.';
     }
 
     results.push(result);
@@ -242,6 +249,11 @@ function emitGuardDone(events, result) {
     message: result.message,
     failedAt: result.failedAt,
     because: result.because,
+    // Three different things wear the status 'failed', and a watcher that only sees the
+    // status calls all three "broken again". The result knows which it was; until this went
+    // out with it, only the terminal did.
+    timedOut: result.timedOut,
+    assertedNothing: result.assertedNothing,
     // Everything this guard actually asserted, in its own words and its own
     // order — so a listener that arrived late, or one that only keeps the
     // verdicts, still has the working.
@@ -265,11 +277,29 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
   let timer;
 
   /**
+   * Losing the race below does not stop the loser, so this is what does.
+   *
+   * Measured on 2026-08-31: a guard with `timeoutMs: 200` whose body ticked every 25
+   * milliseconds had written 7 lines to a file by the time the run reported it, and 26 half
+   * a second later. It was still clicking, still reading, still holding the page — behind a
+   * run that had already printed its verdict and started the guard after it. That is how one
+   * slow guard makes the next three wobble, and the wobble is blamed on the product.
+   *
+   * A promise cannot be taken back in JavaScript. What can be done is shut every door the
+   * guard reaches the app through: from here on `app.open`, `app.click`, `app.expect`,
+   * `app.run`, `app.read` and everything on `app.page` refuse, so the body unwinds at its
+   * very next step, and a shell command it started is killed rather than left running.
+   */
+  const givenUp = new AbortController();
+
+  /**
    * @param {import('../types.js').CheckStep} step
    * @returns {void}
    */
   const tell = (step) => {
-    if (!onStep) return;
+    // Nothing is said on behalf of a guard the run has already reported. A step arriving
+    // after the verdict reads, to anything watching, as a guard that is still going.
+    if (!onStep || givenUp.signal.aborted) return;
     try {
       onStep(step);
     } catch {
@@ -312,10 +342,20 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
         });
 
         clearConsole(app);
-        await guard.run(makeGuardApi(app.page, project, onStep ? { onStep } : {}));
+        // The clock can run out during the clean start, on a page that will not load. Starting
+        // a body the run has already given up on would put a second guard on the same page.
+        if (givenUp.signal.aborted) {
+          throw new GuardAbandoned('The run gave up on this guard before its body ever started.');
+        }
+        await guard.run(
+          makeGuardApi(app.page, project, onStep ? { onStep, signal: givenUp.signal } : { signal: givenUp.signal }),
+        );
       })(),
       new Promise((_resolve, reject) => {
         timer = setTimeout(() => {
+          // Given up on FIRST, then reported. The other way round leaves a gap in which the
+          // run has moved on and the guard is still driving the app.
+          givenUp.abort();
           reject(new TookTooLong(`'${guard.name}' did not finish within ${humanSeconds(timeoutMs)}.`));
         }, timeoutMs);
       }),
@@ -331,7 +371,7 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
     // Out of time is its own answer, and it is not "no". The guard was still going when the
     // clock stopped, so all anyone knows is that nobody asked it anything it managed to
     // finish. Said in those words rather than as a returned bug.
-    if (error instanceof TookTooLong) {
+    if (error instanceof TookTooLong || error instanceof GuardAbandoned) {
       return {
         ok: false,
         timedOut: true,
@@ -339,8 +379,11 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
           `This guard ran out of time after ${humanSeconds(timeoutMs)} and never gave an answer, so nothing ` +
           `here says the bug is back — only that the guard could not be asked. Either it genuinely needs ` +
           `longer than its own \`timeoutMs\`, or it is waiting for something that never arrives. ` +
-          `Its \`run()\` was left going when the clock stopped, so anything odd in the guards after it ` +
-          `may be this one still moving around.${consoleNote(app)}`,
+          // Precisely what was done about it, and no more. The doors are shut, which is the
+          // only stopping there is; a sleep or a request the guard is sitting inside still has
+          // to finish by itself, and claiming otherwise would be its own small lie.
+          `Its \`run()\` has been cut off — every step it takes through \`app\` from here refuses — so it ` +
+          `cannot go on driving the app behind the rest of the run.${consoleNote(app)}`,
       };
     }
     const raw = error instanceof Error ? error.message : String(error);
@@ -349,6 +392,11 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
     // The losing side of the race keeps running otherwise, and a stray timer
     // holds the process open long after the run is reported.
     if (timer) clearTimeout(timer);
+    // One attempt owns the app only while it is being awaited. Whatever is still in flight
+    // when this returns — a timed-out body, a step a guard started and never waited for — is
+    // given up on here, so it cannot touch the app that the next guard, or the next attempt
+    // at this one, is about to use.
+    givenUp.abort();
   }
 
   return { ok: true };
@@ -497,19 +545,6 @@ function consoleNote(app) {
   const first = String(errors[0]).split('\n')[0].slice(0, 200);
   const rest = errors.length === 1 ? '' : ` (and ${errors.length - 1} more)`;
   return `\nThe page also logged an error while this guard ran: ${first}${rest}`;
-}
-
-/**
- * The story of the original bug is the single most useful thing to print when a
- * guard fails — it says whether the failure matters.
- *
- * @param {string} message
- * @param {string|undefined} because
- * @returns {string}
- */
-function withStory(message, because) {
-  if (typeof because !== 'string' || because.trim() === '') return message;
-  return `${message}\n\nWhy this guard exists: ${because.trim()}`;
 }
 
 /**

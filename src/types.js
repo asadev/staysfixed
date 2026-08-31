@@ -501,6 +501,11 @@ export {};
  * @property {string} [message]
  * @property {string} [failedAt]              The plain-language expectation that failed.
  * @property {string} [because]               Why a guard exists.
+ * @property {boolean} [timedOut]             A guard whose clock ran out. It is reported with the status
+ *                                          'failed' because a question nobody answered must never count
+ *                                          as a pass — but it is not a bug coming back, and anything
+ *                                          drawing this stream has to be able to tell the two apart.
+ * @property {boolean} [assertedNothing]      A guard that finished without asking a single question.
  * @property {string} [thumbnail]             A small JPEG as a data: URI — an instant preview, shown
  *                                          while the real file is still being written.
  * @property {string} [shotFile]              file:// URL of the FULL-RESOLUTION picture just taken.

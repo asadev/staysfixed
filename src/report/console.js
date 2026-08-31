@@ -115,6 +115,63 @@ function shorten(s, max) {
 }
 
 /**
+ * What a guard's result actually says, in one word.
+ *
+ * Four different things wear the status 'failed' or 'skipped', and every renderer used to
+ * decide for itself which was which — the terminal line, the verdict sentence, the results
+ * table and the HTML report, four times, differently. That is how "1 guard failed — a bug
+ * that was already fixed is back" ended up printed on 2026-08-31 over a healthy tree, for a
+ * guard whose clock had simply run out. It is decided once here now, and everything reads it.
+ *
+ *  - `back`       — the guard asked its question and the answer was no. The bug is back.
+ *  - `unanswered` — nobody got an answer: it ran out of time, or it asserted nothing at all.
+ *                   Not a pass, and not a returned bug either.
+ *  - `left out`   — marked skip. Never ran.
+ *  - `held`       — asked, and the answer was yes.
+ *
+ * Anything unrecognised counts as `unanswered`, never as `held`: the one thing that must
+ * never happen here is a result nobody understood being read as a clean bill of health.
+ *
+ * @param {import('../types.js').GuardResult} guard
+ * @returns {'held'|'back'|'unanswered'|'left out'}
+ */
+export function guardVerdict(guard) {
+  const g = /** @type {any} */ (guard ?? {});
+  if (g.status === 'passed') return 'held';
+  if (g.status === 'skipped') return 'left out';
+  if (g.timedOut === true || g.assertedNothing === true) return 'unanswered';
+  if (g.status === 'failed') return 'back';
+  return 'unanswered';
+}
+
+/**
+ * The one short phrase a guard gets in the results table.
+ *
+ * The table is built of rows, and a message with a newline in it or four sentences of advice
+ * lands in the next column and takes the table apart — the same lesson `plainly()` in
+ * src/guard/run.js learned the hard way. The full message is printed on the guard's own line
+ * above; this is the scannable version.
+ *
+ * @param {import('../types.js').GuardResult} g
+ * @returns {string}
+ */
+function guardOutcome(g) {
+  const any = /** @type {any} */ (g);
+  switch (guardVerdict(g)) {
+    case 'held':
+      return 'still holds';
+    case 'left out':
+      return 'left out on purpose';
+    case 'unanswered':
+      if (any.timedOut === true) return 'ran out of time — nothing was proved either way';
+      if (any.assertedNothing === true) return 'checks nothing, so it is protecting nothing';
+      return shorten(g.message || 'gave no answer', 90);
+    default:
+      return g.failedAt ? `expected: ${g.failedAt}` : shorten(g.message || 'this one is broken again', 90);
+  }
+}
+
+/**
  * The counts every verdict is built from. Taken from the results themselves
  * rather than `totals`, so the sentence can never disagree with the list above it.
  * @param {import('../types.js').RunSummary} run
@@ -130,11 +187,18 @@ function tally(run) {
     missing: pictures.filter((p) => p.status === 'missing').length,
     broken: pictures.filter((p) => p.status === 'failed').length,
     wobbled: pictures.filter((p) => p.status === 'flaky').length,
-    // Two different things wear the same status, and calling both of them "a bug is back"
+    // Three different things wear the same status, and calling all of them "a bug is back"
     // sends somebody hunting a regression that never happened. A guard that asked no
-    // question at all has not caught anything; it has admitted it cannot.
-    guardsFailed: guards.filter((g) => g.status === 'failed' && !(/** @type {any} */ (g).assertedNothing)).length,
+    // question at all has not caught anything; nor has one whose clock ran out.
+    guardsFailed: guards.filter((g) => guardVerdict(g) === 'back').length,
     guardsEmpty: guards.filter((g) => /** @type {any} */ (g).assertedNothing === true).length,
+    guardsTimedOut: guards.filter((g) => guardVerdict(g) === 'unanswered' && /** @type {any} */ (g).timedOut === true).length,
+    // How much this run actually looked at. A run that skipped everything it had, or had
+    // nothing to begin with, proves nothing — and the sentence for "nothing was wrong" and
+    // the sentence for "nothing was checked" must never be the same sentence.
+    looked:
+      pictures.filter((p) => p.status !== 'skipped').length +
+      guards.filter((g) => g.status !== 'skipped').length,
   };
 }
 
@@ -163,6 +227,10 @@ export function verdictFor(run) {
   }
   if (t.guardsEmpty === 1) parts.push({ n: 1, text: '1 guard checks nothing, so it is not protecting anything.' });
   else if (t.guardsEmpty > 1) parts.push({ n: t.guardsEmpty, text: `${countText(t.guardsEmpty)} guards check nothing, so they are not protecting anything.` });
+  // Out of time is not an answer of no. Said in its own words, or a healthy tree gets told a
+  // bug is back — measured 2026-08-31 on a shop where one guard simply slept past its limit.
+  if (t.guardsTimedOut === 1) parts.push({ n: 1, text: '1 guard ran out of time, so nobody knows whether that bug is back.' });
+  else if (t.guardsTimedOut > 1) parts.push({ n: t.guardsTimedOut, text: `${countText(t.guardsTimedOut)} guards ran out of time, so nobody knows whether those bugs are back.` });
   if (t.changed === 1) parts.push({ n: 1, text: '1 thing changed. Look at it before you ship.' });
   else if (t.changed > 1) parts.push({ n: t.changed, text: `${countText(t.changed)} things changed. Look at them before you ship.` });
   if (t.fresh === 1) parts.push({ n: 1, text: '1 new screen is waiting for a person to approve it.' });
@@ -174,12 +242,22 @@ export function verdictFor(run) {
   if (parts.length === 0 && t.wobbled > 0) {
     parts.push({ n: t.wobbled, text: `${countText(t.wobbled)} ${plural(t.wobbled, 'check', 'checks')} could not make up ${plural(t.wobbled, 'its', 'their')} mind.` });
   }
+  // "Everything that worked still works" over a run that looked at nothing is the same
+  // false all-clear as any other, and the friendliest-sounding one this tool can print.
+  if (parts.length === 0 && t.looked === 0) {
+    return t.pictures + t.guards === 0
+      ? 'Nothing was checked, so nothing is proved — this project has no screens and no guards yet.'
+      : 'Nothing was checked, so nothing is proved — every screen and guard here was left out.';
+  }
   if (parts.length === 0) return 'Everything that worked still works.';
   // Two sentences is as much as anyone reads standing up; the table underneath
   // still names every single one, so nothing is hidden by shortening this.
   if (parts.length <= 2) return parts.map((p) => p.text).join(' ');
   const rest = parts.slice(2).reduce((sum, p) => sum + p.n, 0);
-  return `${parts[0].text} ${parts[1].text} And ${countText(rest)} other ${plural(rest, 'screen needs', 'screens need')} a look.`;
+  // "And 1 other screen needs a look" — said on 2026-08-31 about a run of five guards and no
+  // screens at all. Whatever gets collapsed in here can be either, so it is called what this
+  // tool calls both of them everywhere else. The table underneath still names every one.
+  return `${parts[0].text} ${parts[1].text} And ${countText(rest)} other ${plural(rest, 'check needs', 'checks need')} a look.`;
 }
 
 /**
@@ -188,10 +266,14 @@ export function verdictFor(run) {
  */
 export function allClear(run) {
   const t = tally(run);
-  // `guardsEmpty` counts too. Splitting it out of `guardsFailed` was so the SENTENCE could
-  // tell a returned bug from a guard that asks nothing — not so that one of them could
-  // quietly become a pass.
-  return t.changed + t.fresh + t.missing + t.broken + t.wobbled + t.guardsFailed + t.guardsEmpty === 0;
+  // A run that looked at nothing is not a clean run. It is a run.
+  if (t.looked === 0) return false;
+  // `guardsEmpty` and `guardsTimedOut` count too. Splitting them out of `guardsFailed` was so
+  // the SENTENCE could tell a returned bug from a question nobody answered — not so that one
+  // of them could quietly become a pass. A stuck guard is the quietest way there is to go green.
+  return (
+    t.changed + t.fresh + t.missing + t.broken + t.wobbled + t.guardsFailed + t.guardsEmpty + t.guardsTimedOut === 0
+  );
 }
 
 /**
@@ -283,24 +365,39 @@ export function printPictureResult(r) {
 }
 
 /**
- * One line per guard; a failure also tells the story of the bug it watches.
+ * One line per guard; a returned bug also tells the story of the bug it watches.
+ *
+ * The story is deliberately NOT printed under a guard that ran out of time. It is printed to
+ * say whether a failure matters — and a timeout says nothing about the bug at all, so
+ * "why this guard exists: checking out twice used to leave the old basket behind" under a red
+ * line is read as that bug being back. Which is the thing this whole file is trying to stop.
+ *
  * @param {import('../types.js').GuardResult} r
  * @returns {void}
  */
 export function printGuardResult(r) {
   const time = paint.grey(duration(r.durationMs ?? 0));
   const name = r.name.padEnd(NAME_WIDTH);
-  if (r.status === 'passed') {
+  const verdict = guardVerdict(r);
+  if (verdict === 'held') {
     say(`${paint.green(sym(mark.pass))} ${name} ${paint.grey('still holds')} ${time}`);
     return;
   }
-  if (r.status === 'skipped') {
+  if (verdict === 'left out') {
     say(`${paint.grey(sym(mark.info))} ${paint.grey(`${name} left out on purpose`)}`);
     return;
   }
-  say(`${paint.red(sym(mark.fail))} ${paint.red(`${name} ${r.message || 'this one is broken again'}`)} ${time}`);
+  // A question nobody answered is not painted like a bug coming back. It still keeps the run
+  // out of the green — `allClear` counts it — but the colour a person scans for should not
+  // say "regression" about something the run has no opinion on.
+  const shout = verdict === 'back' ? paint.red : paint.yellow;
+  const symbol = verdict === 'back' ? mark.fail : mark.warn;
+  say(`${shout(sym(symbol))} ${shout(`${name} ${r.message || 'this one is broken again'}`)} ${time}`);
   if (r.failedAt) say(paint.red(`    expected: ${r.failedAt}`));
-  if (r.because) say(paint.grey(`    why this guard exists: ${r.because}`));
+  if (r.because && verdict !== 'unanswered') say(paint.grey(`    why this guard exists: ${r.because}`));
+  else if (r.because && /** @type {any} */ (r).assertedNothing === true) {
+    say(paint.grey(`    what it was meant to protect: ${r.because}`));
+  }
   if (r.file) detail(`    ${shortPath(r.file)}`);
 }
 
@@ -342,8 +439,7 @@ export function printRunSummary(run, project, opts = {}) {
   }
   for (const g of guards) {
     if (g.status === 'passed' || g.status === 'skipped') continue;
-    const what = g.failedAt ? `expected: ${g.failedAt}` : g.message || 'this one is broken again';
-    rows.push([g.name, what, paint.grey(g.file ? shortPath(g.file) : '')]);
+    rows.push([g.name, guardOutcome(g), paint.grey(g.file ? shortPath(g.file) : '')]);
   }
   if (rows.length) {
     heading('What is not right');

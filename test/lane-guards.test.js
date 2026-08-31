@@ -143,7 +143,13 @@ describe('a guard that really did fail', () => {
     assert.notEqual(result.timedOut, true, 'a real failure must never be excused as a timeout');
     assert.match(result.message, /This should still be true, and it is not/);
     assert.equal(result.failedAt, 'the delivery note is on the page');
-    assert.match(result.message, /Why this guard exists/);
+    // The story used to be checked for inside `message`. It is checked for on the result
+    // instead now, because putting it in the message as well printed it twice on one screen:
+    // every renderer prints `because` on its own line underneath, and the blank line the
+    // message carried also put a newline inside a value that is a cell in the results table.
+    // What matters is that the story is still there and still reaches a person — which
+    // test/guard-story-once.test.js holds in place on the rendered output itself.
+    assert.equal(result.because, broken.because, 'the story of the bug must still travel with it');
   });
 
   test('a guard that asked and got the right answer is still a pass', async () => {

@@ -31,6 +31,26 @@ export class ExpectationFailed extends Error {
   }
 }
 
+/**
+ * The run has given up on this guard, and the guard is still going.
+ *
+ * Every door in the object a guard is handed throws this once the attempt that opened it has
+ * been abandoned. Measured on 2026-08-31: a guard with `timeoutMs: 200`, ticking every 25
+ * milliseconds, had written 7 lines to a file by the time the run reported it and 26 half a
+ * second later — the timeout is a `Promise.race`, and losing a race does not stop the loser.
+ * It went on clicking, reading and holding a page that the guard after it was already using.
+ *
+ * Nobody prints this. By the time it is thrown the verdict for this guard is already written,
+ * and the point of it is only to unwind a body the run has stopped listening to.
+ */
+export class GuardAbandoned extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(message);
+    this.name = 'GuardAbandoned';
+  }
+}
+
 const DEFAULT_RUN_TIMEOUT = 60_000;
 
 /** Commands can print a lot; 10MB before we cut them off. */
@@ -57,6 +77,11 @@ const ACTION = 'did';
  * @property {(step: import('../types.js').CheckStep) => void} [onStep]
  *           Called as each claim and each action starts, and again as it settles.
  *           The two calls carry the same `key`.
+ * @property {AbortSignal} [signal]
+ *           Raised when the run has given up on this guard — its clock ran out, or its
+ *           attempt has simply already returned. Every door here refuses from then on, so
+ *           the body stops at its very next step instead of driving the app behind a run
+ *           that has moved on.
  */
 
 /**
@@ -70,7 +95,66 @@ const ACTION = 'did';
 export function makeGuardApi(page, project, opts = {}) {
   const root = project.paths.root;
   const onStep = typeof opts.onStep === 'function' ? opts.onStep : null;
+  const givenUp = opts.signal;
   let counted = 0;
+
+  /**
+   * Refuse to do anything more once the run has given up on this guard.
+   *
+   * This is what makes a timeout mean something. Before it, a guard that ran out of time
+   * kept its whole body running: measured on 2026-08-31, 7 file writes by the time the run
+   * reported it and 26 half a second later, every one of them free to click the page the
+   * next guard had just started on. Refusing at the door is the only stopping there is —
+   * JavaScript cannot take a promise back — but it is enough, because a guard reaches the
+   * app through this object, and it reaches it constantly.
+   *
+   * @returns {void}
+   */
+  function stopHere() {
+    if (!givenUp?.aborted) return;
+    throw refusal();
+  }
+
+  /** @returns {GuardAbandoned} */
+  function refusal() {
+    return new GuardAbandoned(
+      'The run had already given up on this guard and moved on, so this step was refused rather than run.',
+    );
+  }
+
+  /**
+   * The page with one extra rule: once the run has given up on this guard, it refuses.
+   *
+   * `app.page` is documented as "the whole page", so a guard that drives the app itself
+   * never passes through the five methods below — and those were exactly the guards left
+   * holding a page after their own timeout. The wrapper belongs to this attempt and dies
+   * with it; the real handle is untouched, and every other part of the tool keeps using it.
+   *
+   * @param {import('../types.js').PageApi} handle
+   * @returns {import('../types.js').PageApi}
+   */
+  function refusable(handle) {
+    if (!givenUp) return handle;
+    /** @type {Record<string, unknown>} */
+    const doors = {};
+    for (const key of Object.keys(handle)) {
+      const value = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (handle))[key];
+      if (typeof value !== 'function') {
+        doors[key] = value;
+        continue;
+      }
+      // Refused in the same shape the door answers in. `goto` is awaited and `consoleErrors`
+      // is read, and a refusal that arrives as a thrown error where a value was expected —
+      // or as a rejected promise where none was — is a second surprise on top of the first.
+      const answersWithAPromise = value.constructor?.name === 'AsyncFunction';
+      doors[key] = (/** @type {unknown[]} */ ...args) => {
+        if (!givenUp.aborted) return /** @type {(...a: unknown[]) => unknown} */ (value).apply(handle, args);
+        if (answersWithAPromise) return Promise.reject(refusal());
+        throw refusal();
+      };
+    }
+    return /** @type {import('../types.js').PageApi} */ (/** @type {unknown} */ (doors));
+  }
 
   /**
    * Hand one step out, and never let that matter.
@@ -111,7 +195,7 @@ export function makeGuardApi(page, project, opts = {}) {
   }
 
   return {
-    page,
+    page: refusable(page),
     project,
 
     /**
@@ -119,6 +203,7 @@ export function makeGuardApi(page, project, opts = {}) {
      * @returns {Promise<void>}
      */
     async open(to) {
+      stopHere();
       const settle = announce(ACTION, `opened ${short(to)}`);
       try {
         await page.goto(to);
@@ -134,6 +219,7 @@ export function makeGuardApi(page, project, opts = {}) {
      * @returns {Promise<void>}
      */
     async click(selector) {
+      stopHere();
       const settle = announce(ACTION, `clicked ${short(selector)}`);
       try {
         await page.click(selector);
@@ -150,6 +236,7 @@ export function makeGuardApi(page, project, opts = {}) {
      * @returns {Promise<void>}
      */
     async expect(claim, check) {
+      stopHere();
       if (typeof claim !== 'string' || claim.trim() === '') {
         throw new StaysFixedError('An expectation needs a sentence in front of it.', {
           hint: 'Write it the way you would say it: expect("the sidebar is hidden", () => ...). That sentence is what a person reads when the guard fails.',
@@ -202,15 +289,21 @@ export function makeGuardApi(page, project, opts = {}) {
      * @returns {Promise<{code: number, stdout: string, stderr: string}>}
      */
     async run(cmd, runOpts = {}) {
+      // Before the command is started, not after. A guard the run has given up on must not
+      // be able to leave a process of its own behind it.
+      stopHere();
       const cwd = runOpts.cwd ? path.resolve(root, runOpts.cwd) : root;
       const timeoutMs = runOpts.timeoutMs ?? DEFAULT_RUN_TIMEOUT;
       const settle = announce(ACTION, `ran ${short(cmd)}`);
 
       /** @type {Promise<{code: number, stdout: string, stderr: string}>} */
-      const finished = new Promise((resolve) => {
+      const finished = new Promise((resolve, reject) => {
         exec(
           cmd,
-          { cwd, timeout: timeoutMs, maxBuffer: MAX_OUTPUT, encoding: 'utf8' },
+          // `signal` is what actually kills the child. A guard that shells out to something
+          // long-running was the clearest case of a timed-out guard holding a real resource:
+          // the run had reported and moved on, and the command was still going.
+          { cwd, timeout: timeoutMs, maxBuffer: MAX_OUTPUT, encoding: 'utf8', signal: givenUp },
           (error, stdout, stderr) => {
             const out = String(stdout ?? '');
             let err = String(stderr ?? '');
@@ -218,6 +311,16 @@ export function makeGuardApi(page, project, opts = {}) {
 
             if (error) {
               const e = /** @type {any} */ (error);
+              // Stopped because the run gave up on this guard, not because the command ran
+              // long. Saying "stopped after 60 seconds" here would be a made-up reason.
+              if (givenUp?.aborted && (e.name === 'AbortError' || e.killed)) {
+                reject(
+                  new GuardAbandoned(
+                    'The run gave up on this guard while this command was still going, so the command was stopped.',
+                  ),
+                );
+                return;
+              }
               if (e.killed || e.signal) {
                 // 124 is what `timeout(1)` uses, so a guard can spot it.
                 code = 124;
@@ -247,6 +350,7 @@ export function makeGuardApi(page, project, opts = {}) {
      * @returns {Promise<string>}
      */
     async read(file) {
+      stopHere();
       const full = path.resolve(root, file);
       const relative = path.relative(root, full);
       // A guard belongs to one project; reading outside it makes the guard depend

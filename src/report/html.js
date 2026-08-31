@@ -9,7 +9,7 @@
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { verdictFor, plainTime, countText } from './console.js';
+import { verdictFor, plainTime, countText, guardVerdict } from './console.js';
 
 /**
  * @param {unknown} s
@@ -210,27 +210,51 @@ function troubleCard(p, actual) {
  */
 function guardsSection(guards) {
   if (guards.length === 0) return '';
-  const failed = guards.filter((g) => g.status === 'failed');
+  // Counted by what each result actually says, not by its status. "3 of 3 bugs that were
+  // fixed are back" was printed on 2026-08-31 over one real failure, one guard whose clock
+  // ran out and one that was never even asked — and "All 3 bugs that were fixed are still
+  // fixed" was printed over three guards marked skip. Both sentences were about guards
+  // nobody had an answer from.
+  const back = guards.filter((g) => guardVerdict(g) === 'back');
+  const held = guards.filter((g) => guardVerdict(g) === 'held');
+  const unanswered = guards.length - back.length - held.length;
   const out = [];
   out.push('<h2>Guards</h2>');
-  out.push(
-    `<p class="lead">${
-      failed.length === 0
-        ? `All ${countText(guards.length)} ${plural(guards.length, 'bug', 'bugs')} that were fixed are still fixed.`
-        : `${countText(failed.length)} of ${countText(guards.length)} bugs that were fixed ${plural(failed.length, 'is', 'are')} back.`
-    }</p>`,
-  );
+  const lead = [];
+  if (back.length > 0) {
+    lead.push(`${countText(back.length)} of ${countText(guards.length)} bugs that were fixed ${plural(back.length, 'is', 'are')} back.`);
+  } else if (held.length === guards.length) {
+    lead.push(`All ${countText(guards.length)} ${plural(guards.length, 'bug', 'bugs')} that were fixed are still fixed.`);
+  } else if (held.length > 0) {
+    lead.push(`${countText(held.length)} of ${countText(guards.length)} bugs that were fixed ${plural(held.length, 'is', 'are')} still fixed.`);
+  } else {
+    lead.push(`Not one of these ${countText(guards.length)} guards gave an answer.`);
+  }
+  if (unanswered > 0) {
+    lead.push(
+      `${countText(unanswered)} ${plural(unanswered, 'guard', 'guards')} ${plural(unanswered, 'was', 'were')} never answered — left out, out of time, or asking nothing at all.`,
+    );
+  }
+  out.push(`<p class="lead">${lead.join(' ')}</p>`);
   out.push('<section class="card guards"><ul class="guardlist">');
   for (const g of guards) {
-    const state = g.status === 'passed' ? 'good' : g.status === 'skipped' ? 'muted' : 'bad';
+    const verdict = guardVerdict(g);
+    const state = verdict === 'held' ? 'good' : verdict === 'back' ? 'bad' : 'muted';
     out.push(`<li class="${state}">`);
     out.push(`<span class="dot"></span><span class="gname">${escapeHtml(g.name)}</span>`);
-    if (g.status === 'failed') {
+    if (verdict === 'left out') {
+      out.push('<div class="note">left out on purpose</div>');
+    } else if (verdict !== 'held') {
       if (g.failedAt) out.push(`<div class="claim">expected: ${escapeHtml(g.failedAt)}</div>`);
       if (g.message && g.message !== g.failedAt) out.push(`<div class="claim">${escapeHtml(g.message)}</div>`);
-      if (g.because) out.push(`<div class="because">Why this guard exists: ${escapeHtml(g.because)}</div>`);
-    } else if (g.status === 'skipped') {
-      out.push('<div class="note">left out on purpose</div>');
+      // The story is what says whether a failure matters, so it belongs under a returned bug.
+      // Under a guard that ran out of time it reads as that bug being back, which is exactly
+      // what nobody knows. An empty guard gets it in the words that fit an empty guard.
+      if (g.because && verdict === 'back') {
+        out.push(`<div class="because">Why this guard exists: ${escapeHtml(g.because)}</div>`);
+      } else if (g.because && /** @type {any} */ (g).assertedNothing === true) {
+        out.push(`<div class="because">What it was meant to protect: ${escapeHtml(g.because)}</div>`);
+      }
     }
     out.push('</li>');
   }
@@ -260,10 +284,30 @@ function condemnedSection(names) {
  */
 function passedSection(passed) {
   if (passed.length === 0) return '';
-  const items = passed.map((p) => `<li><code>${escapeHtml(p.name)}</code></li>`).join('');
+  // "Exactly as approved" has to mean exactly, or it is the most expensive sentence on this
+  // page. A picture that differs and is waved through by `tolerance.pixels` was listed here in
+  // the same words as one that matched byte for byte — which is how a missing letter in a
+  // heading, 593 plainly visible pixels, sat under "still looks exactly as approved" while an
+  // allowance of 2,592 quietly absorbed it. The terminal was taught to say this in full and
+  // the report was not, so the same run said two different things depending where you read it.
+  const allowed = passed.filter((p) => (p.diffPixels ?? 0) > 0);
+  const items = passed
+    .map((p) => {
+      const moved = p.diffPixels ?? 0;
+      const note =
+        moved > 0
+          ? ` <span class="muted">the same, apart from ${countText(moved)} ${plural(moved, 'pixel', 'pixels')} your tolerance allowed</span>`
+          : '';
+      return `<li><code>${escapeHtml(p.name)}</code>${note}</li>`;
+    })
+    .join('');
+  const summary =
+    allowed.length === 0
+      ? `${countText(passed.length)} ${plural(passed.length, 'screen', 'screens')} still ${plural(passed.length, 'looks', 'look')} exactly as approved`
+      : `${countText(passed.length)} ${plural(passed.length, 'screen', 'screens')} passed — ${countText(allowed.length)} of ${plural(allowed.length, 'them', 'them')} only because your tolerance allowed what changed`;
   return [
     '<details class="card quiet">',
-    `<summary>${countText(passed.length)} ${plural(passed.length, 'screen', 'screens')} still ${plural(passed.length, 'looks', 'look')} exactly as approved</summary>`,
+    `<summary>${summary}</summary>`,
     `<ul class="plain columns">${items}</ul>`,
     '</details>',
   ].join('\n');
@@ -298,13 +342,25 @@ async function buildHtml(project, run) {
   if (run.platform) meta.push(`on ${escapeHtml(run.platform)}`);
   body.push(`<p class="meta">${meta.join(' &middot; ')}</p>`);
   const chips = [];
-  if (passed.length) chips.push(`<span class="chip good">${countText(passed.length)} unchanged</span>`);
+  // Not "unchanged" when a tolerance allowed the change through. Same sentence, same reason.
+  if (passed.length) {
+    const untouched = passed.filter((p) => (p.diffPixels ?? 0) === 0).length;
+    chips.push(
+      `<span class="chip good">${countText(passed.length)} ${untouched === passed.length ? 'unchanged' : 'passed'}</span>`,
+    );
+  }
   if (changed.length) chips.push(`<span class="chip bad">${countText(changed.length)} changed</span>`);
   if (fresh.length) chips.push(`<span class="chip warn">${countText(fresh.length)} new</span>`);
   if (trouble.length) chips.push(`<span class="chip bad">${countText(trouble.length)} could not be checked</span>`);
   if (guards.length) {
-    const bad = guards.filter((g) => g.status === 'failed').length;
-    chips.push(`<span class="chip ${bad ? 'bad' : 'good'}">${countText(guards.length)} ${plural(guards.length, 'guard', 'guards')}${bad ? `, ${countText(bad)} failed` : ' holding'}</span>`);
+    // "1 failed" over a guard that only ran out of time is the headline bug of this report in
+    // miniature. Counted the same way every other sentence about guards is counted now.
+    const bad = guards.filter((g) => guardVerdict(g) === 'back').length;
+    const unheard = guards.filter((g) => guardVerdict(g) === 'unanswered').length;
+    const note = bad ? `, ${countText(bad)} failed` : unheard ? `, ${countText(unheard)} unanswered` : ' holding';
+    chips.push(
+      `<span class="chip ${bad ? 'bad' : unheard ? 'warn' : 'good'}">${countText(guards.length)} ${plural(guards.length, 'guard', 'guards')}${note}</span>`,
+    );
   }
   if (chips.length) body.push(`<p class="chips">${chips.join('')}</p>`);
   body.push('</header>');
