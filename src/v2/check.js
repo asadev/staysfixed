@@ -2608,6 +2608,19 @@ function nameOfReference(reference, asked) {
 async function exportBuild(root, reference, scratch) {
   const sha = reference.gitSha;
   if (!sha) return null;
+  // A reference cut from a tree with uncommitted changes is filed under a fingerprint of
+  // that TREE — an id like `work-76ac0155c8b9`, deliberately not the commit's — because the
+  // files that were checked are not the files git has. Exporting the commit and calling it
+  // "the old build" walked different code, and everything downstream believed it: an address
+  // the record holds a real value for was walked against a build that never had it, the
+  // silence was read as proof the address is new, and the reply said "is there now and was
+  // not before" about a value sitting in the record on disk. Measured 2026-08-31.
+  //
+  // Falling back to the stored record is weaker, and the run says so. That is the same choice
+  // this tool already makes everywhere the old build cannot be walked, and it is the honest
+  // one: a weaker comparison you are told about beats a strong-looking comparison against
+  // the wrong build.
+  if (reference.dirty === true) return null;
   const dir = path.join(scratch, `reference-${sha.slice(0, 12)}`);
   await fsp.mkdir(dir, { recursive: true });
   try {
