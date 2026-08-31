@@ -39,6 +39,7 @@ import { surveyBrowsers, INSTALL_COMMAND, PORT_NEVER_USE } from './browsers.js';
 import { POWERSHELL_PATHS, describeRemote } from './remote.js';
 import { deviceToMake } from './adapters/android.js';
 import { describeWindows } from './adapters/windows.js';
+import { describeLinuxDesktop } from './adapters/linux.js';
 import { messageOf, EXIT } from '../core/errors.js';
 import { say, ok, warn, fail, blank, heading, paint, mark, shortPath, setLogLevel } from '../core/log.js';
 import { loadPlaywright } from './adapters/web-driver.js';
@@ -906,7 +907,7 @@ function findDesktopApp(cwd) {
  *
  * @param {string} root
  * @param {string|null} settingsText
- * @returns {Promise<{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null}>}
+ * @returns {Promise<{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null, linux: FoundApp|null}>}
  */
 async function phoneApps(root, settingsText) {
   // Comments taken away first, for the same reason `findDesktopApp` does it: a
@@ -983,9 +984,42 @@ async function phoneApps(root, settingsText) {
         ? { where: root, how: 'there is an Xcode project here, but nothing says where the built app is' }
         : null);
 
-  const windows = named('remoteExe') ?? namedPath('exe', (v) => /\.exe$/i.test(v));
+  /**
+   * A named key looked for INSIDE one settings block, never across the whole file.
+   *
+   * `remoteExe` means "the built program on that machine" under `windows:` and exactly the
+   * same thing under `linux:`, so a flat search finds one and reports it as the other — and
+   * doctor would tell somebody with a GTK app that they have a native Windows program.
+   * Written the day the Linux surface landed, 2026-08-31, before it could be true.
+   *
+   * @param {string} block
+   * @param {string} key
+   * @param {(value: string) => boolean} [looksRight]
+   * @returns {FoundApp|null}
+   */
+  const inBlock = (block, key, looksRight) => {
+    const at = new RegExp(`["']?${block}["']?\\s*:\\s*\\{`).exec(settings);
+    if (!at) return null;
+    let depth = 0;
+    let end = at.index + at[0].length;
+    for (; end < settings.length; end += 1) {
+      if (settings[end] === '{') depth += 1;
+      else if (settings[end] === '}') {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+    }
+    const inside = settings.slice(at.index + at[0].length, end);
+    const found = new RegExp(`["']?${key}["']?\\s*:\\s*["'\`]([^"'\`]+)["'\`]`).exec(inside);
+    if (!found) return null;
+    if (looksRight && !looksRight(found[1])) return null;
+    return { where: found[1], how: `your settings name it under ${block}.${key}` };
+  };
 
-  return { android, ios, windows };
+  const windows = inBlock('windows', 'remoteExe') ?? inBlock('windows', 'exe', (v) => /\.exe$/i.test(v));
+  const linux = inBlock('linux', 'remoteExe') ?? inBlock('linux', 'exe');
+
+  return { android, ios, windows, linux };
 }
 
 /**
@@ -1071,9 +1105,9 @@ function couldNotAsk(name, why) {
 /**
  * The platforms that arrive as an adapter of their own, and know their own requirements.
  * The built-in five are described by hand above, because they are older than this
- * mechanism and their wording is tested; these three answer for themselves.
+ * mechanism and their wording is tested; these four answer for themselves.
  */
-const ADAPTERS_THAT_ANSWER_FOR_THEMSELVES = ['android', 'ios', 'windows'];
+const ADAPTERS_THAT_ANSWER_FOR_THEMSELVES = ['android', 'ios', 'windows', 'linux'];
 
 /**
  * Ask each separate adapter what IT is missing, in its own words.
@@ -1189,7 +1223,7 @@ async function whatThisCopyCanDrive() {
     // file that would not load, so a check on this copy is not running at all — and both
     // the command line and the MCP surface say that in their own words already.
     const why = `This copy could not be asked what it can drive: ${messageOf(e)}`;
-    for (const surface of ['android', 'ios', 'windows']) out.push({ surface, present: false, why });
+    for (const surface of ['android', 'ios', 'windows', 'linux']) out.push({ surface, present: false, why });
   }
   return out;
 }
@@ -1550,6 +1584,7 @@ function settingsFromText(text) {
     // as a result: it could not see the machine the settings named, nor the built program,
     // so it asked for both while both were sitting in the file.
     windows: ['host', 'remoteExe', 'exe'],
+    linux: ['host', 'remoteExe', 'exe'],
   };
   for (const [block, keys] of Object.entries(wanted)) {
     const at = new RegExp(`["']?${block}["']?\\s*:\\s*\\{`).exec(clean);
@@ -1679,7 +1714,7 @@ async function findReference(root) {
  * @param {import('./browsers.js').BrowserSurvey} browsers
  * @param {{where: string, how: string}|null} desktopApp
  * @param {DriverReport[]} drivers      What this copy of the tool can drive at all.
- * @param {{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null}} phones
+ * @param {{android: FoundApp|null, ios: FoundApp|null, windows: FoundApp|null, linux: FoundApp|null}} phones
  * @param {Map<string, Need[]>} asked   What each separate adapter says IT is missing.
  * @param {{commands: number, imports: number}} [wires]
  *   What this project's own settings wire for the command-line surface. A surface with
@@ -2038,6 +2073,46 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   }
   if (windowsHost && !windowsDriver) {
     impossible.set('windows', `${noDriver('windows')} Nothing you install on that machine changes it. Update Stays Fixed to a copy that has it.`);
+  }
+
+  // ── native Linux desktop apps ─────────────────────────────────────────────────────────
+  //
+  // The project is asked before the machine, the same as everywhere else: a repository with
+  // no native Linux program named in it does not need a Linux desktop, and telling somebody
+  // to go and find one is work that changes nothing.
+  const linuxDriver = canDrive('linux');
+  const linuxHost = hosts.find((h) => h.reachable && h.windows !== true);
+  const linuxUsable = phones.linux !== null && linuxHost !== undefined && linuxDriver;
+  surfaces.push({
+    id: 'linux',
+    name: 'native Linux desktop apps',
+    status: linuxUsable ? 'partial' : 'unavailable',
+    summary: phones.linux === null
+      ? 'Nothing to check: this project names no native Linux program in its settings. Most Linux desktop products are Electron, and those are covered over their debug port from any machine.'
+      : !linuxDriver
+        ? `A native Linux program is named (${phones.linux.how}), and this copy of Stays Fixed cannot drive one. ${noDriver('linux')}`
+        : !linuxHost
+          ? nobodyWasDialled
+            ? 'No machine was dialled, so whether a Linux desktop can be reached from here is unknown. Name one under `linux: { host: "..." }` in your settings and it is asked every time, or run `staysfixed doctor --machines`.'
+            : 'No Linux desktop is reachable from here. A native Linux window can only be read from the desktop it is running on.'
+          // The adapter's own paragraph, never a second one written here — it knows whether
+          // that machine has a desktop session at all, and a summary kept in this file could
+          // only guess at it.
+          : linuxHost.detail
+            ? describeLinuxDesktop(linuxHost.detail)
+            : `A Linux machine answers through "${linuxHost.name}". A native Linux app is read through the accessibility bus every screen reader already uses, and nothing has to be installed there.`,
+    canCheck: linuxUsable ? withoutADriver : [],
+    cannotCheck: linuxUsable ? ['meaning', 'pixels'] : CHANNELS.map((c) => c.id),
+    needs: linuxUsable ? (asked.get('linux') ?? []) : [],
+  });
+  if (phones.linux === null) {
+    notInThisProject.add('linux');
+    impossible.set(
+      'linux',
+      'This project has no native Linux program named in its settings, so there is nothing to open on a Linux desktop. '
+      + 'If yours is built somewhere else, name it under linux.remoteExe (already on that machine) or linux.exe (copied over each run). '
+      + 'Most Linux desktop products are Electron, and those are covered over their debug port from any machine.'
+    );
   }
   if (!windowsHost) {
     impossible.set(

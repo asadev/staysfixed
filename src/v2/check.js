@@ -158,6 +158,13 @@ const SEPARATE_ADAPTERS = [
     missing:
       'This copy has no native-Windows adapter in it. That is usually fine: a Windows product built with Electron is driven over its own debugging port by the Electron adapter and needs nothing else.',
   },
+  {
+    surface: 'linux',
+    file: './adapters/linux.js',
+    exports: ['linuxAdapter', 'adapter', 'default'],
+    missing:
+      'This copy has no native-Linux adapter in it. That is usually fine: a Linux product built with Electron is driven over its own debugging port by the Electron adapter and needs nothing else.',
+  },
 ];
 
 /**
@@ -196,6 +203,7 @@ export const ADAPTER_FOR_SURFACE = {
   android: 'android',
   ios: 'ios',
   windows: 'windows',
+  linux: 'linux',
 };
 
 /**

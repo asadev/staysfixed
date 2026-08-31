@@ -231,9 +231,11 @@ describe('aiming a check at a web page or a desktop app', () => {
     /** @type {string[]} */
     const offered = check.inputSchema.properties.surface.enum;
     for (const surface of Object.keys(ADAPTER_FOR_SURFACE)) {
-      // Windows is deliberately left off: it is driven over ssh to another machine and
-      // aimed at from the settings rather than from a tool call.
-      if (surface === 'windows') continue;
+      // Windows and Linux are deliberately left off: both are driven over ssh to another
+      // machine and aimed at from the settings rather than from a tool call. There is no
+      // address an agent could pass for them — the settings name the machine and the built
+      // program, because one tool call cannot carry both.
+      if (surface === 'windows' || surface === 'linux') continue;
       assert.ok(offered.includes(surface), `the engine can walk a ${surface} journey and no agent can ask for one`);
     }
     for (const surface of offered) {
