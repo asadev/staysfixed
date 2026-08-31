@@ -363,7 +363,10 @@ everything, because it did not: it checked every way in *this tool knows about*.
 staysfixed check --json            # coverage.doorsKnown, coverage.doorsWalked, coverage.gaps
 ```
 
-Over MCP it is `staysfixed_coverage`. Every `staysfixed_check` reply says it in
+At a terminal it is `staysfixed coverage`; over MCP it is `staysfixed_coverage`.
+Both roads reach the same code — that stopped being true for a while, and a person
+got a strictly worse answer about their own product than an agent did, which is
+now a test. Every `staysfixed_check` reply says it in
 words directly under the headline, and the JSON form carries `notChecked` and
 `doorsNeverOpened` as fields of their own rather than only as prose — a number an
 agent has to go looking for is a number it skips.

@@ -2105,7 +2105,10 @@ function whatThisRunActuallyCovers(surfaces, setUpHere = true) {
     if (noSuchProduct.length) {
       parts.push(`There is nothing of ${noSuchProduct.length === 1 ? 'that kind' : 'those kinds'} in this repository — ${plainList(noSuchProduct)} — so there is nothing here to check, and that is not a limit of this machine.`);
     }
-    if (noSuchMachine.length) parts.push(`${plainList(noSuchMachine, true)} cannot be done here at all, and the reason for each is in notCovered.`);
+    // "the reason for each is listed above", not "is in notCovered": this lands in
+    // covers.short, which `staysfixed doctor` and `staysfixed coverage` both print at a
+    // person. A JSON field name is not somewhere a person can go and look.
+    if (noSuchMachine.length) parts.push(`${plainList(noSuchMachine, true)} cannot be done here at all, and the reason for each is listed above.`);
   }
   if (out.everything) parts.push('Nothing is being left out on this machine.');
   out.short = parts.join(' ');

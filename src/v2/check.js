@@ -661,7 +661,11 @@ export function whatWasNotChecked(coverage) {
   if (parts.length === 0) {
     return `Everything this run knows how to walk was walked — ${coverage.paths} ${coverage.paths === 1 ? 'address' : 'addresses'} across ${coverage.journeys} ${coverage.journeys === 1 ? 'journey' : 'journeys'}. That is not every possible state of your product; nothing can enumerate that, and a clean result only covers what was walked.`;
   }
-  return `NOT EVERYTHING WAS CHECKED: ${parts.join(', and ')}. A clean result only covers what was walked — the whole list is in coverage.gaps.`;
+  // `staysfixed coverage`, not `coverage.gaps`. This sentence is printed at a person as well
+  // as returned to an agent, and a person at a terminal has no JSON field to open — being
+  // told to read one is being told to go nowhere. The command is true for both readers, and
+  // the agent already had that wording on its own reply.
+  return `NOT EVERYTHING WAS CHECKED: ${parts.join(', and ')}. A clean result only covers what was walked — \`staysfixed coverage\` has the whole list.`;
 }
 
 /**
