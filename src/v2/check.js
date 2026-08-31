@@ -469,7 +469,14 @@ async function settle(verdict, store, product, guards) {
   verdict.findings = decided.reported;
   verdict.accounted = decided.accounting;
   if (verdict.blocked !== true) {
-    verdict.ok = decided.reported.length === 0 && (verdict.newlyUnstable ?? []).length === 0;
+    // `verdict.ok !== false` first, and it is the whole point of the line. Accounting may
+    // take a pass AWAY — a finding nobody waived, an address that stopped being
+    // predictable — and it may never hand one back. This assigned instead of narrowing, so
+    // every not-a-pass the engine had already decided was thrown away here: a run where the
+    // product never answered, and a run drowning in wobble, both came back through this line
+    // as `ok: true`. Found by the refusal lane on 2026-08-31, and it had been quietly
+    // discarding the wobble verdict before that.
+    verdict.ok = verdict.ok !== false && decided.reported.length === 0 && (verdict.newlyUnstable ?? []).length === 0;
     // The count goes into the sentence a person and an agent both read, not into a field
     // one of them has to know to look for.
     if (decided.accounting.waived > 0 || decided.accounting.expiredWaivers > 0) {

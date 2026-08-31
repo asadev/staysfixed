@@ -1657,15 +1657,44 @@ export async function describeRun(input) {
   }
 
   // ---- how it finished
-  if (result.couldNotStart) {
+  // DID THIS WALK EVER REACH THE PRODUCT? Said out loud, in one place, because it is the one
+  // question nothing downstream can work out for itself.
+  //
+  // A command that fails to SPAWN has always been reported here. The other half was missing
+  // until 2026-08-31: a command that spawns perfectly, throws on its first line, prints
+  // nothing and exits non-zero. That walk fills the complaints channel with a real stack
+  // trace and a real exit code — both genuine facts, and both facts about a crash rather than
+  // about the product. Two builds that crash the same way agree at every one of those
+  // addresses, so the run came back "Nothing that worked has changed. 7 addresses checked"
+  // about a product whose entire output had been rewritten in between; `ship` blessed it; and
+  // the day it was fixed, every real value differed from the stored crash and four findings
+  // arrived that nobody had caused.
+  //
+  // The stdout test is what keeps this narrow, and it is the honest line. A command that
+  // printed something got somewhere, and what it printed is a real observation of the product
+  // however it ended — a linter that exits 1 with a list of problems is being observed
+  // properly and must go on being compared. A command that printed nothing and then died
+  // never reached the product at all.
+  const neverReachedIt =
+    result.couldNotStart
+    || (result.stdout.trim() === '' && (result.timedOut || result.signal !== null || (result.code !== null && result.code !== 0)));
+  if (neverReachedIt) {
+    const why = result.couldNotStart
+      ? `it never started: ${result.couldNotStart}`
+      : result.timedOut
+        ? 'it was still running when its time ran out and had printed nothing'
+        : result.signal
+          ? `it was killed by ${result.signal} having printed nothing`
+          : `it exited ${result.code} without printing anything at all`;
     out.push(notCovered({
       channel: 'complaints',
       path: joinPath('cli', id, 'ran at all'),
       reason: 'crashed',
       says:
-        `"${journey.describe}" never started: ${result.couldNotStart}. Nothing about the product was observed here, ` +
-        `and a command that fails to start fails the same way on both builds — so without this line the comparison ` +
-        `would have found no difference and called it clean.`,
+        `"${journey.describe}" did not get far enough to observe the product: ${why}. What it complained about and how ` +
+        `it finished are recorded below and are facts about the crash, not about the product — so nothing here is ` +
+        `compared with the other build. A command that fails the same way on both builds otherwise agrees at every ` +
+        `address, and that agreement reads exactly like a clean run.`,
     }));
   }
   out.push(observation({
