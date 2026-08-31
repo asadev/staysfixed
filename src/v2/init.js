@@ -2204,8 +2204,8 @@ function whatItCovers(readiness) {
 
   /** @type {string[]} */
   const parts = [];
-  if (covered.length > 0) parts.push(`Right now a check here covers ${plainList(covered)} in full.`);
-  else parts.push('Right now a check here covers nothing in full.');
+  if (covered.length > 0) parts.push(`Right now a check here can walk ${plainList(covered)}. How much of ${covered.length === 1 ? 'it' : 'them'} a run actually opens is a different question, and \`staysfixed coverage\` is the one that answers it.`);
+  else parts.push('Right now a check here can walk nothing.');
   if (waiting.length > 0) parts.push(`${plainList(waiting, true)} ${waiting.length === 1 ? 'is' : 'are'} not covered yet, and the list below says exactly what is in the way and who has to do it.`);
   if (notCovered.length > 0) parts.push(`${plainList(notCovered, true)} ${notCovered.length === 1 ? 'is' : 'are'} not checked at all, so a clean result says nothing whatever about ${notCovered.length === 1 ? 'it' : 'them'}.`);
   // "on this machine", because that is the only thing this sentence knows. It is built from

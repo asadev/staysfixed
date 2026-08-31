@@ -31,6 +31,8 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+
+import { whatItCallsItself, pythonEntryPoints, pythonRunFor } from './init.js';
 import { fileURLToPath } from 'node:url';
 
 /** @typedef {import('./types.js').Surface} Surface */
@@ -407,7 +409,10 @@ export async function detectProject(options = {}) {
 
   return {
     root,
-    name: String(pkg?.name ?? path.basename(root)),
+    // The name the project GIVES ITSELF, not the folder it happens to sit in. Every
+    // non-Node project was named after its folder, so a Python tool that calls itself
+    // `lint-lens` was described to its owner as `pytool` throughout. Measured 2026-08-31.
+    name: String(pkg?.name ?? whatItCallsItself(root).name),
     version: pkg?.version ? String(pkg.version) : null,
     isGitRepo: fs.existsSync(path.join(root, '.git')),
     products: merged,
@@ -1958,7 +1963,11 @@ async function foreignProjectIn(dir, listing) {
   if (!language) return null;
   const spec = FOREIGN_LANGUAGES[/** @type {keyof typeof FOREIGN_LANGUAGES} */ (language)];
   const manifest = spec.manifests.find((m) => listing.files.includes(m)) ?? spec.manifests[0];
+  // Read for the languages below that still scrape their manifest by hand. Python no longer
+  // does — its entry points are read by `pythonEntryPoints`, which knows all three of the
+  // places a Python project can declare them.
   const manifestText = await readTextIfSmall(path.join(dir, manifest)) ?? '';
+  void manifestText;
   /** @type {Clue[]} */
   const evidence = [{ where: manifest, means: `This is how a ${language} project declares itself.` }];
   /** @type {{name: string, run: string, describe: string}[]} */
@@ -2005,15 +2014,35 @@ async function foreignProjectIn(dir, listing) {
     }
     for (const entry of reading.entries) {
       const name = path.basename(entry, '.py');
-      commands.push({ name: `${name} --help`, run: `${typed} ${entry} --help`, describe: `ask ${name} to print its help, and compare every word of it` });
+      // Run it the way Python can actually run it, not by handing python3 a file path. A
+      // module inside a package dies on its first relative import when it is run by path —
+      // `ImportError: attempted relative import with no known parent package` — so a command
+      // written that way is red on a fresh clone through nobody's fault. Measured 2026-08-31.
+      const runnable = pythonRunFor(dir, entry);
+      commands.push({
+        name: `${name} --help`,
+        run: runnable ? `${runnable.run} --help` : `${typed} ${entry} --help`,
+        describe: `ask ${name} to print its help, and compare every word of it`,
+        ...(runnable?.env ? { env: runnable.env } : {}),
+      });
     }
-    // A console script is a command somebody types after installing, exactly like package.json's bin.
-    const scripts = /\[project\.scripts\]([\s\S]*?)(\n\[|$)/.exec(manifestText);
-    for (const line of (scripts?.[1] ?? '').split('\n')) {
-      const named = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
-      if (named && !commands.some((c) => c.name.startsWith(`${named[1]} `))) {
-        commands.push({ name: `${named[1]} --help`, run: `${named[1]} --help`, describe: `ask ${named[1]} to print its help, and compare every word of it` });
-      }
+    // A console script is a command somebody types AFTER INSTALLING — pip writes those files
+    // at install time, so on a checkout the name is simply not there and the command exits
+    // 127. What goes in the settings is the runnable form of what the script points at.
+    // Poetry and setuptools each spell this their own way, and reading only one of the three
+    // meant a Poetry project got no commands out of its manifest at all.
+    for (const [scriptName, target] of pythonEntryPoints(dir)) {
+      if (commands.some((c) => c.name.startsWith(`${scriptName} `))) continue;
+      const runnable = pythonRunFor(dir, target);
+      // No honest way to run it — the module the script points at is not in this checkout.
+      // Writing the bare script name here is what made a fresh clone exit 127.
+      if (!runnable) continue;
+      commands.push({
+        name: `${scriptName} --help`,
+        run: `${runnable.run} --help`,
+        describe: `ask ${scriptName} to print its help, and compare every word of it`,
+        ...(runnable.env ? { env: runnable.env } : {}),
+      });
     }
   } else {
     const listens = await foreignServerIn(dir, spec.sources, language);

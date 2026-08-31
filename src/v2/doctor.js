@@ -1757,7 +1757,7 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
     name: 'command-line tools and libraries',
     status: wiredForCli ? 'ready' : 'partial',
     summary: wiredForCli
-      ? 'Fully covered here. What it printed, what it exited with, what it wrote, what it called out to, and what it exports.'
+      ? 'What it printed, what it exited with, what it wrote, what it called out to, what it exports, and what each exported function answers when it is called with a fixed list of inputs. Not covered: any input outside that list, and any function whose name says it deletes, sends, publishes or charges — those are never called. A clean result covers what was walked; `staysfixed coverage` lists what was not.'
       : configured
         ? 'This machine can cover it in full — what a command printed, what it exited with, what it wrote, what it called out to, what it exports — but these settings wire no command to run and nothing to import, so a check runs none of it and a clean result says nothing about any of it.'
         : 'This machine can cover it in full, but nothing is set up in this folder yet, so a check cannot run here at all.',
@@ -2226,9 +2226,9 @@ function whatThisRunActuallyCovers(surfaces, setUpHere = true) {
   if (!setUpHere) {
     out.canRunHere = false;
     parts.push('Nothing is set up in this folder, so a check cannot run here at all and would cover nothing. Run `staysfixed init` first.');
-    parts.push(full.length > 0 ? `Once it is set up, this machine could cover ${plainList(out.covered)} in full.` : 'Even set up, this machine could cover nothing in full.');
+    parts.push(full.length > 0 ? `Once it is set up, this machine can drive ${plainList(out.covered)}.` : 'Even set up, this machine can drive none of these.');
   } else {
-    parts.push(full.length > 0 ? `A check here covers ${plainList(out.covered)} in full.` : 'A check here covers nothing in full.');
+    parts.push(full.length > 0 ? `A check here can drive ${plainList(out.covered)}. That is what this machine is able to walk, not what any run has walked.` : 'A check here can drive none of these.');
   }
   if (some.length > 0) parts.push(`It covers ${plainList(some.map((s) => s.name))} only partly — read the summary for each before treating a clean result as proof.`);
   if (missing.length > 0) {

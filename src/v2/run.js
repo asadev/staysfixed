@@ -1360,7 +1360,19 @@ function summarise(findings, subtraction, warning, notes, reference, provedLive,
       `Nothing that COULD be compared has changed — but ${n} ${plural(n, 'address', 'addresses')} the old build answers at could not be answered by this build at all, so ${plural(n, 'it was', 'they were')} not compared. That is coverage this build has taken away, and it is not a pass. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against}.${reach}`,
     );
   } else if (findings.length === 0) {
-    parts.push(`Nothing that worked has changed. ${how.addresses} ${plural(how.addresses, 'address', 'addresses')} checked against ${against}.${reach}`);
+    // A WHOLE JOURNEY WITH NOTHING ON THE OTHER SIDE IS NOT A PASS, and the headline is the
+    // only line some readers get. This happens for real on the day somebody upgrades: the
+    // tool learns to watch something new — calling a library's exported functions, say — and
+    // the record made by the old version has no answers to hold the new ones against. The run
+    // said so, three sentences down, under a headline reading "Nothing that worked has
+    // changed". A broken library upgraded into this state read as clean. Measured 2026-08-31.
+    if (missed > 0) {
+      parts.push(
+        `Nothing that COULD be compared has changed — but ${missed} of ${how.asked} ${plural(how.asked, 'journey', 'journeys')} had nothing on the old build's side to be held against, so ${plural(missed, 'it was', 'they were')} not checked at all, and a break inside ${plural(missed, 'it', 'them')} would look exactly like this. That is missing coverage rather than a failure — it is what a journey the old build never had looks like, and it is what an upgrade that learned to watch something new looks like. Ship once from a build you are happy with, or run with --paired, and the next check covers ${plural(missed, 'it', 'them')} properly. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against}.${reach}`,
+      );
+    } else {
+      parts.push(`Nothing that worked has changed. ${how.addresses} ${plural(how.addresses, 'address', 'addresses')} checked against ${against}.${reach}`);
+    }
   } else {
     const sealed = findings.filter((f) => f.sealed).length;
     parts.push(
