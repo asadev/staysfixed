@@ -81,25 +81,33 @@ describe('rootForConfig', () => {
 });
 
 describe('pathsFor', () => {
+  // These are folders on the machine the tool is running on, so the separator between them is
+  // whichever one this machine uses. Spelling the expected answers with `/` said "the project
+  // folder is C:\work\app but its state folder is /work/app/.staysfixed", which is not a
+  // folder Windows can open — four cases here failed on a real Windows 11 machine on
+  // 2026-08-31 for that reason and no other. `path.join` asks the same question the product
+  // answers, on every machine.
+  const at = (/** @type {string[]} */ ...parts) => path.join(...parts);
+
   test('everything hangs off the state folder', () => {
     const p = pathsFor('/work/app', '/work/app/staysfixed.config.js');
     assert.equal(p.root, '/work/app');
-    assert.equal(p.dir, `/work/app/${DEFAULT_DIR}`);
-    assert.equal(p.approved, `/work/app/${DEFAULT_DIR}/approved`);
-    assert.equal(p.results, `/work/app/${DEFAULT_DIR}/results`);
+    assert.equal(p.dir, at('/work/app', DEFAULT_DIR));
+    assert.equal(p.approved, at('/work/app', DEFAULT_DIR, 'approved'));
+    assert.equal(p.results, at('/work/app', DEFAULT_DIR, 'results'));
     // Diffs live under results, so clearing results clears the diffs with them.
-    assert.equal(p.diffs, `/work/app/${DEFAULT_DIR}/results/diffs`);
-    assert.equal(p.markers, `/work/app/${DEFAULT_DIR}/markers`);
-    assert.equal(p.guards, `/work/app/${DEFAULT_DIR}/guards`);
-    assert.equal(p.fixtures, `/work/app/${DEFAULT_DIR}/fixtures`);
-    assert.equal(p.historyFile, `/work/app/${DEFAULT_DIR}/history.json`);
+    assert.equal(p.diffs, at('/work/app', DEFAULT_DIR, 'results', 'diffs'));
+    assert.equal(p.markers, at('/work/app', DEFAULT_DIR, 'markers'));
+    assert.equal(p.guards, at('/work/app', DEFAULT_DIR, 'guards'));
+    assert.equal(p.fixtures, at('/work/app', DEFAULT_DIR, 'fixtures'));
+    assert.equal(p.historyFile, at('/work/app', DEFAULT_DIR, 'history.json'));
     assert.equal(p.configFile, '/work/app/staysfixed.config.js');
   });
 
   test('a project can name its own folder', () => {
     const p = pathsFor('/work/app', '/work/app/staysfixed.config.js', 'visual');
-    assert.equal(p.dir, '/work/app/visual');
-    assert.equal(p.approved, '/work/app/visual/approved');
+    assert.equal(p.dir, at('/work/app', 'visual'));
+    assert.equal(p.approved, at('/work/app', 'visual', 'approved'));
   });
 
   test('an absolute folder is taken as it is', () => {
@@ -149,14 +157,14 @@ describe('the picture files for a screen', () => {
 
   test('an approved picture comes with a note beside it', () => {
     const files = approvedPicture(paths, 'sessions empty');
-    assert.equal(files.png, `/work/app/${DEFAULT_DIR}/approved/sessions-empty.png`);
-    assert.equal(files.json, `/work/app/${DEFAULT_DIR}/approved/sessions-empty.json`);
+    assert.equal(files.png, path.join('/work/app', DEFAULT_DIR, 'approved', 'sessions-empty.png'));
+    assert.equal(files.json, path.join('/work/app', DEFAULT_DIR, 'approved', 'sessions-empty.json'));
   });
 
   test('a result and its difference picture sit apart from the approved one', () => {
     const files = resultPicture(paths, 'sessions empty');
-    assert.equal(files.png, `/work/app/${DEFAULT_DIR}/results/sessions-empty.png`);
-    assert.equal(files.diff, `/work/app/${DEFAULT_DIR}/results/diffs/sessions-empty.diff.png`);
+    assert.equal(files.png, path.join('/work/app', DEFAULT_DIR, 'results', 'sessions-empty.png'));
+    assert.equal(files.diff, path.join('/work/app', DEFAULT_DIR, 'results', 'diffs', 'sessions-empty.diff.png'));
   });
 });
 

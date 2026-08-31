@@ -33,6 +33,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { safeName, findConfigFile } from '../core/paths.js';
 import { StaysFixedError } from '../core/errors.js';
 import { sortObservations } from './observation.js';
@@ -145,7 +146,21 @@ async function productInSettings(configFile) {
       const parsed = JSON.parse(await fsp.readFile(configFile, 'utf8'));
       return typeof parsed?.product === 'string' && parsed.product ? parsed.product : null;
     }
-    const module = await import(`file://${configFile}`);
+    // `pathToFileURL`, rather than gluing `file://` to the front of a path.
+    //
+    // Measured on a real Windows 11 machine on 2026-08-31, and the answer was not the one
+    // expected: `file://C:\Users\me\staysfixed.config.mjs` DOES load, because the URL rules
+    // treat a drive letter sitting where the host should be as part of the path and turn the
+    // backslashes round. Even a folder with a space in it survives that. So this was not the
+    // Windows bug it looked like.
+    //
+    // It is still wrong, and it is changed for the one shape where the luck runs out: a
+    // project on a network share. `\\server\share\app` glued to `file://` becomes
+    // `file:////server/share/app`, which names no host and no file; `pathToFileURL` makes it
+    // `file://server/share/app`, which is the file. The catch below would have turned that
+    // into a silent "no product name in the settings", and the release would have been
+    // recorded under the wrong name rather than the one the person wrote down.
+    const module = await import(pathToFileURL(configFile).href);
     const raw = module.default ?? module.config ?? module;
     return typeof raw?.product === 'string' && raw.product ? raw.product : null;
   } catch {

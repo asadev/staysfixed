@@ -31,7 +31,7 @@ import {
   SKIP_BY_DEFAULT, copyForScratch, frozenEnvironment, processAdapter, readWatcher, runCommand,
   suiteObservations, testFileCommand, watcherScript,
 } from '../../src/v2/adapters/process.js';
-import { scratchDir, cleanUp } from '../support.mjs';
+import { scratchDir, cleanUp, canSymlink, NO_SYMLINKS } from '../support.mjs';
 
 test.after(cleanUp);
 
@@ -374,7 +374,12 @@ describe('running a stranger’s suite is held to a budget', () => {
     assert.ok(DEFAULT_HARVEST_BUDGET_MS > 0, 'the default has to be a real ceiling, or there is no decision here at all');
   });
 
-  test('what a test file touched is measured even when the project is reached through a symlink', async () => {
+  test('what a test file touched is measured even when the project is reached through a symlink', async (t) => {
+    // Windows refuses a symbolic link to an ordinary account unless Developer Mode is on, and
+    // answers EPERM — so the situation cannot be built here at all. Measured on a real
+    // Windows 11 machine on 2026-08-31, where this failed on making the fixture, never
+    // reaching the thing it proves.
+    if (!(await canSymlink())) return t.skip(NO_SYMLINKS);
     const real = await tinyProject();
     const parent = await fsp.realpath(await scratchDir('staysfixed-link'));
     const link = path.join(parent, 'project');

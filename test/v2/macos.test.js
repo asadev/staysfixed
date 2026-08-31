@@ -256,7 +256,11 @@ describe('reading what the machine printed', () => {
       + '<key>CFBundleIdentifier</key><string>dev.example.widget</string>';
     const facts = readBundle('/x/Widget.app', plist, []);
     assert.equal(facts.ok, true);
-    assert.equal(facts.executable, '/x/Widget.app/Contents/MacOS/Widget');
+    // The program inside the bundle, named the way the machine reading the bundle names it.
+    // A Mac app can only be read on a Mac, so in real use this is always a Mac path — but the
+    // test runs everywhere, and spelled with `/` it failed on a real Windows 11 machine on
+    // 2026-08-31 about an answer that was right.
+    assert.equal(facts.executable, path.join('/x/Widget.app', 'Contents', 'MacOS', 'Widget'));
     assert.equal(facts.bundleId, 'dev.example.widget', 'the identifier is what two builds of one app share');
     assert.equal(facts.electron, false);
   });
@@ -400,7 +404,7 @@ describe('what it says it can do', () => {
   });
 
   test('an app named in the config is found, and no app is said plainly', () => {
-    assert.equal(findMacApp({ root: '/p', config: { app: 'dist/Thing.app' } }).app, '/p/dist/Thing.app');
+    assert.equal(findMacApp({ root: '/p', config: { app: 'dist/Thing.app' } }).app, path.join('/p', 'dist/Thing.app'));
     assert.equal(findMacApp({ root: '/p', config: { app: '/abs/Thing.app' } }).app, '/abs/Thing.app');
     const none = findMacApp({ root: '/p', config: {} });
     assert.equal(none.app, null);

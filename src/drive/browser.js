@@ -14,6 +14,7 @@ import path from 'node:path';
 
 import { StaysFixedError, isExpected } from '../core/errors.js';
 import { detail } from '../core/log.js';
+import { stopTree, OWN_PROCESS_GROUP } from '../core/stop-tree.js';
 import { DEFAULT_VIEWPORT } from '../core/config.js';
 import { waitForEndpoint, listTargets, connect } from './cdp.js';
 import { requireChrome, freePort } from './find.js';
@@ -116,20 +117,17 @@ export function whenExited(child) {
 export async function stopProcess(child, graceMs) {
   if (isGone(child)) return;
   const exited = whenExited(child);
-  try {
-    child.kill('SIGTERM');
-  } catch {
-    // Already gone between the check and the signal. Nothing to do.
-  }
+  // The tree, not just this one process. A browser is never one process — it is a parent and
+  // a renderer for every page — and on Windows killing only the parent leaves the renderers
+  // running, still writing into the throwaway profile, so the profile folder cannot be
+  // deleted and outlives the run. That is the one thing "nothing it opened outlives the run"
+  // promises. Measured on a real Windows 11 machine on 2026-08-31.
+  stopTree(child.pid, 'SIGTERM', { child });
   const grace = raceTimer(graceMs, false);
   const stopped = await Promise.race([exited.then(() => true), grace.promise]);
   grace.cancel();
   if (stopped) return;
-  try {
-    child.kill('SIGKILL');
-  } catch {
-    // Same race as above.
-  }
+  stopTree(child.pid, 'SIGKILL', { child });
   const last = raceTimer(1000, false);
   await Promise.race([exited, last.promise]);
   last.cancel();
@@ -458,7 +456,11 @@ export async function startWebApp(app, opts = {}) {
     // Its own process group. A dev server is really a shell that spawns a
     // bundler that spawns a watcher; killing only the shell leaves the port held
     // and the next run fails for a reason nobody can see.
-    detached: true,
+    //
+    // Not on Windows, where `detached: true` means something else entirely — a console
+    // WINDOW of its own, flashing up on the person's screen in the middle of a check.
+    // Windows stops the tree a different way, in `stopTree`, and needs nothing at spawn time.
+    detached: OWN_PROCESS_GROUP,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = keepOutput(child);
@@ -478,30 +480,17 @@ export async function startWebApp(app, opts = {}) {
     stopping ??= (async () => {
       if (isGone(child)) return;
       const exited = whenExited(child);
-      try {
-        // Negative pid means the whole group — the only way to take the
-        // watchers down with the server.
-        if (pid) process.kill(-pid, 'SIGTERM');
-      } catch {
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          // Already gone.
-        }
-      }
+      // The whole tree, not just the shell. On Linux and a Mac that is the process group;
+      // on Windows it is `taskkill /T`, which is what `stopTree` reaches for. Before this,
+      // Windows killed `cmd.exe` and left the dev server holding the port, so the next run
+      // failed for a reason nobody could see — the exact outcome the comment above warns
+      // about, on the one operating system where the code did not do it. Found 2026-08-31.
+      stopTree(pid, 'SIGTERM', { child });
       const grace = raceTimer(5000, false);
       const gone = await Promise.race([exited.then(() => true), grace.promise]);
       grace.cancel();
       if (gone) return;
-      try {
-        if (pid) process.kill(-pid, 'SIGKILL');
-      } catch {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          // Already gone.
-        }
-      }
+      stopTree(pid, 'SIGKILL', { child });
       const last = raceTimer(1000, false);
       await Promise.race([exited, last.promise]);
       last.cancel();

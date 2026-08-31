@@ -25,7 +25,7 @@ import { promisify } from 'node:util';
 
 import { rankFindings, classOf, whatChanged, importGraph } from '../../src/v2/rank.js';
 import { clusterDifferences } from '../../src/v2/cluster.js';
-import { scratchDir, cleanUp } from '../support.mjs';
+import { scratchDir, cleanUp, madeUnreadable, CANNOT_LOCK_A_FOLDER } from '../support.mjs';
 
 const run = promisify(execFile);
 
@@ -366,13 +366,13 @@ describe('a value nobody can read is not a value with nothing in it', () => {
 });
 
 describe('a folder the distance measure cannot open', () => {
-  test('everything behind it is missing from the graph, and it says so', async () => {
+  test('everything behind it is missing from the graph, and it says so', async (t) => {
     const dir = await scratchDir('staysfixed-rank-shut');
     await fsp.mkdir(path.join(dir, 'src', 'open'), { recursive: true });
     await fsp.mkdir(path.join(dir, 'src', 'locked'), { recursive: true });
     await fsp.writeFile(path.join(dir, 'src', 'open', 'a.js'), 'export const a = 1;\n');
     await fsp.writeFile(path.join(dir, 'src', 'locked', 'b.js'), 'export const b = 1;\n');
-    await fsp.chmod(path.join(dir, 'src', 'locked'), 0o000);
+    if (!(await madeUnreadable(path.join(dir, 'src', 'locked')))) return t.skip(CANNOT_LOCK_A_FOLDER);
     try {
       const graph = await importGraph(dir);
       // Unavoidable: it cannot be read. What was avoidable was doing it without a word, and

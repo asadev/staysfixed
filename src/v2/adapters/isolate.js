@@ -30,6 +30,7 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -141,11 +142,20 @@ function announce(app) {
  */
 export function appNameFor(binary) {
   const text = String(binary ?? '');
-  const parts = text.split(path.sep);
+  // Both separators, not just this machine's. A path is a fact about the machine it came
+  // from, and this one is asked about a Mac app bundle — so on Windows, where `path.sep` is a
+  // backslash, `/Applications/Widget.app/Contents/MacOS/Widget` did not split at all and the
+  // app was announced to the person's screen as "Widget" only by luck, or as the wrong name
+  // when the two differ. Measured on a real Windows 11 machine on 2026-08-31, where it
+  // answered "Electron" for an app called Terminal Deck.
+  const parts = text.split(/[\\/]/);
   for (let i = parts.length - 1; i >= 0; i -= 1) {
     if (parts[i].toLowerCase().endsWith('.app')) return parts[i].slice(0, -4);
   }
-  const base = path.basename(text);
+  // The last part of the same split, rather than `path.basename`, so the whole function reads
+  // a path the same way from end to end. `path.basename` only knows this machine's separator,
+  // and half a function that understands both is worse than either.
+  const base = parts[parts.length - 1] ?? '';
   const dot = base.lastIndexOf('.');
   return dot > 0 ? base.slice(0, dot) : base;
 }
@@ -265,6 +275,52 @@ export async function takePort() {
 // ---------------------------------------------------------------------------
 
 /**
+ * The whole process table, on Windows: who is running, who started them, and with what.
+ *
+ * This is Windows' `ps -axo pid=,ppid=,command=`. There is no `ps` there, and the two callers
+ * below used to hand back an empty list rather than an answer — which reads exactly like
+ * "nothing is running", the most dangerous wrong answer either of them could give. PowerShell
+ * is on every Windows machine and answers all three columns in one call; JSON rather than a
+ * table, because a command line is full of spaces and quotes and columns cannot survive it.
+ *
+ * An unanswerable question still returns an empty list, because a sweep that cannot be done is
+ * not a reason to fail somebody's check — but it is now the rare case rather than every case.
+ *
+ * @returns {Promise<{pid: number, ppid: number, command: string}[]>}
+ */
+async function windowsProcessTable() {
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress -Depth 2',
+      ],
+      { timeout: 20_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+    );
+    const text = String(stdout).trim();
+    if (text === '') return [];
+    const parsed = JSON.parse(text);
+    // One process comes back as an object rather than a list of one, which is PowerShell being
+    // helpful in a way that would otherwise crash the loop below.
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return rows
+      .map((row) => ({
+        pid: Number(row?.ProcessId ?? 0),
+        ppid: Number(row?.ParentProcessId ?? 0),
+        command: String(row?.CommandLine ?? ''),
+      }))
+      .filter((row) => Number.isInteger(row.pid) && row.pid > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Every process on this machine whose command line contains `marker`.
  *
  * The marker is always this run's own folder path, which has a random part in it, so a
@@ -276,6 +332,15 @@ export async function takePort() {
  */
 export async function whoIsUsing(marker) {
   if (!marker || marker.length < 8) return [];
+  // Windows has no `ps`, and asking it nothing at all was the same as answering "nobody is
+  // using this folder" — which is the one answer this function must never invent, because it
+  // is what the run trusts when it decides it is alone. Measured on a real Windows 11 machine
+  // on 2026-08-31: every call here failed silently and returned an empty list.
+  if (process.platform === 'win32') {
+    return (await windowsProcessTable())
+      .filter((row) => row.pid !== process.pid && row.command.includes(marker))
+      .map((row) => ({ pid: row.pid, command: row.command }));
+  }
   try {
     const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'pid=,command='], {
       timeout: 8000,
@@ -321,19 +386,29 @@ export async function descendantsOf(pids) {
   if (roots.length === 0) return [];
   /** @type {Map<number, number[]>} */
   const childrenOf = new Map();
-  try {
-    const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'pid=,ppid='], { timeout: 8000, maxBuffer: 8 * 1024 * 1024 });
-    for (const line of stdout.split('\n')) {
-      const match = line.trim().match(/^(\d+)\s+(\d+)$/);
-      if (!match) continue;
-      const pid = Number(match[1]);
-      const parent = Number(match[2]);
-      const list = childrenOf.get(parent) ?? [];
-      list.push(pid);
-      childrenOf.set(parent, list);
+  /** @param {number} pid @param {number} parent */
+  const note = (pid, parent) => {
+    const list = childrenOf.get(parent) ?? [];
+    list.push(pid);
+    childrenOf.set(parent, list);
+  };
+  // The same table, asked for in Windows' words. Returning nothing here meant the app's own
+  // children — the renderer processes a browser or an Electron app starts — were never found
+  // and never closed, so every check on Windows left a handful of them behind. Measured on a
+  // real Windows 11 machine on 2026-08-31.
+  if (process.platform === 'win32') {
+    for (const row of await windowsProcessTable()) note(row.pid, row.ppid);
+  } else {
+    try {
+      const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'pid=,ppid='], { timeout: 8000, maxBuffer: 8 * 1024 * 1024 });
+      for (const line of stdout.split('\n')) {
+        const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+        if (!match) continue;
+        note(Number(match[1]), Number(match[2]));
+      }
+    } catch {
+      return [];
     }
-  } catch {
-    return [];
   }
   /** @type {Set<number>} */
   const found = new Set();
@@ -379,6 +454,21 @@ function refuseIfNotScratch(scratchDir, dir) {
       'A run always gets its own throwaway settings folder — never a real one.',
     );
   }
+  // Anything inside the machine's own temp folder is throwaway by definition, and the
+  // settings check below is skipped for it.
+  //
+  // This is not a loophole, it is the difference between the two operating systems. On
+  // Windows the temp folder lives INSIDE the settings folder — `C:\Users\me\AppData\Local\Temp`
+  // sits under `C:\Users\me\AppData` — so the rule "refuse anything under AppData" refused
+  // every scratch folder the tool makes for itself. Measured on a real Windows 11 machine on
+  // 2026-08-31: all 18 isolation cases failed with "that is where real settings live" about a
+  // folder the tool had just created for its own use, which means isolation, and therefore
+  // every check that opens an app, could never have worked on Windows at all.
+  //
+  // The guard itself is unchanged everywhere else, and is still the strict one: the folder
+  // has to be inside the scratch folder the engine handed us, and if it is not somewhere the
+  // operating system itself calls temporary, it may not be anywhere near real settings.
+  if (isUnderTemp(inside)) return;
   for (const real of [
     path.join(os.homedir(), 'Library', 'Application Support'),
     path.join(os.homedir(), '.config'),
@@ -388,6 +478,28 @@ function refuseIfNotScratch(scratchDir, dir) {
       throw new Error(`Stays Fixed will not point an app at "${dir}" — that is where real settings live.`);
     }
   }
+}
+
+/**
+ * Is this path inside the folder the operating system itself hands out for throwaway files?
+ *
+ * Both spellings are compared, because Windows hands the same folder out under two names: the
+ * long one and the old eight-character one (`C:\Users\RUNNER~1\...`), and a path that came
+ * back from one call can be spelled the other way from the next.
+ *
+ * @param {string} resolvedWithSeparator  An already-resolved path, ending in a separator.
+ * @returns {boolean}
+ */
+function isUnderTemp(resolvedWithSeparator) {
+  const temp = os.tmpdir();
+  /** @type {string[]} */
+  const spellings = [temp];
+  try {
+    spellings.push(fs.realpathSync.native(temp));
+  } catch {
+    // No second spelling available, which is the ordinary case everywhere but Windows.
+  }
+  return spellings.some((t) => resolvedWithSeparator.startsWith(path.resolve(t) + path.sep));
 }
 
 /**
@@ -424,6 +536,41 @@ export function isolationArgs(isolation, opts = {}) {
 }
 
 /**
+ * The Windows half of "its own settings folder".
+ *
+ * Everything in the list above is POSIX — HOME, TMPDIR, the XDG folders — and a Windows
+ * program reads none of it. It reads USERPROFILE, APPDATA and LOCALAPPDATA. So on Windows the
+ * promise at the very top of this file was quietly not being kept: the run got its own
+ * folders, and the app carried on writing into the person's real ones. Found on 2026-08-31,
+ * the first day anything in this file had ever run on Windows.
+ *
+ * The second group is not isolation, it is the machine. The environment handed to a child here
+ * REPLACES the child's own rather than adding to it, and these are the variables a Windows
+ * program is entitled to assume are there — SystemRoot above all, which is where it looks for
+ * the libraries that open a socket. `node` and `npm` were measured starting perfectly well
+ * without them on 2026-08-31, so this is not a fault anybody has hit; it is a hole left open
+ * that a real desktop app is much more likely to fall into than a command-line tool is. They
+ * are copied from this process rather than invented, because they describe the machine and
+ * not the run.
+ *
+ * @param {string} homeDir  The throwaway home this run was given.
+ * @returns {Record<string, string>}
+ */
+function windowsIsolationEnv(homeDir) {
+  /** @type {Record<string, string>} */
+  const env = {
+    USERPROFILE: homeDir,
+    APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
+    LOCALAPPDATA: path.join(homeDir, 'AppData', 'Local'),
+  };
+  for (const name of ['SystemRoot', 'windir', 'SystemDrive', 'COMSPEC', 'PATHEXT', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE']) {
+    const value = process.env[name];
+    if (value) env[name] = value;
+  }
+  return env;
+}
+
+/**
  * Set one run up: its own folders, its own ports, its own identity.
  *
  * Nothing is started here. Reserving and launching are separate on purpose — the engine
@@ -457,6 +604,13 @@ export async function reserveIsolation(opts) {
   const crashDir = path.join(dir, 'crashes');
   for (const folder of [userDataDir, homeDir, tmpDir, cacheDir, crashDir]) {
     await fsp.mkdir(folder, { recursive: true });
+  }
+  // The two folders a Windows program expects to find already there. It is handed a home of
+  // its own below, and a home with no AppData in it is not one any Windows app has ever seen.
+  if (process.platform === 'win32') {
+    for (const folder of [path.join(homeDir, 'AppData', 'Roaming'), path.join(homeDir, 'AppData', 'Local')]) {
+      await fsp.mkdir(folder, { recursive: true });
+    }
   }
 
   const debugPort = await takePort();
@@ -516,6 +670,7 @@ export async function reserveIsolation(opts) {
       // Nothing being checked should be phoning home about itself.
       ELECTRON_NO_ATTACH_CONSOLE: '1',
       ELECTRON_ENABLE_LOGGING: '1',
+      ...(process.platform === 'win32' ? windowsIsolationEnv(homeDir) : {}),
       ...identityEnv,
       ...opts.env,
     },

@@ -23,7 +23,7 @@ import {
 } from '../../src/v2/adapters/process.js';
 import { trimForStorage } from '../../src/v2/adapters/contract.js';
 import { doorFact, walkFromCapture, whatTheWalkDid } from '../../src/v2/coverage.js';
-import { scratchDir, cleanUp } from '../support.mjs';
+import { scratchDir, cleanUp, madeUnreadable, CANNOT_LOCK_A_FOLDER } from '../support.mjs';
 
 test.after(cleanUp);
 
@@ -207,7 +207,7 @@ describe('a place that could not be read', () => {
     const root = await scratchDir('staysfixed-unread');
     await fsp.mkdir(path.join(root, 'out'));
     await fsp.writeFile(path.join(root, 'out', 'app.js'), 'one');
-    await fsp.chmod(path.join(root, 'out'), 0o000);
+    if (!(await madeUnreadable(path.join(root, 'out')))) return t.skip(CANNOT_LOCK_A_FOLDER);
     let after;
     try {
       after = await snapshotTree(root);

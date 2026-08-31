@@ -27,7 +27,6 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 
 import {
   surveyBrowsers,
@@ -44,8 +43,11 @@ import {
   PORT_NEVER_USE,
   SCRATCH_ROOT,
 } from '../../src/v2/browsers.js';
+import { orphansSurviveHere, NO_ORPHANS_HERE, SIGNALS_ARE_CATCHABLE, NO_REAL_SIGNALS } from '../support.mjs';
 
-const BROWSERS_MODULE = fileURLToPath(new URL('../../src/v2/browsers.js', import.meta.url));
+// A URL string, not a path: the throwaway run below imports it from inside a `-e` script,
+// and `import('C:\...')` is refused by Node on Windows because `C:` reads as a protocol.
+const BROWSERS_MODULE = new URL('../../src/v2/browsers.js', import.meta.url).href;
 
 /** Long enough for a cold browser start on a busy laptop. */
 const START_MS = 90_000;
@@ -116,6 +118,30 @@ async function waitUntilGone(pid, ms = 10_000) {
   return !alive(pid);
 }
 
+/**
+ * Wait for a folder to go away, rather than assuming it already has.
+ *
+ * The promise being tested is that nothing a run opened outlives it — not that the tidying up
+ * is instantaneous. On Linux and a Mac the two look the same, because the run kills the
+ * browser and deletes the folder in the same exit handler, so by the time the process id has
+ * gone the folder has gone with it. On Windows it does not: the operating system takes the
+ * browser with the run that started it, so the process id can vanish while the exit handler is
+ * still deleting. Measured on a real Windows 11 machine on 2026-08-31 — the folder was gone a
+ * fraction of a second later, and this case failed for asking a moment too early.
+ *
+ * @param {string} dir
+ * @param {number} ms
+ * @returns {Promise<boolean>} true when it went away in time
+ */
+async function waitUntilFolderGone(dir, ms = 10_000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (!fs.existsSync(dir)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return !fs.existsSync(dir);
+}
+
 describe('choosing a browser', () => {
   before(async () => {
     survey = await surveyBrowsers();
@@ -125,7 +151,15 @@ describe('choosing a browser', () => {
     if (survey.chosen === null) {
       // No browser is a legitimate state on a bare machine. What is not legitimate
       // is a shrug: the answer has to carry the command that fixes it.
-      assert.match(survey.note, /npm install/, 'with no browser at all, the note has to carry the command that gets one');
+      // The command itself, not a guess at its shape. This asked for `npm install`, which
+      // the product deliberately stopped saying when it moved to `npx playwright install
+      // chromium` — one command that leaves nothing in anybody's project. Nobody noticed,
+      // because this branch only runs on a machine with no browser at all, and it first ran
+      // on a real Windows 11 machine on 2026-08-31.
+      assert.ok(
+        survey.note.includes(INSTALL_COMMAND),
+        `with no browser at all, the note has to carry the command that gets one. It said: ${survey.note}`,
+      );
       assert.equal(survey.install, INSTALL_COMMAND);
       return;
     }
@@ -282,8 +316,15 @@ describe('opening one', () => {
 });
 
 describe('nothing it opened outlives the run', () => {
-  test('not when the run is interrupted', { timeout: START_MS }, async () => {
+  test('not when the run is interrupted', { timeout: START_MS }, async (t) => {
     if (!survey.chosen) return;
+    // Ctrl-C has to be a signal the run can catch, or there is nothing here to prove. On
+    // Windows `child.kill('SIGINT')` is not a signal at all — Node terminates the process
+    // outright — so no handler of ours ever runs and the profile is left behind for
+    // `staysfixed browsers --clean` rather than cleared in the moment. A real Ctrl-C typed
+    // into a Windows terminal DOES reach the handler; a test simply cannot send one.
+    // Measured on a real Windows 11 machine on 2026-08-31.
+    if (!SIGNALS_ARE_CATCHABLE) return t.skip(NO_REAL_SIGNALS);
     const { node, browserPid, profile } = await startALeakingRun('block');
     assert.ok(alive(browserPid), 'the browser has to be running before this proves anything');
 
@@ -291,20 +332,21 @@ describe('nothing it opened outlives the run', () => {
     node.kill('SIGINT');
 
     assert.ok(await waitUntilGone(browserPid), 'a browser still running after Ctrl-C is a browser the person now has to hunt down');
-    assert.equal(fs.existsSync(profile), false, 'and its profile goes with it');
+    assert.ok(await waitUntilFolderGone(profile), 'and its profile goes with it');
   });
 
   test('not when the run falls over', { timeout: START_MS }, async () => {
     if (!survey.chosen) return;
     const { browserPid, profile } = await startALeakingRun('throw');
     assert.ok(await waitUntilGone(browserPid), 'a run that throws must not leave a browser behind either');
-    assert.equal(fs.existsSync(profile), false);
+    assert.ok(await waitUntilFolderGone(profile), 'and the throwaway profile goes with it');
   });
 });
 
 describe('leftovers from a run that crashed', () => {
-  test('a browser orphaned by a killed run is found and quit', { timeout: START_MS }, async () => {
+  test('a browser orphaned by a killed run is found and quit', { timeout: START_MS }, async (t) => {
     if (!survey.chosen) return;
+    if (!(await orphansSurviveHere())) return t.skip(NO_ORPHANS_HERE);
     const { node, browserPid } = await startALeakingRun('block');
 
     // SIGKILL: the laptop died. No handler of ours can possibly run, which is the
