@@ -47,6 +47,7 @@ import { StaysFixedError, isExpected } from '../core/errors.js';
 import { findChrome, freePort, resolveElectronBinary } from '../drive/find.js';
 import { waitForEndpoint } from '../drive/cdp.js';
 import { keepOutput, stopProcess } from '../drive/browser.js';
+import { stopTree } from '../core/stop-tree.js';
 
 const exec = promisify(execFile);
 
@@ -309,6 +310,21 @@ export async function probeBrowser(binary) {
     const version = /\d+\.\d+\.\d+(\.\d+)?/.exec(said)?.[0];
     // It answered, but with no version in it. That is what a broken bundle does:
     // it exits zero and prints the library it could not load.
+    //
+    // It is ALSO what a perfectly good Windows browser does when a copy of itself is already
+    // open: the new process hands the request to the running one, prints "Opening in existing
+    // browser session." and exits zero, and no amount of waiting produces a version. On a real
+    // Windows 11 machine on 2026-08-31 that was true of every browser on the box, so the tool
+    // said "There is no browser on this machine that will run" while standing next to a
+    // perfectly good Edge — which is the whole product unusable there, not a cosmetic wrong
+    // note. So Windows gets a second question, and only in this one case: the version Windows
+    // keeps inside the file, which starts nothing and cannot be answered on by another copy.
+    // A browser that failed outright still falls through to the catch below and is still
+    // reported broken, so nothing about a genuinely broken browser has been softened.
+    if (!version && process.platform === 'win32') {
+      const fromTheFile = await windowsFileVersion(binary);
+      if (fromTheFile) return { ok: true, version: fromTheFile };
+    }
     if (!version) return { ok: false, why: said.split('\n')[0]?.slice(0, 200) || 'it printed nothing when asked its version' };
     return { ok: true, version };
   } catch (e) {
@@ -316,6 +332,52 @@ export async function probeBrowser(binary) {
     if (err.killed) return { ok: false, why: `it did not answer within ${Math.round(PROBE_MS / 1000)} seconds` };
     return { ok: false, why: String(err.stderr || (e instanceof Error ? e.message : e)).split('\n')[0].slice(0, 200) };
   }
+}
+
+/**
+ * The version Windows keeps inside the .exe, read without starting it.
+ *
+ * Every Windows program carries its version as part of the file, and PowerShell reads it out
+ * in one line. Nothing is launched, so a browser the person already has open cannot answer on
+ * this one's behalf. Returns null whenever the answer is not a version, and the caller then
+ * falls back to asking the program itself.
+ *
+ * @param {string} binary
+ * @returns {Promise<string|null>}
+ */
+async function windowsFileVersion(binary) {
+  try {
+    const { stdout } = await exec(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `(Get-Item -LiteralPath ${powershellString(binary)}).VersionInfo.ProductVersion`,
+      ],
+      { timeout: PROBE_MS, maxBuffer: 1 << 20, windowsHide: true },
+    );
+    return /\d+\.\d+\.\d+(\.\d+)?/.exec(String(stdout))?.[0] ?? null;
+  } catch {
+    // No PowerShell, or a file with no version in it. Either way the caller has a fallback.
+    return null;
+  }
+}
+
+/**
+ * One PowerShell string literal, with the quotes it needs.
+ *
+ * Single quotes, because PowerShell does not look inside them for variables — a path with a
+ * `$` in it is a path, not something to expand. A single quote inside the value is doubled,
+ * which is how PowerShell escapes one.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function powershellString(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
 }
 
 /**
@@ -549,9 +611,13 @@ function installGuards() {
  * @returns {Promise<void>}
  */
 async function removeStubbornly(home) {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
     try {
-      await fsp.rm(home, { recursive: true, force: true });
+      // `maxRetries` as well as the loop, because the two answer different questions: the
+      // loop is for a file that reappears behind the sweep, and the retries are for Windows
+      // refusing to delete a folder anything still has a handle open inside. Measured on a
+      // real Windows 11 machine on 2026-08-31, where the second is what actually happens.
+      await fsp.rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
       if (!fs.existsSync(home)) return;
     } catch {
       // A file recreated a millisecond after the sweep began. Wait for whoever wrote it to
@@ -570,11 +636,13 @@ async function removeStubbornly(home) {
  */
 function killNow(pid, home) {
   if (pid) {
-    try {
-      process.kill(pid, 'SIGKILL');
-    } catch {
-      // Already gone. That is the outcome we wanted.
-    }
+    // The whole tree. `process.kill` stops the one process it is given, and a browser is a
+    // parent plus a renderer for every page it has open — on Windows those renderers survive
+    // their parent, keep writing into the throwaway profile, and the sweep below can then
+    // never finish. Measured on a real Windows 11 machine on 2026-08-31: the profile of an
+    // interrupted run was still on disk afterwards. `stopTree` is deliberately synchronous,
+    // because this runs from an exit handler where there is no event loop left to await on.
+    stopTree(pid, 'SIGKILL');
     // SIGKILL is a request to the kernel, not something that has already happened, and a
     // browser is not one process. While the parent is being reaped its children are still
     // writing into the profile, so deleting the folder in the same breath loses the race:
@@ -586,12 +654,21 @@ function killNow(pid, home) {
   }
   // Then remove it, and more than once. One rmSync is a snapshot; a file recreated a
   // millisecond after the sweep began turns it into ENOTEMPTY and a leftover folder.
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  //
+  // The budget is bigger than it looks it needs to be, because Windows does not fail the same
+  // way. There a folder cannot be deleted while ANY process still has a handle open inside it,
+  // and the operating system releases those handles a little after the processes are gone —
+  // so the answer is not ENOTEMPTY, it is EBUSY, and it stays EBUSY for as long as the reaping
+  // takes. Measured on a real Windows 11 machine on 2026-08-31: five attempts a hundred
+  // milliseconds apart were not enough, and a run that fell over left its throwaway profile
+  // on disk. Twelve attempts is about a third of a second in the worst case, which is what an
+  // exit handler can honestly spend.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     try {
-      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
       return;
     } catch {
-      waitSync(20);
+      waitSync(25);
     }
   }
   // A profile left in the temporary folder is untidy, not harmful — and it is exactly what
@@ -1093,16 +1170,56 @@ async function isOurs(pid, userDataDir) {
   if (!userDataDir.startsWith(SCRATCH_ROOT)) return false;
   if (!isAlive(pid)) return false;
   if (process.platform === 'win32') {
-    // No cheap command line read here. The profile folder is under our own
-    // scratch root and the record was written by us, which is the same
-    // guarantee arrived at a different way.
-    return true;
+    // Windows is asked the same question, in Windows' words.
+    //
+    // This used to answer `true` here without asking anything, on the reasoning that the
+    // profile folder was ours and the record was written by us. That reasoning drops the half
+    // that matters: the record says which process id was ours THEN, and the paragraph above
+    // is about an id that has since been handed to somebody else. Measured on a real Windows
+    // 11 machine on 2026-08-31 — a record naming a stranger's running program was reported as
+    // one of our browsers, and `--clean` would have killed it. Windows has no `ps`, so the
+    // command line is read out of the process table instead; a query that cannot be answered
+    // means no, because claiming somebody else's program is the one outcome forbidden here.
+    const line = await windowsCommandLine(pid);
+    return line !== null && line.includes(userDataDir);
   }
   try {
     const { stdout } = await exec('ps', ['-o', 'command=', '-p', String(pid)], { timeout: PROBE_MS, windowsHide: true });
     return String(stdout).includes(userDataDir);
   } catch {
     return false;
+  }
+}
+
+/**
+ * The command line one running process was started with, on Windows.
+ *
+ * This is Windows' `ps -o command=`. `tasklist` cannot do it — it reports the program's name
+ * and nothing about its arguments, and the argument is the whole question here. Returns null
+ * when the process is gone or the question could not be asked at all, and the caller reads
+ * null as "not ours".
+ *
+ * @param {number} pid
+ * @returns {Promise<string|null>}
+ */
+async function windowsCommandLine(pid) {
+  try {
+    const { stdout } = await exec(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`,
+      ],
+      { timeout: PROBE_MS, maxBuffer: 1 << 20, windowsHide: true },
+    );
+    const said = String(stdout).trim();
+    return said.length > 0 ? said : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1134,17 +1251,12 @@ export async function cleanStrays() {
       continue;
     }
     if (stray.running && stray.pid !== null) {
-      try {
-        process.kill(stray.pid, 'SIGTERM');
-      } catch {
-        // It went away between being listed and being asked. Fine.
-      }
+      // The tree again, for the same reason as `killNow`: a leftover browser's renderers are
+      // separate processes, and on Windows they hold the profile folder open long after their
+      // parent has gone. `--clean` that leaves half a browser behind has not cleaned anything.
+      stopTree(stray.pid, 'SIGTERM');
       await waitForGone(stray.pid, GRACE_MS);
-      try {
-        process.kill(stray.pid, 'SIGKILL');
-      } catch {
-        // Already gone, which is what we wanted.
-      }
+      stopTree(stray.pid, 'SIGKILL');
       quit.push(stray);
     } else {
       swept.push(stray);

@@ -29,7 +29,7 @@ import path from 'node:path';
 
 import { readHostProbe, withoutComments, capabilities, reachableHosts } from '../../src/v2/doctor.js';
 import { POWERSHELL_PATHS } from '../../src/v2/remote.js';
-import { scratchDir, cleanUp } from '../support.mjs';
+import { scratchDir, cleanUp, withHome } from '../support.mjs';
 
 after(cleanUp);
 
@@ -133,9 +133,7 @@ describe('it does not connect to your machines unasked', () => {
       'utf8',
     );
 
-    const realHome = process.env.HOME;
-    process.env.HOME = home;
-    try {
+    await withHome(home, async () => {
       const hosts = await reachableHosts();
       // The machine is still NAMED — quietly leaving it out would be the same bug in the
       // other direction, where the runner somebody has simply is not in the answer.
@@ -144,10 +142,7 @@ describe('it does not connect to your machines unasked', () => {
       assert.equal(hosts[0].reachable, false, 'nothing may be called reachable without dialling it');
       assert.match(hosts[0].how, /NOT dialled/);
       assert.match(hosts[0].how, /--machines/, 'and it has to say how to ask for it');
-    } finally {
-      if (realHome === undefined) delete process.env.HOME;
-      else process.env.HOME = realHome;
-    }
+    });
   });
 });
 

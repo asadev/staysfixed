@@ -45,7 +45,11 @@ before(async () => {
 
 after(async () => {
   for (const child of started) await stopServer(child);
-  if (scratch) await fsp.rm(scratch, { recursive: true, force: true });
+  // Retries, because Windows will not delete a file anything still has open, and "still has
+  // open" outlasts the program that had it open by a moment. Measured on a real Windows 11
+  // machine on 2026-08-31: this line threw EBUSY and failed the whole file, after every case
+  // in it had passed.
+  if (scratch) await fsp.rm(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 });
 
 /**

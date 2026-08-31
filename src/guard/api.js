@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { StaysFixedError } from '../core/errors.js';
+import { stopTree, OWN_PROCESS_GROUP } from '../core/stop-tree.js';
 
 /** A plain-language expectation that did not hold. */
 export class ExpectationFailed extends Error {
@@ -313,7 +314,7 @@ export function makeGuardApi(page, project, opts = {}) {
         const child = spawn(cmd, {
           cwd,
           shell: true,
-          detached: process.platform !== 'win32',
+          detached: OWN_PROCESS_GROUP,
           windowsHide: true,
         });
 
@@ -324,15 +325,19 @@ export function makeGuardApi(page, project, opts = {}) {
         let how = 'ran';
         let done = false;
 
-        /** Stop the shell AND everything it started. */
+        /**
+         * Stop the shell AND everything it started.
+         *
+         * This used to kill only the child on Windows, with a comment saying that was the
+         * best that could be done there. It is not: measured on a real Windows 11 machine on
+         * 2026-08-31, "kills a command that was still running when the run gave up" failed,
+         * because killing `cmd.exe` left the `node` underneath it running and it finished its
+         * work and wrote its file after the run had given up on it — the same defect Linux
+         * showed on 2026-08-31, on a different operating system's spelling of it. `stopTree`
+         * holds both spellings.
+         */
         const stopEverything = () => {
-          if (!child.pid) return;
-          try {
-            if (process.platform === 'win32') child.kill('SIGKILL');
-            else process.kill(-child.pid, 'SIGKILL');
-          } catch {
-            // Already gone, which is the good case.
-          }
+          stopTree(child.pid, 'SIGKILL', { child });
         };
 
         child.stdout?.setEncoding('utf8');

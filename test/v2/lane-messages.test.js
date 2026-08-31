@@ -27,7 +27,7 @@ import { promisify } from 'node:util';
 
 import { check, aboutSomewhereElse } from '../../src/v2/check.js';
 import { plan, isThereOnDisk } from '../../src/v2/init.js';
-import { scratchDir, cleanUp } from '../support.mjs';
+import { scratchDir, cleanUp, CANNOT_LOCK_A_FOLDER, TEMP_ENV_VAR } from '../support.mjs';
 
 const run = promisify(execFile);
 
@@ -71,13 +71,33 @@ async function aProject(label, name) {
  * @returns {Promise<T>}
  */
 async function withTmpdir(where, body) {
-  const before = process.env.TMPDIR;
-  process.env.TMPDIR = where;
+  // The variable this operating system actually reads. Windows reads TEMP, not TMPDIR, so
+  // setting TMPDIR there changed nothing: the check ran perfectly against the real temporary
+  // folder and then failed both of these cases on a real Windows 11 machine on 2026-08-31,
+  // for the honest reason that nothing had been broken to look at.
+  const before = process.env[TEMP_ENV_VAR];
+  process.env[TEMP_ENV_VAR] = where;
   try {
     return await body();
   } finally {
-    if (before === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = before;
+    if (before === undefined) delete process.env[TEMP_ENV_VAR];
+    else process.env[TEMP_ENV_VAR] = before;
+  }
+}
+
+/**
+ * Can this account still write into a folder it has just locked?
+ * @param {string} dir
+ * @returns {Promise<boolean>}
+ */
+async function canWriteIn(dir) {
+  try {
+    const probe = path.join(dir, 'staysfixed-write-probe');
+    await fsp.writeFile(probe, 'x');
+    await fsp.rm(probe, { force: true });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -100,11 +120,14 @@ describe('the temporary folder will not take a new folder', () => {
     assert.match(outcome.summary, /run the check again/, outcome.summary);
   });
 
-  test('a folder this user cannot write in says exactly that', async () => {
+  test('a folder this user cannot write in says exactly that', async (t) => {
     const dir = await aProject('staysfixed-tmp-readonly', 'tmp-readonly-product');
     const locked = path.join(dir, 'locked');
     await fsp.mkdir(locked, { recursive: true });
+    // A folder that really refuses a write. Windows will not make one with chmod, so there is
+    // nothing here to measure and the case says so rather than failing.
     await fsp.chmod(locked, 0o500);
+    if (await canWriteIn(locked)) return t.skip(CANNOT_LOCK_A_FOLDER);
 
     const outcome = await withTmpdir(locked, () => check({ cwd: dir }));
     await fsp.chmod(locked, 0o700).catch(() => {});

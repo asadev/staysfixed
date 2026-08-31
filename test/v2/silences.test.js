@@ -28,6 +28,7 @@ import { promisify } from 'node:util';
 import { howLongItTook, trimForStorage, NOT_COVERED_MEANING } from '../../src/v2/adapters/contract.js';
 import { check } from '../../src/v2/check.js';
 import { classify } from '../../src/v2/sealed.js';
+import { madeUnreadable, CANNOT_LOCK_A_FOLDER } from '../support.mjs';
 import { proveCause } from '../../src/v2/cause.js';
 import { subtractWobble, wobbleStorm } from '../../src/v2/observation.js';
 import { duplicateGaps } from '../../src/v2/run.js';
@@ -381,14 +382,14 @@ describe('two answers at one address are a hole, not a quiet overwrite', () => {
 });
 
 describe('a folder the route reader cannot open takes every route behind it, and says so', () => {
-  test('the routes are missing and the folder is named', async () => {
+  test('the routes are missing and the folder is named', async (t) => {
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-routes-'));
     try {
       await fsp.mkdir(path.join(dir, 'app', 'orders'), { recursive: true });
       await fsp.mkdir(path.join(dir, 'app', 'locked', 'refunds'), { recursive: true });
       await fsp.writeFile(path.join(dir, 'app', 'orders', 'route.js'), 'export function GET() {}\n');
       await fsp.writeFile(path.join(dir, 'app', 'locked', 'refunds', 'route.js'), 'export function POST() {}\n');
-      await fsp.chmod(path.join(dir, 'app', 'locked'), 0o000);
+      if (!(await madeUnreadable(path.join(dir, 'app', 'locked')))) return t.skip(CANNOT_LOCK_A_FOLDER);
 
       const reading = await readFileRoutes(dir);
       const names = reading.doors.map((d) => d.name);

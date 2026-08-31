@@ -25,7 +25,6 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { cliPath, repoRoot, scratchDir, cleanUp } from '../support.mjs';
 import { renderCheck, findingForAgent, cleanForAgent } from '../../src/v2/mcp/tools.js';
@@ -37,7 +36,11 @@ const PROTOCOL = '2025-06-18';
 const ANSWER_MS = 60_000;
 
 /** The version 2 server, started directly, so it is covered before the front door is switched over. */
-const V2_SERVER = fileURLToPath(new URL('../../src/v2/mcp/server.js', import.meta.url));
+// The server's address as a URL string, because that is what the throwaway process below
+// imports. Handing `import()` a bare Windows path (`C:\...`) makes Node read `C:` as a
+// protocol and refuse: on a real Windows 11 machine on 2026-08-31 the server never started
+// at all and all twelve cases here failed as "the server never answered".
+const V2_SERVER = new URL('../../src/v2/mcp/server.js', import.meta.url).href;
 
 /**
  * @typedef {object} Server

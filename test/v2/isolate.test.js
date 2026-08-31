@@ -38,7 +38,7 @@ import {
   stillOpen,
   takePort,
 } from '../../src/v2/adapters/isolate.js';
-import { scratchDir, cleanUp } from '../support.mjs';
+import { scratchDir, cleanUp, TEMP_ENV_VAR } from '../support.mjs';
 import { sweepAbandonedScratch, guardNames } from '../../src/v2/check.js';
 import { spawnServer, stopServer } from '../../src/v2/adapters/child.js';
 
@@ -91,8 +91,21 @@ describe('one run, on its own', () => {
     const one = await reserve();
     try {
       const home = os.homedir();
+      const throwaway = path.resolve(os.tmpdir()) + path.sep;
+      // The folder has to be one the operating system itself calls temporary. That is the
+      // real promise, and it is the one that means the same thing everywhere.
+      assert.ok(
+        path.resolve(one.userDataDir).startsWith(throwaway),
+        `the settings folder has to be inside this machine's own throwaway folder, and it is at ${one.userDataDir}`,
+      );
       for (const real of ['Library/Application Support', '.config', 'AppData']) {
-        const forbidden = path.join(home, real);
+        const forbidden = path.join(home, real) + path.sep;
+        // On Windows the throwaway folder lives INSIDE AppData — it is
+        // `C:\Users\me\AppData\Local\Temp` — so "under AppData" and "somebody's real
+        // settings" are not the same question there, and asking the first one failed this
+        // case on a real Windows 11 machine on 2026-08-31 about a folder that was correct.
+        // Where the two overlap, the line above is the assertion that still means something.
+        if (throwaway.startsWith(forbidden)) continue;
         assert.ok(!one.userDataDir.startsWith(forbidden), `the settings folder is inside ${forbidden}`);
         assert.ok(!String(one.env.HOME).startsWith(forbidden), `HOME is inside ${forbidden}`);
       }
@@ -346,8 +359,12 @@ describe('copies left behind by a run that never finished', () => {
     // had 777 MB of them sitting in the temporary folder, one copy 485 MB, and later runs
     // added to the pile rather than clearing it.
     const here = await scratchDir('staysfixed-sweeproot');
-    const realTmp = process.env.TMPDIR;
-    process.env.TMPDIR = here;
+    // The variable this operating system actually reads. Windows reads TEMP, not TMPDIR, so
+    // setting TMPDIR there left the sweep looking at the machine's real temporary folder and
+    // the three folders written below were never in front of it. Measured on a real Windows 11
+    // machine on 2026-08-31.
+    const realTmp = process.env[TEMP_ENV_VAR];
+    process.env[TEMP_ENV_VAR] = here;
     try {
       const dead = path.join(here, 'staysfixed-check-dead');
       const busy = path.join(here, 'staysfixed-check-busy');
@@ -365,8 +382,8 @@ describe('copies left behind by a run that never finished', () => {
       // would be exactly the mistake this guards against, one directory along.
       assert.equal(fs.existsSync(nameless), true, 'a fresh copy with no owner is not evidence of abandonment');
     } finally {
-      if (realTmp === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = realTmp;
+      if (realTmp === undefined) delete process.env[TEMP_ENV_VAR];
+      else process.env[TEMP_ENV_VAR] = realTmp;
     }
   });
 });

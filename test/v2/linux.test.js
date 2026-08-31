@@ -433,7 +433,10 @@ describe('finding the app and knowing when not to bother', () => {
     assert.equal(findLinuxBuild({ root: '/p', config: { remoteExe: '/opt/app/app' } }).mode, 'there');
     const push = findLinuxBuild({ root: '/p', config: { exe: 'dist/linux/app' } });
     assert.equal(push.mode, 'push');
-    assert.equal(push.local, '/p/dist/linux/app');
+    // `local` is the build on THIS machine, waiting to be copied over, so its separator is
+    // this machine's. Spelled with `/` it failed on a real Windows 11 machine on 2026-08-31
+    // about a perfectly correct answer.
+    assert.equal(push.local, path.join('/p', 'dist/linux/app'));
     assert.match(push.why, /has to be copied/);
     assert.equal(findLinuxBuild({ root: '/p', config: {} }).mode, 'none');
   });

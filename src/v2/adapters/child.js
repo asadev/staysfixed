@@ -21,6 +21,8 @@
 
 import { spawn } from 'node:child_process';
 
+import { stopTree, OWN_PROCESS_GROUP } from '../../core/stop-tree.js';
+
 /**
  * Start the product, in a group of its own.
  *
@@ -34,9 +36,10 @@ export function spawnServer(command, opts) {
     cwd: opts.cwd,
     env: opts.env,
     stdio: opts.stdio ?? ['ignore', 'pipe', 'pipe'],
-    // The whole point. On Windows there are no process groups of this kind, and killing the
-    // child is the best that can be done there.
-    detached: process.platform !== 'win32',
+    // The whole point. Windows has no process groups of this kind, and `detached` there means
+    // a console window of its own instead — so Windows is left alone at spawn time and gets
+    // its whole tree stopped by `stopTree` below, which walks the children itself.
+    detached: OWN_PROCESS_GROUP,
   });
 }
 
@@ -52,21 +55,16 @@ export async function stopServer(child, opts = {}) {
   const pid = child.pid;
   const graceMs = opts.graceMs ?? 500;
 
-  /** @param {NodeJS.Signals} signal */
+  /**
+   * @param {'SIGTERM'|'SIGKILL'} signal
+   */
   const tellTheGroup = (signal) => {
-    if (!pid) return;
-    try {
-      // A negative pid is the GROUP. This is the line that makes the difference.
-      if (process.platform === 'win32') child.kill(signal);
-      else process.kill(-pid, signal);
-    } catch {
-      // No group, or already gone. Ask the one process we definitely know about.
-      try {
-        child.kill(signal);
-      } catch {
-        // Already gone, which is the outcome wanted.
-      }
-    }
+    // The group on Linux and a Mac, the tree of children on Windows. Killing only the shell
+    // on Windows left the server running and holding the folder it was started in: measured
+    // on a real Windows 11 machine on 2026-08-31, where the whole of `waiting.test.js` failed
+    // on being unable to delete its own scratch folder afterwards, because the servers it had
+    // asked to stop were all still there.
+    stopTree(pid, signal, { child });
   };
 
   if (child.exitCode === null && child.signalCode === null) {
