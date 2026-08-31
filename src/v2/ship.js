@@ -44,7 +44,7 @@ import { promisify } from 'node:util';
 import { EXIT, messageOf } from '../core/errors.js';
 import { say, warn, ok, blank, heading, setLogLevel } from '../core/log.js';
 import { findConfigFile, rootForConfig } from '../core/paths.js';
-import { openStore, ensureStore, listBuilds, listCaptures, latestCapture } from './store.js';
+import { openStore, ensureStore, listBuilds, listCaptures, latestCapture, productNameFor } from './store.js';
 import { cutReference, shouldCut, referenceHistory, currentReference } from './reference.js';
 
 const exec = promisify(execFile);
@@ -141,7 +141,13 @@ export async function onShip(opts = {}) {
   };
 
   try {
-    const product = opts.product ?? (await productName(root));
+    // ONE READER FOR THE NAME, SHARED WITH `check`. Ship used to work this out itself and
+    // read the settings only when the file ended in `.json` — and every settings file
+    // `staysfixed init` writes is JavaScript, so on a real project the two commands filed
+    // under two different names and never met. See `productNameFor` in store.js for the
+    // measurement.
+    const naming = await productNameFor(root, { product: opts.product });
+    const product = naming.name;
     result.product = product;
 
     const release = await detectRelease({ root, version: opts.version, tag: opts.tag, build: opts.build });
@@ -183,13 +189,26 @@ export async function onShip(opts = {}) {
       // one direction of wrong answer that gets a broken build waved through, because a
       // person who believes nothing is watching stops reading what it says.
       const standing = await standingReference(store, product);
+      // WHICH NAME IT LOOKED UNDER, said out loud. "Stays Fixed had never seen this build"
+      // was true and useless: it named neither the drawer that was searched nor the fact
+      // that another drawer exists. When the settings and package.json disagree about what
+      // this product is called, that disagreement IS the answer — `check` files under one
+      // and `ship` looked under the other, and a project can sit like that for its whole
+      // life without either command mentioning it. Measured 2026-08-31 on a Windows app
+      // whose settings said `notepad` and whose package.json said `win-proof`.
+      const misnamed = await nameClash(store, naming);
       result.lines = [
         `${product} ${release.describe}`,
-        `Stays Fixed has no record of this build, so it did not become the reference. ${stillComparedAgainst(standing, product)}${because}`,
-        'Run `staysfixed check` once before the next release and it will record itself from then on.',
+        `Stays Fixed has no record of a build of ${product}, so it did not become the reference. ${stillComparedAgainst(standing, product)}${because}`,
+        ...(misnamed ? [misnamed.line] : []),
+        misnamed
+          ? `Ship under the same name — \`staysfixed ship --product ${misnamed.other}\` — or make the two agree.`
+          : 'Run `staysfixed check` once before the next release and it will record itself from then on.',
         ...(unreadable.length > 0 ? [`What could not be read: ${unreadable.join('; ')}`] : []),
       ];
-      result.summary = `${product} shipped ${release.what}, but Stays Fixed had never seen this build, so what "working" means has not moved.${because} ${stillComparedAgainst(standing, product)} Run a check before the next release.`;
+      result.summary = misnamed
+        ? `${product} shipped ${release.what}, but there is no record of a build of ${product}: ${misnamed.short} Nothing has been compared, and nothing will be until the two names agree.`
+        : `${product} shipped ${release.what}, but Stays Fixed had never seen this build, so what "working" means has not moved.${because} ${stillComparedAgainst(standing, product)} Run a check before the next release.`;
       return result;
     }
 
@@ -242,7 +261,7 @@ export async function onShip(opts = {}) {
       result.refused = [
         `Refusing to make ${release.what} the standard for ${product}: the run behind it never got the product to do anything.`,
         `All ${saw.refused.length} of the ${plural(saw.refused.length, 'journey', 'journeys')} on record for this build came back refused — it did not start, or could not be reached — so what would be written down as "working" is the words "could not be read", ${saw.refused.length === 1 ? 'once' : `${saw.refused.length} times over`}: ${saw.refused.join(', ')}.`,
-        'Every later check would then compare one refusal against another, find them equal, and report a product that cannot start as one where nothing has changed. And the day it does start, everything it does is reported as a difference nobody caused, some of it in a class no agent may wave through.',
+        'A reference made of refusals is a reference that says nothing: every later check would find no answer on either side of every address, so nothing about this product would be watched at all, and the run would say so on every line of its coverage list instead of telling you anything.',
         'Get the product running, run `staysfixed check`, and ship again. Or force it, and this refusal is kept on the record beside the reference.',
       ].join(' ');
       result.lines = [
@@ -302,7 +321,7 @@ export async function onShip(opts = {}) {
       // come back as findings rather than as a gap.
       ...(saw.refused.length > 0 && saw.walked.length > 0
         ? [
-            `${saw.refused.length} of ${saw.refused.length + saw.walked.length} ${plural(saw.refused.length + saw.walked.length, 'journey', 'journeys')} refused and ${plural(saw.refused.length, 'is', 'are')} being recorded as part of this reference without having observed anything: ${saw.refused.join(', ')}. What ${plural(saw.refused.length, 'it does is', 'those do is')} not in the standard, so the first check after ${plural(saw.refused.length, 'it starts', 'they start')} working will report ${plural(saw.refused.length, 'it', 'them')} as changed.`,
+            `${saw.refused.length} of ${saw.refused.length + saw.walked.length} ${plural(saw.refused.length + saw.walked.length, 'journey', 'journeys')} refused and ${plural(saw.refused.length, 'is', 'are')} being recorded as part of this reference without having observed anything: ${saw.refused.join(', ')}. What ${plural(saw.refused.length, 'it does is', 'those do is')} not in the standard, so nothing behind ${plural(saw.refused.length, 'it', 'them')} is being watched until ${plural(saw.refused.length, 'it runs', 'they run')} — a check will say so in its coverage list rather than reporting it as a change.`,
           ]
         : []),
       // And the forced version of the same thing, said as plainly as it deserves.
@@ -707,27 +726,66 @@ function projectRoot(from) {
   return config ? rootForConfig(config) : start;
 }
 
-/**
- * Which product is this? The settings file first, because one repo builds five things and
- * only the settings file knows what they are called.
- *
- * @param {string} root
- * @returns {Promise<string>}
+/*
+ * `productName` used to live here and is gone on purpose. It read `product` out of the
+ * settings only when the file ended in `.json`, which is a shape `staysfixed init` never
+ * writes, so ship and check named the same product two different things and filed into two
+ * drawers that never meet. The one reader both commands use is `productNameFor` in store.js,
+ * next to the keys it decides — see the measurement written out there.
  */
-async function productName(root) {
-  const configFile = findConfigFile(root);
-  if (configFile && configFile.endsWith('.json')) {
-    try {
-      const parsed = JSON.parse(await fsp.readFile(configFile, 'utf8'));
-      if (typeof parsed?.product === 'string' && parsed.product) return parsed.product;
-    } catch {
-      // A settings file nobody can parse is somebody else's problem to report. Falling
-      // through to the package name keeps the release recorded either way.
-    }
+
+/**
+ * Is there a record of this build sitting under a DIFFERENT name for the same folder?
+ *
+ * Asked only when nothing was found under the name we resolved, and it answers the one
+ * question the old "Stays Fixed had never seen this build" never did: whether the build is
+ * missing or merely filed elsewhere. A project whose settings and package.json disagree hits
+ * this on every release and on every check, forever, and nothing else in the tool says a word
+ * about it.
+ *
+ * It reads the store and nothing else — no fingerprinting, no git — because the point is to
+ * name the clash, not to bless anything under a name nobody asked for. Cutting the reference
+ * under the other name would be the tool choosing what a product is called, and that is a
+ * decision it does not get to make.
+ *
+ * @param {Store} store
+ * @param {{name: string, settings: string|null, package: string|null, configFile: string|null}} naming
+ * @returns {Promise<{other: string, line: string, short: string}|null>}
+ */
+async function nameClash(store, naming) {
+  /** @type {{name: string, where: string}[]} */
+  const others = [];
+  if (naming.settings && naming.settings !== naming.name) {
+    others.push({ name: naming.settings, where: `your settings file${naming.configFile ? ` (${path.basename(naming.configFile)})` : ''} calls this product` });
   }
-  const pkg = await packageJson(root);
-  if (typeof pkg?.name === 'string' && pkg.name) return pkg.name;
-  return path.basename(root);
+  if (naming.package && naming.package !== naming.name && !others.some((o) => o.name === naming.package)) {
+    others.push({ name: naming.package, where: 'package.json calls this product' });
+  }
+  const here = path.basename(path.resolve(store.root));
+  if (here !== naming.name && !others.some((o) => o.name === here)) {
+    others.push({ name: here, where: 'this folder is called' });
+  }
+
+  for (const other of others) {
+    /** @type {{fingerprint: BuildFingerprint}[]} */
+    let builds = [];
+    try {
+      builds = await listBuilds(store, { product: other.name });
+    } catch {
+      // A store that will not list is not this function's problem to report; the caller has
+      // already said what it could not read.
+      continue;
+    }
+    if (builds.length === 0) continue;
+    return {
+      other: other.name,
+      line:
+        `There ${builds.length === 1 ? 'IS 1 stored build' : `ARE ${builds.length} stored builds`} here, filed under "${other.name}" — ${other.where} that. ` +
+        `\`staysfixed check\` records under one name and this release looked under "${naming.name}", so the two never meet: every check says there is nothing on record as working, and every ship says it has never seen the build.`,
+      short: `${builds.length} ${builds.length === 1 ? 'build is' : 'builds are'} on record under "${other.name}" instead — ${other.where} that, and check files under it.`,
+    };
+  }
+  return null;
 }
 
 /**
@@ -929,7 +987,10 @@ export async function run(ctx) {
  */
 async function printHistory(ctx, root, asJson) {
   const store = openStore({ root });
-  const product = ctx.str('product') ?? (await productName(root));
+  // The same one reader as the ship path itself. `staysfixed ship --history` used to work the
+  // name out separately, so on a project whose settings are JavaScript it printed the history
+  // of a product nothing had ever been filed under and answered "no references yet".
+  const product = (await productNameFor(root, { product: ctx.str('product') ?? undefined })).name;
   const history = await referenceHistory(store, product, { includeArchive: true });
   const current = await currentReference(store, product);
 

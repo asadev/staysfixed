@@ -55,6 +55,7 @@ import { StaysFixedError } from '../core/errors.js';
 import { safeName } from '../core/paths.js';
 import { setReference, referencePointer, loadBuild, listBuilds, listCaptures, loadCapture, ensureStore } from './store.js';
 import { measureWobble } from './observation.js';
+import { isAnswer, answeredAnything, CHANNELS_ONLY_A_RUNNING_PRODUCT_FILLS } from './refusal.js';
 
 /** @typedef {import('./types.js').Store} Store */
 /** @typedef {import('./types.js').Capture} Capture */
@@ -321,7 +322,6 @@ async function withLock(lock, work) {
  * @returns {Promise<{walked: string[], refused: string[]}>}
  */
 async function whatWasActuallyObserved(store, buildId) {
-  const FROM_A_RUNNING_PRODUCT = new Set(['meaning', 'effects', 'complaints', 'results', 'pixels']);
   /** @type {string[]} */
   const walked = [];
   /** @type {string[]} */
@@ -332,9 +332,17 @@ async function whatWasActuallyObserved(store, buildId) {
     for (const journey of [...new Set(refs.map((/** @type {any} */ r) => r.journey))].sort()) {
       const capture = await latestCapture(store, { buildId, journey });
       if (!capture) continue;
-      const fromTheProduct = (capture.observations ?? []).filter((/** @type {any} */ o) => FROM_A_RUNNING_PRODUCT.has(o.channel));
+      const fromTheProduct = (capture.observations ?? []).filter((/** @type {any} */ o) =>
+        CHANNELS_ONLY_A_RUNNING_PRODUCT_FILLS.has(o.channel),
+      );
       if (fromTheProduct.length === 0) continue;
-      if (fromTheProduct.some((/** @type {any} */ o) => o.meta?.refused !== true)) walked.push(journey);
+      // Decided on the VALUE now, not on `meta.refused`. The two are different questions and
+      // this one was reading the wrong one: `meta.refused` is also stamped on an observation
+      // holding a REAL value that was only partly read — a stdout too big to keep whole — so
+      // a journey whose only product-channel observation was a truncated one was filed as
+      // having refused, and a healthy release could be blocked by a large log file. What
+      // matters here is whether there is an answer in the capture at all.
+      if (answeredAnything(capture)) walked.push(journey);
       else refused.push(journey);
     }
   } catch {
@@ -417,6 +425,10 @@ export async function measureStability(store, buildId) {
   let paths = 0;
   let steady = 0;
   let measuredJourneys = 0;
+  // Addresses the product could not answer at, which used to be counted as steady. Kept as
+  // its own number so the note can say what came off rather than showing a smaller total
+  // with no explanation.
+  let refusedPaths = 0;
 
   for (const journey of journeys) {
     const looked = await twoRunsOf(store, buildId, journey);
@@ -455,9 +467,25 @@ export async function measureStability(store, buildId) {
     }
 
     measuredJourneys++;
-    const seen = wobble.steady + wobble.unstable.length;
+    // A REFUSAL IS NOT AN ADDRESS THAT ANSWERED THE SAME WAY TWICE.
+    //
+    // `measureWobble` compares the two stored runs as values, and two refusals are equal
+    // values, so every address the product could not answer at came back inside
+    // `wobble.steady`. That number is what `staysfixed ship` prints as its headline, and on
+    // 2026-08-31 it printed "All 7 addresses it was watched at answered the same way twice"
+    // about a command that threw on its first line and had answered at none of them. The
+    // sentence was true and meant nothing, and it is the sentence that made a refusal the
+    // definition of working. Refusals are subtracted from `steady` here so the reference
+    // records how much really held still, and the count of them is kept so the note can say
+    // what was taken off rather than quietly showing a smaller number.
+    const refusedHere = pair.a.observations.filter(
+      (o) => CHANNELS_ONLY_A_RUNNING_PRODUCT_FILLS.has(o.channel) && !isAnswer(o.value),
+    ).length;
+    const steadyAnswers = Math.max(0, wobble.steady - refusedHere);
+    refusedPaths += refusedHere;
+    const seen = steadyAnswers + wobble.unstable.length;
     paths += seen;
-    steady += wobble.steady;
+    steady += steadyAnswers;
     for (const p of wobble.unstable) unstablePaths.push(p);
 
     /** @type {JourneyStability} */
@@ -465,7 +493,7 @@ export async function measureStability(store, buildId) {
       journey,
       measured: true,
       paths: seen,
-      steady: wobble.steady,
+      steady: steadyAnswers,
       unstableCount: wobble.unstable.length,
       unstable: wobble.unstable.slice(0, MAX_UNSTABLE_LISTED),
       runs: wobble.runs,
@@ -486,7 +514,7 @@ export async function measureStability(store, buildId) {
     unstable: unstablePaths.length,
     unstablePaths: listed,
     byJourney,
-    note: stabilityNote(measured, journeys.length, measuredJourneys, steady, unstablePaths.length),
+    note: stabilityNote(measured, journeys.length, measuredJourneys, steady, unstablePaths.length, refusedPaths),
   };
 }
 
@@ -499,9 +527,10 @@ export async function measureStability(store, buildId) {
  * @param {number} measuredJourneys
  * @param {number} steady
  * @param {number} unstable
+ * @param {number} [refused]  Addresses the product could not answer at, which are not steady.
  * @returns {string}
  */
-function stabilityNote(measured, journeys, measuredJourneys, steady, unstable) {
+function stabilityNote(measured, journeys, measuredJourneys, steady, unstable, refused = 0) {
   if (journeys === 0) {
     return 'Nothing has ever been walked against this build, so this reference has no record of what it does or how steady it is.';
   }
@@ -512,11 +541,22 @@ function stabilityNote(measured, journeys, measuredJourneys, steady, unstable) {
     measuredJourneys < journeys
       ? ` ${journeys - measuredJourneys} of its ${journeys} ${plural(journeys, 'journey', 'journeys')} ran only once and carry no steadiness record.`
       : '';
-  if (unstable === 0) {
-    const all = steady === 1 ? 'the one address it was watched at' : `all ${steady} addresses`;
-    return `Measured across ${measuredJourneys} ${plural(measuredJourneys, 'journey', 'journeys')}: ${all} answered the same way twice.${partial}`;
+  // Said out loud, always, when there were any. The headline of `staysfixed ship` is built
+  // from this sentence, and on 2026-08-31 it read "all 7 addresses it was watched at
+  // answered the same way twice" about a product that answered at none of them — the
+  // refusals were being counted as steady, and two refusals do agree with each other.
+  const held =
+    refused > 0
+      ? ` ${refused} further ${plural(refused, 'address', 'addresses')} ${plural(refused, 'was', 'were')} not counted at all: the product refused there, and a refusal is not an answer that held still.`
+      : '';
+  if (steady === 0 && unstable === 0) {
+    return `Measured across ${measuredJourneys} ${plural(measuredJourneys, 'journey', 'journeys')}: NOT ONE address answered. Everything this build was asked came back a refusal, so this reference records what could not be read rather than what the product does.${held}${partial}`;
   }
-  return `Measured across ${measuredJourneys} ${plural(measuredJourneys, 'journey', 'journeys')}: ${steady} ${plural(steady, 'address', 'addresses')} answered the same way twice and ${unstable} did not. ${unstable === 1 ? 'That one was' : `Those ${unstable} were`} already unpredictable when this shipped, so a later run must not blame a change for ${plural(unstable, 'it', 'them')}.${partial}`;
+  if (unstable === 0) {
+    const all = steady === 1 ? 'the one address it answered at' : `all ${steady} addresses it answered at`;
+    return `Measured across ${measuredJourneys} ${plural(measuredJourneys, 'journey', 'journeys')}: ${all} answered the same way twice.${held}${partial}`;
+  }
+  return `Measured across ${measuredJourneys} ${plural(measuredJourneys, 'journey', 'journeys')}: ${steady} ${plural(steady, 'address', 'addresses')} answered the same way twice and ${unstable} did not. ${unstable === 1 ? 'That one was' : `Those ${unstable} were`} already unpredictable when this shipped, so a later run must not blame a change for ${plural(unstable, 'it', 'them')}.${held}${partial}`;
 }
 
 /**
@@ -944,7 +984,7 @@ export async function shouldCut(store, product, build) {
       refusal: [
         `Refusing to make ${name} the standard for ${product}: the run behind it never got the product to do anything.`,
         `All ${saw.refused.length} of the ${saw.refused.length === 1 ? 'journey' : 'journeys'} on record for this build came back refused — it did not start, or could not be reached — so what would be written down as "working" is the words "could not be read": ${saw.refused.slice(0, 4).join(', ')}${saw.refused.length > 4 ? ', and more' : ''}.`,
-        'Every later check would then compare one refusal against another, find them equal, and report a product that cannot start as one where nothing has changed.',
+        'A standard made of refusals is a standard that says nothing: there is no answer on either side of any address, so a later check watches none of it. It no longer comes back looking clean — it says so in its coverage list, on every run, for as long as this reference stands.',
         RUBBER_STAMP,
         'Get the product running, run `staysfixed check`, and ship again.',
       ].join(' '),
@@ -1118,12 +1158,19 @@ function summarise(cut, name, decision) {
   else parts.push('Nothing was being compared against before this — from now on it is.');
 
   if (cut.stability.measured) {
+    // "WATCHED AT" WAS THE WRONG WORD and it mattered. A build was watched at every address
+    // it was asked about, including every one it refused to answer, and two refusals do
+    // answer the same way twice — so this line said "all 7 addresses it was watched at
+    // answered the same way twice" about a command that threw on its first line and answered
+    // at none of them (measured 2026-08-31). It counts answers now, and it says so.
     parts.push(
-      cut.stability.unstable === 0
-        ? cut.stability.steady === 1
-          ? 'The one address it was watched at answered the same way twice.'
-          : `All ${cut.stability.steady} addresses it was watched at answered the same way twice.`
-        : `${cut.stability.unstable} of the ${cut.stability.paths} ${plural(cut.stability.paths, 'address', 'addresses')} it was watched at ${plural(cut.stability.unstable, 'was', 'were')} already unpredictable, and that is written down so nothing blames a future change for ${plural(cut.stability.unstable, 'it', 'them')}.`
+      cut.stability.steady === 0 && cut.stability.unstable === 0
+        ? 'NOT ONE address it was asked about gave an answer, so this reference records what could not be read rather than what the product does.'
+        : cut.stability.unstable === 0
+          ? cut.stability.steady === 1
+            ? 'The one address it answered at answered the same way twice.'
+            : `All ${cut.stability.steady} addresses it answered at answered the same way twice.`
+          : `${cut.stability.unstable} of the ${cut.stability.paths} ${plural(cut.stability.paths, 'address', 'addresses')} it answered at ${plural(cut.stability.unstable, 'was', 'were')} already unpredictable, and that is written down so nothing blames a future change for ${plural(cut.stability.unstable, 'it', 'them')}.`
     );
   } else {
     parts.push('It carries no steadiness record, so "this used to be steady and now it wobbles" cannot be reported against it.');

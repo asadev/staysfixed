@@ -33,9 +33,10 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { safeName } from '../core/paths.js';
+import { safeName, findConfigFile } from '../core/paths.js';
 import { StaysFixedError } from '../core/errors.js';
 import { sortObservations } from './observation.js';
+import { asMarkedValue } from './refusal.js';
 
 /**
  * @typedef {import('./types.js').Store} Store
@@ -80,6 +81,92 @@ export function openStore(opts = {}) {
  */
 function buildDir(store, buildId) {
   return path.join(store.buildsDir, safeName(buildId));
+}
+
+// ---------------------------------------------------------------------------
+// What this product is called — the key everything in here is filed under
+// ---------------------------------------------------------------------------
+
+/**
+ * Which product is this?
+ *
+ * IT LIVES HERE BECAUSE THE NAME IS THE STORE'S KEY. References are filed under it, builds
+ * are listed by it, and two commands that work it out two different ways do not disagree
+ * politely — they file into two different drawers and never meet again.
+ *
+ * Which is exactly what happened. Until 2026-08-31 `staysfixed ship` read `product` out of
+ * the settings file ONLY when that file ended in `.json`, and every settings file
+ * `staysfixed init` writes is JavaScript. So on a real project — measured driving a native
+ * Windows app over ssh — the settings said `product: "notepad"`, package.json said
+ * `"win-proof"`, `check` recorded the run under `notepad`, `ship` blessed under `win-proof`
+ * and answered "Stays Fixed had never seen this build", and every later check answered
+ * "no build of notepad is on record as working" and exited 2. Forever: the project could
+ * ship and check for its whole life and never once compare anything, with nothing anywhere
+ * saying the two names disagreed. `ship --product notepad` cut the reference instantly,
+ * which is the proof that the name was the whole cause.
+ *
+ * The order is the one `check` has always used: what the caller was told, then the settings
+ * file, then package.json, then the folder. Everything a caller needs to EXPLAIN the answer
+ * comes back too, because "no record of this build" was true and useless — "no record of a
+ * build of win-proof; your settings call this product notepad" names the bug in one line.
+ *
+ * It never throws. A settings file that will not load leaves `settings` null and the answer
+ * falls through, which is the behaviour both callers had before.
+ *
+ * @param {string} root
+ * @param {{product?: string, configFile?: string|null}} [opts]
+ * @returns {Promise<{name: string, from: 'told'|'settings'|'package'|'folder', settings: string|null, package: string|null, configFile: string|null}>}
+ */
+export async function productNameFor(root, opts = {}) {
+  const configFile = opts.configFile ?? findConfigFile(root) ?? null;
+  const settings = await productInSettings(configFile);
+  const pkg = await nameInPackage(root);
+  const told = typeof opts.product === 'string' && opts.product ? opts.product : null;
+  const name = told ?? settings ?? pkg ?? path.basename(path.resolve(root));
+  /** @type {'told'|'settings'|'package'|'folder'} */
+  const from = told ? 'told' : settings ? 'settings' : pkg ? 'package' : 'folder';
+  return { name, from, settings, package: pkg, configFile };
+}
+
+/**
+ * The `product` field out of a settings file of any shape.
+ *
+ * JSON is parsed and JavaScript is imported, which is what `check` does and always did. The
+ * import is the half that was missing from ship: `.js` and `.mjs` are the two shapes
+ * `staysfixed init` writes, so a JSON-only reader covers essentially no real project.
+ *
+ * @param {string|null} configFile
+ * @returns {Promise<string|null>}
+ */
+async function productInSettings(configFile) {
+  if (!configFile) return null;
+  try {
+    if (configFile.endsWith('.json')) {
+      const parsed = JSON.parse(await fsp.readFile(configFile, 'utf8'));
+      return typeof parsed?.product === 'string' && parsed.product ? parsed.product : null;
+    }
+    const module = await import(`file://${configFile}`);
+    const raw = module.default ?? module.config ?? module;
+    return typeof raw?.product === 'string' && raw.product ? raw.product : null;
+  } catch {
+    // A settings file nobody can load is somebody else's problem to report — `check` says so
+    // loudly about the same file. Falling through keeps the release recorded under SOME name
+    // rather than failing somebody's release over their settings.
+    return null;
+  }
+}
+
+/**
+ * @param {string} root
+ * @returns {Promise<string|null>}
+ */
+async function nameInPackage(root) {
+  try {
+    const pkg = JSON.parse(await fsp.readFile(path.join(root, 'package.json'), 'utf8'));
+    return typeof pkg?.name === 'string' && pkg.name ? pkg.name : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -497,7 +584,19 @@ export async function loadCapture(store, where) {
       continue;
     }
     if (typeof parsed?.path === 'string' && typeof parsed?.channel === 'string') {
-      observations.push(/** @type {Observation} */ (parsed));
+      // A REFUSAL COMES BACK OFF THE DISK AS A REFUSAL, not as a sentence that happens to
+      // begin "not checked —".
+      //
+      // Every store on every machine holds refusals written as plain strings, because that
+      // is what the adapters wrote before there was a kind for them. A string is comparable,
+      // and on 2026-08-31 two of them compared equal and a product that threw on its first
+      // line came back "Nothing that worked has changed". Marking it here, at the one door
+      // every stored observation comes through, means the comparison, the reference and the
+      // report all see the same kind whatever age the file is — and nothing on disk is
+      // rewritten, so a store stays readable by an older copy of the tool.
+      const observation = /** @type {Observation} */ (parsed);
+      const marked = asMarkedValue(observation.value);
+      observations.push(marked === observation.value ? observation : { ...observation, value: marked });
     } else {
       unreadable++;
     }

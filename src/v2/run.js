@@ -23,7 +23,6 @@ import { createRequire } from 'node:module';
 import { makeEvents } from '../core/events.js';
 import { StaysFixedError, messageOf } from '../core/errors.js';
 import {
-  diffCaptures,
   findDuplicatePaths,
   measureWobble,
   mergeWobble,
@@ -33,6 +32,12 @@ import {
   indexByPath,
   wobbleStorm,
 } from './observation.js';
+// `diffCaptures` is no longer called from here directly. Everything goes through
+// `compareAnswers`, which is that same comparison with one rule around it: an address where
+// either side holds a refusal is not compared at all. Reaching past it would put the bug of
+// 2026-08-31 straight back — two refusals compared equal and a product that could not start
+// came back "Nothing that worked has changed".
+import { compareAnswers, answeredAnything, isAnswer, refusalsIn, whyNoAnswer } from './refusal.js';
 import { ensureStore, saveBuild, saveCapture, latestCapture, referenceFor, listBuilds } from './store.js';
 import { describeRuleChange } from './normalise.js';
 import { clusterDifferences } from './cluster.js';
@@ -562,13 +567,104 @@ export async function runCheck(opts) {
     // every address the new build produced and read like a full comparison.
     /** @type {Set<string>} */
     const comparedAddresses = new Set();
+    // Addresses that could not be put side by side because one side of them is a refusal.
+    // Until 2026-08-31 there was no such list: a refusal was a value like any other, so two
+    // of them compared EQUAL and vanished into the silence that this tool reads as "nothing
+    // changed", while a refusal opposite a real value came back as a difference nobody
+    // caused. Both are now counted here and neither is a finding.
+    /** @type {import('./refusal.js').Uncompared[]} */
+    const uncompared = [];
+    // The same thing one level up: a whole walk that never got the product to say anything.
+    /** @type {string[]} */
+    const standardHasNoRecordOf = [];
+    /** @type {{journey: string, why: string}[]} */
+    const thisBuildWouldNotAnswer = [];
     for (const journey of journeys) {
       const was = before.get(journey.name);
       const is = walked.get(journey.name);
       if (!was || !is) continue;
-      for (const o of was.observations) comparedAddresses.add(`${journey.name} ${o.path}`);
-      for (const o of is.a.observations) comparedAddresses.add(`${journey.name} ${o.path}`);
-      raw.push(...diffCaptures(was, is.a));
+
+      // A WALK THAT ONLY EVER MET A REFUSAL IS NOT A SIDE OF A COMPARISON.
+      //
+      // Handled here as a whole rather than address by address because that is the shape it
+      // has. When the old build's record of a journey is nothing but refusals, EVERY address
+      // this build now answers at has nothing opposite it, so every one of them reports as
+      // having appeared out of nowhere: four findings on a two-journey fixture, thirteen on a
+      // three-route server, and the ones whose names say money or signing in land in a class
+      // no agent may wave through — so a phantom goes to a person and stays there. And the
+      // other way round is worse, not better: when THIS build is the one that would not
+      // answer, every address the old build had reports as vanished, and the real news — the
+      // product does not start — is nowhere in a list of forty findings. One sentence each,
+      // in the coverage list, is the honest form of both.
+      const standardAnswered = answeredAnything(was);
+      const thisBuildAnswered = answeredAnything(is.a);
+      if (!standardAnswered || !thisBuildAnswered) {
+        const name = journey.describe || journey.name;
+        if (!standardAnswered) standardHasNoRecordOf.push(name);
+        if (!thisBuildAnswered) {
+          const first = refusalsIn(is.a)[0];
+          thisBuildWouldNotAnswer.push({
+            journey: name,
+            why: first ? whyNoAnswer(first.value, first) : 'nothing it was asked answered.',
+          });
+        }
+        continue;
+      }
+
+      const compared = compareAnswers(was, is.a);
+      // Counted over answers only. The number goes into the closing sentence as "N addresses
+      // checked", and an address holding a refusal was never checked at anything.
+      for (const o of was.observations) if (isAnswer(o.value)) comparedAddresses.add(`${journey.name} ${o.path}`);
+      for (const o of is.a.observations) if (isAnswer(o.value)) comparedAddresses.add(`${journey.name} ${o.path}`);
+      raw.push(...compared.differences);
+      uncompared.push(...compared.uncompared);
+    }
+
+    // What the refusals cost, said in the coverage list where nothing is allowed to be
+    // skimmed past. Grouped by journey and by which side was missing, because one line per
+    // address on a product with a dead surface is a wall nobody reads.
+    const lost = uncompared.filter((u) => u.kind === 'lost');
+    const recovered = uncompared.filter((u) => u.kind === 'recovered');
+    const neverAnswered = uncompared.filter((u) => u.kind === 'never-answered');
+    for (const [kind, list] of /** @type {const} */ ([['lost', lost], ['recovered', recovered], ['never-answered', neverAnswered]])) {
+      if (list.length === 0) continue;
+      const names = unique(list.map((u) => u.journey ?? '')).filter(Boolean);
+      const where = names.length > 0 ? ` in ${names.slice(0, 4).join(', ')}${names.length > 4 ? ', and more' : ''}` : '';
+      const some = list.slice(0, 4).map((u) => u.path).join(', ');
+      const andMore = list.length > 4 ? `, and ${list.length - 4} more` : '';
+      if (kind === 'lost') {
+        gaps.push({
+          what: `${list.length} ${plural(list.length, 'address', 'addresses')} the old build answers at could not be answered by this build${where}, so ${plural(list.length, 'it was', 'they were')} not compared: ${some}${andMore}.`,
+          why: `${list[0].why} An address that used to be checked and cannot be now is coverage this build has taken away. It is not reported as a difference, because there is no answer here to differ from — but it is not a pass either.`,
+          unlockedBy: 'Get the product answering there again and run the check. Until then nothing about those addresses is being watched.',
+        });
+      } else if (kind === 'recovered') {
+        gaps.push({
+          what: `${list.length} ${plural(list.length, 'address', 'addresses')} this build answers at ${plural(list.length, 'has', 'have')} no answer in the standard${where}, so ${plural(list.length, 'it was', 'they were')} not compared: ${some}${andMore}.`,
+          why: `The build on record as working never answered here — ${list[0].why} There is nothing to hold today's answer against, so this is new coverage rather than a change. It used to arrive as a difference nobody caused.`,
+          unlockedBy: 'Ship once from a run that saw these, and from then on they are part of what "working" means and are compared like everything else.',
+        });
+      } else {
+        gaps.push({
+          what: `${list.length} ${plural(list.length, 'address', 'addresses')} answered on neither build${where}, so nothing was compared there: ${some}${andMore}.`,
+          why: `${list[0].why} Two refusals used to compare equal, which read exactly like two matching answers and counted towards "nothing has changed". They are counted here instead.`,
+          unlockedBy: 'Make the product answerable there — supply what the adapter said was missing — and these start being watched.',
+        });
+      }
+    }
+    if (standardHasNoRecordOf.length > 0) {
+      gaps.push({
+        what: `${standardHasNoRecordOf.length} ${plural(standardHasNoRecordOf.length, 'journey', 'journeys')} could not be compared, because the build on record as working never got the product to do anything there: ${standardHasNoRecordOf.join(', ')}.`,
+        why: 'Everything this build did on those journeys is new coverage, not a change: there is nothing on the old build\'s side of it. Reported as findings until 2026-08-31, which is how a product that started working came back as a pile of regressions nobody had caused.',
+        unlockedBy: 'Ship once from a run in which these journeys actually ran, and they become part of what "working" means.',
+      });
+    }
+    for (const dead of thisBuildWouldNotAnswer) {
+      gaps.push({
+        what: `"${dead.journey}" was not compared: this build never got the product to do anything there.`,
+        why: `${dead.why} The old build has a record of what this journey does and this build has none, so there is nothing to compare — which is not the same as nothing having changed, and is not a pass.`,
+        unlockedBy: 'Run that one journey on its own and see what stops it. Nothing behind it is being watched until it runs.',
+      });
     }
     const subtraction = subtractWobble(raw, wobble, {
       referenceWobble: referenceWobbles.length > 0 ? mergeWobble(referenceWobbles) : undefined,
@@ -665,8 +761,31 @@ export async function runCheck(opts) {
     const warning = modeWarning(mode, provedLive, reference);
     if (warning) gaps.push(...warningGaps(mode, provedLive));
 
+    // COVERAGE THIS BUILD TOOK AWAY IS NOT A PASS. An address the standard answers at and
+    // this build cannot is not a difference — there is no answer here to differ from — so it
+    // produces no finding, and before this it produced nothing at all: the run came back
+    // `ok: true` with the hole three paragraphs down in the coverage list. `recovered` and
+    // `never-answered` deliberately do NOT come in here. One is good news and the other was
+    // already true of the build on record, and neither is something this change caused.
+    const answersLost = lost.length + thisBuildWouldNotAnswer.length;
+    // BY NAME, not by adding two lists. A journey where NEITHER side reached the product is
+    // in both lists, and subtracting both counts took it off the compared total twice — one
+    // journey compared out of two came out as nought of two, which is a different and worse
+    // claim than the true one.
+    const notReallyCompared = new Set([...standardHasNoRecordOf, ...thisBuildWouldNotAnswer.map((d) => d.journey)]);
     return finish(opts, {
-      ok: ranked.findings.length === 0 && subtraction.newlyUnstable.length === 0 && subtraction.couldNotTell !== true,
+      ok:
+        ranked.findings.length === 0 &&
+        subtraction.newlyUnstable.length === 0 &&
+        subtraction.couldNotTell !== true &&
+        answersLost === 0 &&
+        // AND SOMETHING HAS TO HAVE BEEN COMPARED. There is already a branch above for the
+        // case where no journey had an old-build side at all; this is the same law one notch
+        // finer, for the run where every journey HAD a record and every address in it holds
+        // a refusal on one side or the other. Measured 2026-08-31: a product fixed after a
+        // reference had been cut from a crash came back with nought findings, nought
+        // addresses compared, and `ok: true`.
+        comparedAddresses.size > 0,
       mode,
       modeWarning: warning,
       reference,
@@ -678,9 +797,15 @@ export async function runCheck(opts) {
       summary:
         (subtraction.couldNotTell === true ? `NO ANSWER FROM THIS RUN. ${subtraction.couldNotTellWhy} ` : '') +
         summarise(ranked.findings, subtraction, warning, [...runNotes, ...ranked.notes], reference, provedLive, dropped, {
-          compared: comparedJourneys.length,
+          compared: comparedJourneys.length - notReallyCompared.size,
           asked: journeys.length,
           addresses: comparedAddresses.size,
+          // The headline has to carry this. "Nothing that worked has changed" beside a
+          // hundred addresses that could not be answered is a sentence somebody stops
+          // reading after, and the whole reason two refusals comparing equal went unnoticed
+          // for as long as it did is that the silence looked exactly like agreement.
+          unanswered: uncompared.length,
+          lost: answersLost,
         }),
       startedAt,
       started,
@@ -898,13 +1023,23 @@ export function proveAgainstLive(suspicions, live, now) {
     // `observation()` in adapters/contract.js turns `covered: false` into `meta.refused`.
     // Filtering on `o.covered` therefore matched everything and did nothing at all — the
     // fix above was written correctly and then read the wrong field.
-    const walked = capture.observations.filter((o) => o.meta?.refused !== true);
+    //
+    // The test is now the VALUE rather than `meta.refused`, and the two are not the same
+    // thing. `meta.refused` is also set on an observation holding a real value that was only
+    // partly read — a stdout too big to keep whole is still an answer, and filtering it out
+    // here threw away a comparison that works perfectly well. What has to go is an
+    // observation with no answer in it at all.
+    const walked = capture.observations.filter((o) => isAnswer(o.value));
     if (walked.length === 0) continue;
     liveIndex.set(name, indexByPath(walked));
   }
   /** @type {Map<string, Map<string, Observation>>} */
   const nowIndex = new Map();
-  for (const [name, pair] of now) nowIndex.set(name, indexByPath(pair.a.observations));
+  // Answers only on this side too. Without it, an address the new build now refuses at came
+  // back from the expensive proof stamped `proven: true` with the words "not checked" in it
+  // as its candidate value — a refusal dressed as a re-verified regression, which is the
+  // strongest claim this tool can make about anything.
+  for (const [name, pair] of now) nowIndex.set(name, indexByPath(pair.a.observations.filter((o) => isAnswer(o.value))));
 
   /** @type {Difference[]} */
   const kept = [];
@@ -1086,9 +1221,10 @@ function warningGaps(mode, provedLive) {
  * @param {BuildFingerprint} reference
  * @param {boolean} provedLive
  * @param {number} dropped   Suspicions the old build turned out to have as well.
- * @param {{compared: number, asked: number, addresses: number}} how   How much of the run
- *   this sentence covers: journeys that had an old-build side, journeys asked for, and the
- *   addresses really put side by side.
+ * @param {{compared: number, asked: number, addresses: number, unanswered?: number, lost?: number}} how
+ *   How much of the run this sentence covers: journeys that were really put beside the old
+ *   build, journeys asked for, the addresses really compared, and the addresses that could
+ *   not be compared because one side of them was a refusal rather than an answer.
  * @returns {string}
  */
 function summarise(findings, subtraction, warning, notes, reference, provedLive, dropped, how) {
@@ -1114,6 +1250,22 @@ function summarise(findings, subtraction, warning, notes, reference, provedLive,
       `Nothing behaves differently, but ${n} ${plural(n, 'address', 'addresses')} that used to give the same answer every time ${plural(n, 'does', 'do')} not any more. ` +
         `That is a change too: something is now unpredictable that was not. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} compared against ${against}.${reach}`,
     );
+  } else if (findings.length === 0 && how.addresses === 0) {
+    // Nought compared is never a pass. "Nothing that worked has changed. 0 addresses
+    // checked" is the exact sentence measured on 2026-08-31 over a product that threw on its
+    // first line, and it is arithmetically true and completely false as an answer.
+    parts.push(
+      `NO ANSWER FROM THIS RUN. Not one address could be put beside ${against}: every one of them holds a refusal on one side or the other, so nothing at all was compared. This is not a pass and not a failure.${reach}`,
+    );
+  } else if (findings.length === 0 && (how.lost ?? 0) > 0) {
+    // The all-clear may not be said over coverage this build took away. It is not a finding
+    // — there is no answer here to differ from — and until 2026-08-31 that made it nothing
+    // at all: the headline read "Nothing that worked has changed" and the hole sat three
+    // paragraphs down in a list.
+    const n = how.lost ?? 0;
+    parts.push(
+      `Nothing that COULD be compared has changed — but ${n} ${plural(n, 'address', 'addresses')} the old build answers at could not be answered by this build at all, so ${plural(n, 'it was', 'they were')} not compared. That is coverage this build has taken away, and it is not a pass. ${how.addresses} ${plural(how.addresses, 'address was', 'addresses were')} really put beside ${against}.${reach}`,
+    );
   } else if (findings.length === 0) {
     parts.push(`Nothing that worked has changed. ${how.addresses} ${plural(how.addresses, 'address', 'addresses')} checked against ${against}.${reach}`);
   } else {
@@ -1122,6 +1274,20 @@ function summarise(findings, subtraction, warning, notes, reference, provedLive,
       `${findings.length} ${plural(findings.length, 'thing behaves', 'things behave')} differently, checked against ${against}.` +
         (sealed > 0 ? ` ${sealed} of them ${plural(sealed, 'is', 'are')} in a class nobody may wave through.` : '') +
         reach,
+    );
+  }
+  // Said in the same breath as the headline, never further down. A refusal is not an answer,
+  // so an address holding one was not checked at all — and until 2026-08-31 two of them
+  // compared equal, which is silence, which reads exactly like agreement. This sentence is
+  // what makes the difference visible to somebody who reads one line.
+  const unanswered = how.unanswered ?? 0;
+  if (unanswered > 0) {
+    const lostCount = how.lost ?? 0;
+    parts.push(
+      `${unanswered} ${plural(unanswered, 'address', 'addresses')} could not be compared at all, because one side of ${plural(unanswered, 'it', 'them')} is a refusal rather than an answer` +
+        (lostCount > 0
+          ? `, and ${lostCount} of ${plural(unanswered, 'those is', 'those are')} coverage this build has taken away — the old build answers there and this one does not.`
+          : '. Nothing about them is being watched, and none of them is a finding.'),
     );
   }
   parts.push(subtraction.note);
@@ -1324,7 +1490,12 @@ function touchMap(walked) {
  */
 function steadyPaths(capture, wobble) {
   const unstable = new Set(wobble.unstable);
-  return capture.observations.map((o) => o.path).filter((p) => !unstable.has(p));
+  // Answers only. An address that held a refusal on both runs is not an address the build
+  // answered the same way twice; it is an address the build was never able to answer, and
+  // counting it as steady is the same mistake in miniature that let `ship` print "all 7
+  // addresses it was watched at answered the same way twice" about a product that threw on
+  // its first line (measured 2026-08-31).
+  return capture.observations.filter((o) => isAnswer(o.value)).map((o) => o.path).filter((p) => !unstable.has(p));
 }
 
 /**

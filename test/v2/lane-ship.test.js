@@ -261,7 +261,16 @@ describe('a build nothing was observed of never becomes the standard', () => {
     assert.match(said, /1 of 3 journeys refused/);
     assert.match(said, /orders/);
     // And it says what that will cost, rather than only that it happened.
-    assert.match(said, /report it as changed/);
+    //
+    // What it costs CHANGED on 2026-08-31, so this assertion changed with it. It used to
+    // predict that the first check after the journey started working would report it as a
+    // change — which was true, and was the defect: a refusal was stored as an ordinary value,
+    // so a real answer arriving where the standard held "could not be read" came back as a
+    // difference nobody had caused. A refusal is no longer comparable with anything, so what
+    // it costs now is coverage: nothing behind that journey is watched until it runs, and the
+    // check says so in its coverage list instead of inventing a finding.
+    assert.match(said, /nothing behind it is being watched until it runs/);
+    assert.doesNotMatch(said, /report it as changed/, 'predicting a phantom finding is predicting a bug that has been fixed');
   });
 });
 
