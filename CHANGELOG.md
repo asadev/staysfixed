@@ -168,7 +168,9 @@ adapter and tests turned out to hold at least one defect that only running it co
   record is filed under a fingerprint of the tree that was walked, because the files checked
   are not the files git has. Paired mode walked the commit and called it the old build, so an
   address the record holds a real value for was reported as *"is there now and was not
-  before"*.
+  before"*. Asking for a paired run against such a reference is now refused outright, naming
+  the reason and what to do instead, rather than quietly giving you something weaker; an
+  ordinary check still falls back to the stored record and says so.
 
 ### It reported things as checked that were never checked
 

@@ -64,10 +64,22 @@ describe('a reference cut from a dirty tree', () => {
     const second = await run('node', [CLI, 'check', '--paired', '--json'], { cwd: dir }).catch((e) => e);
     const answer = JSON.parse(String(second.stdout));
 
-    assert.equal(
-      answer.mode,
-      'stored-record',
-      'the reference was cut from a tree git does not have, so there is no old build to boot — booting the commit walks different code and calls it the same build',
+    // NOT `mode === 'stored-record'` on its own, which was the first version of this and was
+    // weaker than it looked: a BLOCKED run carries that mode too, so the assertion would have
+    // gone on passing if the guard were removed and only the refusal remained. Caught on
+    // 2026-08-31 by the lane hardening the self-check corpus. What is pinned now is the whole
+    // behaviour — refused, said out loud, and not a pass.
+    assert.equal(answer.blocked, true, 'a paired run it cannot honestly do has to be refused, not quietly downgraded');
+    assert.equal(answer.ok, false, 'and a refusal is never a pass');
+    assert.match(
+      String(answer.summary),
+      /uncommitted changes/i,
+      `the reason has to be in the sentence a person reads. It said: ${String(answer.summary).slice(0, 200)}`,
+    );
+    assert.match(
+      String(answer.summary),
+      /without --paired/i,
+      'and it has to say what to do instead, or the person is simply stuck',
     );
   });
 });
