@@ -142,7 +142,7 @@ const MAX_CHECK_LOG = 40;
  *
  * @typedef {object} CutDecision
  * @property {boolean} ok
- * @property {'clean'|'accounted-for'|'already-the-reference'|'never-checked'|'broken'|'blocked'|'not-stored'} state
+ * @property {'clean'|'accounted-for'|'already-the-reference'|'never-checked'|'broken'|'blocked'|'not-stored'|'nothing-observed'} state
  * @property {string} why             Plain English, whichever way it went.
  * @property {string} [refusal]       The full refusal, present only when `ok` is false.
  * @property {boolean} needsForce     True when only `force: true` would get past this.
@@ -307,6 +307,41 @@ async function withLock(lock, work) {
   } finally {
     await fsp.rm(lock, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Which journeys of a build actually saw the product, and which only ever met a refusal.
+ *
+ * `contract` and `counters` are deliberately not counted: those are doors read out of the
+ * SOURCE, and a door read is not a door opened — which is coverage.js's own rule, one notch
+ * further along. Only the channels a running product fills can prove it ran.
+ *
+ * @param {Store} store
+ * @param {string} buildId
+ * @returns {Promise<{walked: string[], refused: string[]}>}
+ */
+async function whatWasActuallyObserved(store, buildId) {
+  const FROM_A_RUNNING_PRODUCT = new Set(['meaning', 'effects', 'complaints', 'results', 'pixels']);
+  /** @type {string[]} */
+  const walked = [];
+  /** @type {string[]} */
+  const refused = [];
+  try {
+    const { listCaptures, latestCapture } = await import('./store.js');
+    const refs = await listCaptures(store, { buildId });
+    for (const journey of [...new Set(refs.map((/** @type {any} */ r) => r.journey))].sort()) {
+      const capture = await latestCapture(store, { buildId, journey });
+      if (!capture) continue;
+      const fromTheProduct = (capture.observations ?? []).filter((/** @type {any} */ o) => FROM_A_RUNNING_PRODUCT.has(o.channel));
+      if (fromTheProduct.length === 0) continue;
+      if (fromTheProduct.some((/** @type {any} */ o) => o.meta?.refused !== true)) walked.push(journey);
+      else refused.push(journey);
+    }
+  } catch {
+    // What could not be read is left out rather than guessed at in either direction: this
+    // gate must never refuse a healthy release because the store would not open.
+  }
+  return { walked, refused };
 }
 
 /**
@@ -875,6 +910,43 @@ export async function shouldCut(store, product, build) {
         'Treating "I could not test this" as "this is correct" is the exact mistake this tool exists to prevent.',
         RUBBER_STAMP,
         'Fix whatever blocked the check, run it, and ship again.',
+      ].join(' '),
+    };
+  }
+
+  // AND: did the product actually do anything while it was watched?
+  //
+  // The three questions above — was there a check, was it blocked, did it leave anything
+  // unaccounted for — are all answered by a run in which EVERY journey refused exactly the
+  // way a healthy run answers them. It was not blocked: it ran to the end. It found no
+  // differences: there was nothing to differ. So `ship` blessed a product that cannot start,
+  // and every later check then compared refusal against refusal, found them equal, and
+  // reported "Nothing that worked has changed" about a server that throws on the first line.
+  // Measured 2026-08-31, and the recovery was worse than the lie: fixing the product produced
+  // thirteen findings nobody caused.
+  //
+  // The same gate lives in ship.js, where it was written. It belongs here too, because
+  // `cutReference` is exported and the ship command is not its only caller — a gate one
+  // caller deep is a gate the next caller walks around.
+  const saw = await whatWasActuallyObserved(store, buildId);
+  if (saw.walked.length === 0 && saw.refused.length > 0) {
+    return {
+      ok: false,
+      state: 'nothing-observed',
+      needsForce: true,
+      buildId,
+      checkedAt: check.at,
+      findings: check.unaccounted,
+      why: `Nothing was actually observed of ${name}.`,
+      // The same sentence ship.js uses, deliberately word for word. Two gates that catch the
+      // same thing must not describe it two ways: whichever one fires, the person reads the
+      // same explanation.
+      refusal: [
+        `Refusing to make ${name} the standard for ${product}: the run behind it never got the product to do anything.`,
+        `All ${saw.refused.length} of the ${saw.refused.length === 1 ? 'journey' : 'journeys'} on record for this build came back refused — it did not start, or could not be reached — so what would be written down as "working" is the words "could not be read": ${saw.refused.slice(0, 4).join(', ')}${saw.refused.length > 4 ? ', and more' : ''}.`,
+        'Every later check would then compare one refusal against another, find them equal, and report a product that cannot start as one where nothing has changed.',
+        RUBBER_STAMP,
+        'Get the product running, run `staysfixed check`, and ship again.',
       ].join(' '),
     };
   }
