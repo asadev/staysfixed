@@ -221,6 +221,15 @@ export async function capabilities(opts = {}) {
   // Being sent to set up something the tool has already set up is how somebody decides this
   // page is not worth reading. Measured 2026-08-31.
   const settingsText = opts.settingsText ?? readTextOrNull(configFile);
+  // A machine NAMED in the settings is a machine the project has asked for. Doctor does not
+  // dial anybody's ssh config unasked — that rule stands and is right — but "you have not
+  // asked me to look" and "your own settings name this machine" are different situations,
+  // and treating them the same produced a flat untruth: with `windows: { host: "imza-pc" }`
+  // sitting in the settings, doctor answered "No Windows desktop is reachable from here"
+  // having never dialled anything. Measured 2026-08-31 against a Windows 11 machine that was
+  // reachable, signed in and unlocked the whole time. Only the named machines are dialled;
+  // the rest of the ssh config is still left alone.
+  const askedFor = hostsNamedInSettings(settingsText);
   const settingsAreJson = opts.settingsText ? false : configFile !== null && configFile.endsWith('.json');
   const hasSettings = settingsText !== null;
 
@@ -237,7 +246,7 @@ export async function capabilities(opts = {}) {
     // the hosts list feeds exactly one surface: that one.
     offline
       ? Promise.resolve(/** @type {HostReport[]} */ ([]))
-      : reachableHosts({ dial: opts.machines === true || desktopApp !== null }),
+      : reachableHosts({ dial: opts.machines === true || desktopApp !== null, only: askedFor }),
     isRepo(root).catch(() => false),
     findReference(root),
     whatThisCopyCanDrive(),
@@ -1219,7 +1228,7 @@ function androidSdkTool(folder, name) {
  * answers is a runner the tool already has, and it must never appear in the
  * result as something to go and set up.
  *
- * @param {{dial?: boolean}} [opts]
+ * @param {{dial?: boolean, only?: string[]}} [opts]
  * @returns {Promise<HostReport[]>}
  */
 export async function reachableHosts(opts = {}) {
@@ -1242,6 +1251,24 @@ export async function reachableHosts(opts = {}) {
   // because a machine quietly left out of the answer is the same bug as a folder quietly
   // skipped while reading source: the list looks complete and the runner somebody needed is
   // simply not in it.
+  // The settings named these, so they are dialled even when nothing else is. Everything
+  // else in the ssh config stays untouched and is still listed by name.
+  const named = (opts.only ?? []).filter((name) => names.includes(name));
+  if (opts.dial !== true && named.length > 0) {
+    const dialledByName = await Promise.all(named.slice(0, MAX_HOSTS).map((name) => describeHost(name)));
+    const rest = names
+      .filter((name) => !named.includes(name))
+      .map(
+        (name) =>
+          /** @type {HostReport} */ ({
+            name,
+            reachable: false,
+            how: 'named in your ssh config and deliberately NOT dialled. Your settings do not mention it and nothing here needs it. `staysfixed doctor --machines` checks them all.',
+          })
+      );
+    return [...dialledByName, ...rest];
+  }
+
   if (opts.dial !== true) {
     return names.map(
       (name) =>
@@ -1424,6 +1451,21 @@ export function readHostProbe(name, alive, look) {
 }
 
 /**
+ * Every machine the settings name by ssh host. These are the ones doctor may dial without
+ * being asked twice, because naming a machine in your own settings IS the ask.
+ *
+ * @param {string|null} text
+ * @returns {string[]}
+ */
+export function hostsNamedInSettings(text) {
+  if (!text) return [];
+  const clean = withoutComments(text);
+  const out = new Set();
+  for (const hit of clean.matchAll(/["']?host["']?\s*:\s*["'`]([^"'`]+)["'`]/g)) out.add(hit[1]);
+  return [...out];
+}
+
+/**
  * The settings as text, or null when there are none to read yet.
  *
  * Null and empty are different answers here. "There is no settings file" is what makes a
@@ -1496,6 +1538,10 @@ function settingsFromText(text) {
     electron: ['binary'],
     web: ['url', 'start'],
     http: ['start', 'url'],
+    // Left out until 2026-08-31, and the Windows adapter was handed an empty settings object
+    // as a result: it could not see the machine the settings named, nor the built program,
+    // so it asked for both while both were sitting in the file.
+    windows: ['host', 'remoteExe', 'exe'],
   };
   for (const [block, keys] of Object.entries(wanted)) {
     const at = new RegExp(`["']?${block}["']?\\s*:\\s*\\{`).exec(clean);
@@ -1642,6 +1688,9 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
   const browser = browsers.chosen !== null;
   const ownBrowser = browsers.chosen !== null && !browsers.chosen.everyday;
   const windowsHost = hosts.find((h) => h.reachable && h.windows === true);
+  // Nothing was dialled at all: every host carries the sentence that says so. That is a
+  // different answer from "they were dialled and none of them runs Windows".
+  const nobodyWasDialled = hosts.length > 0 && hosts.every((h) => /NOT dialled|not dialled/.test(String(h.how ?? '')));
 
   /** Every channel that needs no driver at all — a child process is enough. */
   const withoutADriver = ['effects', 'complaints', 'results', 'contract', 'counters'];
@@ -1911,7 +1960,12 @@ function describeSurfaces(tools, hosts, configured, browsers, desktopApp, driver
     name: 'native Windows apps',
     status: windowsUsable ? 'partial' : 'unavailable',
     summary: !windowsHost
-      ? 'No Windows desktop is reachable from here. This is usually fine: an Electron product on Windows is watched over the debug port instead, from any machine.'
+      ? nobodyWasDialled
+        // Not "no Windows desktop is reachable" — nothing was dialled, so that is not known.
+        // The two were the same sentence until 2026-08-31, and it stated as a fact about the
+        // world an answer that came from a decision not to look.
+        ? 'No machine was dialled, so whether a Windows desktop can be reached from here is unknown. This is usually fine: an Electron product on Windows is watched over the debug port instead, from any machine. `staysfixed doctor --machines` asks the machines in your ssh config, and naming one under `windows: { host: "..." }` in your settings asks that one every time.'
+        : 'No Windows desktop is reachable from here. This is usually fine: an Electron product on Windows is watched over the debug port instead, from any machine.'
       : !windowsDriver
         ? `A real Windows desktop is reachable through ${windowsHost.name}, and this copy of Stays Fixed cannot drive one. ${noDriver('windows')}`
         // The adapter's own paragraph, not a second one written here. It knows whether
