@@ -32,6 +32,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { isExpected, messageOf } from '../../core/errors.js';
 import { findConfigFile, rootForConfig } from '../../core/paths.js';
@@ -362,7 +363,8 @@ export function toolDefinitions() {
           touches: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Files, folders or named areas you expect this to affect, e.g. ["src/checkout/total.js", "the basket page"]. A difference outside this list cannot be waived.',
+            description:
+              'Files, folders or named areas you expect this to affect, e.g. ["src/checkout/total.js", "the basket page"]. A difference outside this list cannot be waived. Paths may be relative to the project or absolute - an absolute path inside the project is stored relative to it, and the reply says exactly what was sealed.',
           },
           expect: { type: 'array', items: { type: 'string' }, description: 'Differences you expect this change to produce, in your own words. Optional, and it makes the check sharper.' },
         },
@@ -468,7 +470,10 @@ export function toolDefinitions() {
         'What was NOT checked. The ways in that no journey has ever opened, the surfaces this machine cannot reach at all, anything refused because doing it twice would not have been reversible, and the things this tool can never see on any machine. Read it before you tell anyone a change is safe: a clean check only covers what was walked, and this is the list of what was not.',
       inputSchema: {
         type: 'object',
-        properties: { format: { type: 'string', enum: ['text', 'json'] } },
+        properties: {
+          format: { type: 'string', enum: ['text', 'json'] },
+          offline: { type: 'boolean', description: 'Do not look for any other machine at all. Faster, and then this answer cannot say anything about remote runners either way.' },
+        },
         additionalProperties: false,
       },
     },
@@ -685,13 +690,74 @@ const RESULT_SHAPES = [
 // ---------------------------------------------------------------------------
 
 /**
+ * The name of a file, said the way the rest of the tool says it.
+ *
+ * An agent holds ABSOLUTE paths. That is what its own editing tools hand it and that is
+ * what it types back here, so `touches` arrives as `/Users/…/tiny/cli.js` while every
+ * address, every source file and every intent comparison downstream is written relative to
+ * the project. Nothing lines those two up, and the gate that decides whether a difference
+ * was declared fell straight through to "one word in common is not a match".
+ *
+ * Measured on a product with ONE file in it: seal `/var/…/tiny/cli.js`, edit that same
+ * file, run a check, and `staysfixed_waive` answered "Refused. This is outside what you
+ * sealed… Only the word 'cli' lines up." The one file in the product, the file the agent
+ * had just edited, reported as something it never said it was touching. Naming the same
+ * file `cli.js` was accepted. So the two spellings meant opposite things, and the one an
+ * agent naturally reaches for was the broken one.
+ *
+ * Only a real path that really sits inside this project is rewritten. Everything else is
+ * passed through exactly as written, because `touches` also takes plain areas — "the
+ * basket page" — and mangling those would break the match it is there to make.
+ *
+ * @param {string} named   What the agent called it.
+ * @param {string} root    The project root.
+ * @returns {string}
+ */
+function insideTheProject(named, root) {
+  let where = named;
+  if (where.startsWith('file://')) {
+    try {
+      where = fileURLToPath(where);
+    } catch {
+      return named;
+    }
+  }
+  if (!path.isAbsolute(where)) return named;
+
+  /**
+   * @param {string} from
+   * @param {string} to
+   * @returns {string|null}
+   */
+  const under = (from, to) => {
+    const rel = path.relative(from, to);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel : null;
+  };
+
+  const plain = under(root, where);
+  if (plain) return plain;
+
+  // The same folder under two names. On a Mac `/tmp` is a link to `/private/tmp`, so the
+  // path an agent reports and the root this tool worked out can be the identical folder
+  // spelled two ways, and comparing the text alone says they are unrelated.
+  try {
+    const real = under(fs.realpathSync(root), fs.realpathSync(where));
+    if (real) return real;
+  } catch {
+    // A path that does not exist cannot be resolved, and that is not an error here: an
+    // agent may name a file it is about to create. Its own words stand.
+  }
+  return named;
+}
+
+/**
  * @param {ToolContext} ctx
  * @param {Record<string, any>} input
  * @returns {Promise<ToolResult>}
  */
 async function toolIntent(ctx, input) {
   const summary = text(input.summary);
-  const touches = stringList(input.touches) ?? [];
+  const touches = (stringList(input.touches) ?? []).map((t) => insideTheProject(t, ctx.root));
   const expect = stringList(input.expect) ?? [];
 
   if (!summary) return problem('Say what you meant to change, in one plain sentence: { "summary": "...", "touches": ["..."] }.');
@@ -1496,6 +1562,16 @@ async function toolWaive(ctx, input) {
  * here at all. A report missing either half would let somebody read "everything
  * walked" and believe the product was covered when the phone was never touched.
  *
+ * THE SURVEY IS THE ONE THE PERSON GETS. This call used to ask for it with `offline: true`
+ * written into the code, and then print the answer under the words "Cannot be reached from
+ * this machine at all". Offline means the ssh config is not even READ, so on a Mac with two
+ * machines named in it the agent was told, flatly, "No Windows desktop is reachable from
+ * here", while `staysfixed doctor` on the same Mac names both and says nothing is known
+ * about them either way. Forcing the answer and then reporting the forced answer as a fact
+ * about the world is the exact failure this tool exists to catch, so the question is now
+ * asked the same way `staysfixed_capabilities` and `doctor` ask it, and a caller who wants
+ * no network at all says so.
+ *
  * @param {ToolContext} ctx
  * @param {Record<string, any>} input
  * @returns {Promise<ToolResult>}
@@ -1508,7 +1584,7 @@ async function toolCoverage(ctx, input) {
   let caps = null;
   if (engine.parts.capabilities) {
     try {
-      caps = await engine.parts.capabilities({ cwd: ctx.root, offline: true });
+      caps = await engine.parts.capabilities({ cwd: ctx.root, offline: input.offline === true });
     } catch {
       // The machine survey is one half of the answer, not the whole of it. Losing
       // it must not lose the half that came from the run.
@@ -1517,12 +1593,40 @@ async function toolCoverage(ctx, input) {
   }
 
   const coverage = last?.result?.coverage ?? null;
-  const unreachable = (caps?.surfaces ?? []).filter((/** @type {any} */ s) => s.status === 'unavailable');
+  const unavailable = (caps?.surfaces ?? []).filter((/** @type {any} */ s) => s.status === 'unavailable');
+  // Two completely different sentences were being printed under one heading. "There is no
+  // Android app in this repository" is not "this machine cannot reach an Android device" —
+  // the first is nothing to check, the second is a hole in the coverage — and `doctor`
+  // already tells a person those apart in so many words. The agent was told both were the
+  // machine's fault, which reads as a crippled install rather than a project that simply
+  // has no phone app in it.
+  const nothingOfThatKind = unavailable.filter((/** @type {any} */ s) => s.notInThisProject === true);
+  const unreachable = unavailable.filter((/** @type {any} */ s) => s.notInThisProject !== true);
   const partial = (caps?.surfaces ?? []).filter((/** @type {any} */ s) => s.status === 'partial');
+  // Machines the survey NAMED and never asked. Nothing above rests on having asked them,
+  // and saying so is the difference between "there is no Windows desktop" and "nobody
+  // knocked". The command that knocks belongs to a person, not to an agent: dialling
+  // somebody's ssh config is what `doctor` deliberately stopped doing unasked.
+  const notDialled = (caps?.hosts ?? []).filter((/** @type {any} */ h) => h.reachable !== true && /not dialled/i.test(String(h.how ?? '')));
+  // And the other way the machine list can come back empty: somebody asked for no network
+  // at all, here or in STAYSFIXED_OFFLINE, and then the ssh config is not even read. An
+  // empty list looks identical to "there are no other machines", so which of the two it is
+  // has to be said. That is the whole defect this call had: force the answer, then report
+  // the forced answer as a finding about the world.
+  const lookedForNoMachines = input.offline === true || process.env.STAYSFIXED_OFFLINE !== undefined;
 
   if (input.format === 'json') {
     const payload = {
       lastCheckAt: last?.at ?? null,
+      // A cold start has no numbers to give, and nulls beside an empty `unopened` list read
+      // like a product with no holes in it. This says which of the two it is in one field.
+      anyCheckHasRun: last !== null,
+      note:
+        last === null
+          ? 'No check has run in this copy yet, so nothing at all has been covered and every count below is empty because nothing was measured, not because nothing was missed.'
+          : coverage
+            ? null
+            : 'The last run did not report what it covered, so how deep it went is unknown. Treat its clean result with suspicion.',
       covers: caps?.covers ?? null,
       walked: coverage?.journeys ?? null,
       doorsKnown: coverage?.doorsKnown ?? null,
@@ -1540,6 +1644,15 @@ async function toolCoverage(ctx, input) {
         .filter((/** @type {{doors?: number}} */ g) => typeof g.doors !== 'number')
         .map((/** @type {{what: string, why?: string, unlockedBy?: string}} */ g) => ({ what: g.what, why: g.why ?? null, unlockedBy: g.unlockedBy ?? null })),
       surfacesOutOfReach: unreachable.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary, needs: s.needs })),
+      // Kept apart from `surfacesOutOfReach` on purpose: nothing of this kind exists in the
+      // project, so there is nothing here to check and it is not a limit of the machine.
+      surfacesNotInThisProject: nothingOfThatKind.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary })),
+      // Named in the ssh config, never asked. Whatever is in `surfacesOutOfReach` above,
+      // none of it rests on having knocked on these.
+      machinesNotDialled: notDialled.map((/** @type {any} */ h) => ({ name: h.name, why: h.how })),
+      // True when this answer was taken without looking for other machines at all, so
+      // `machinesNotDialled` being empty means nobody looked, not that there are none.
+      machinesNotLookedFor: lookedForNoMachines,
       surfacesPartial: partial.map((/** @type {any} */ s) => ({ name: s.name, why: s.summary })),
       neverVisible: caps?.limits ?? null,
     };
@@ -1604,6 +1717,12 @@ async function toolCoverage(ctx, input) {
     for (const d of noAdapter) out.push(`- ${d.surface}: ${d.why}`);
   }
 
+  if (nothingOfThatKind.length) {
+    out.push('');
+    out.push('There is nothing of these kinds in this project, so there was nothing here to check and this is not a limit of the machine:');
+    for (const s of nothingOfThatKind) out.push(`- ${s.name}: ${s.summary}`);
+  }
+
   if (unreachable.length) {
     out.push('');
     out.push('Cannot be reached from this machine at all, so nothing there has been checked by anything:');
@@ -1612,6 +1731,23 @@ async function toolCoverage(ctx, input) {
       for (const need of s.needs ?? []) out.push(`    it would take: ${need.fix ?? need.what}`);
     }
   }
+
+  // Said even when nothing above needed a second machine. A machine quietly left out of
+  // this answer is a runner somebody may be looking for, and "no Windows desktop is
+  // reachable from here" printed over an ssh config naming two of them is not a finding
+  // about the world — it is a question nobody asked.
+  if (lookedForNoMachines) {
+    out.push('');
+    out.push(
+      'This answer was taken without looking for any other machine, so nothing above is a statement about what this machine can reach. Ask again without offline to find out.'
+    );
+  } else if (notDialled.length) {
+    out.push('');
+    out.push(
+      `${notDialled.length} ${notDialled.length === 1 ? 'machine is named in your ssh config and was' : 'machines are named in your ssh config and were'} not dialled, so nothing above rests on having asked ${notDialled.length === 1 ? 'it' : 'them'}: ${notDialled.map((/** @type {any} */ h) => h.name).join(', ')}. A person can run \`staysfixed doctor --machines\` to ask; this tool does not connect to anybody's machines on its own.`
+    );
+  }
+
   if (partial.length) {
     out.push('');
     out.push(`Reachable, but not everything on them can be watched: ${partial.map((/** @type {any} */ s) => s.name).join(', ')}. staysfixed_capabilities says what each limit is.`);

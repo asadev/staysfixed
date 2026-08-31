@@ -44,7 +44,7 @@ import { promisify } from 'node:util';
 import { EXIT, messageOf } from '../core/errors.js';
 import { say, warn, ok, blank, heading, setLogLevel } from '../core/log.js';
 import { findConfigFile, rootForConfig } from '../core/paths.js';
-import { openStore, ensureStore, listBuilds } from './store.js';
+import { openStore, ensureStore, listBuilds, listCaptures, latestCapture } from './store.js';
 import { cutReference, shouldCut, referenceHistory, currentReference } from './reference.js';
 
 const exec = promisify(execFile);
@@ -172,13 +172,24 @@ export async function onShip(opts = {}) {
       const because = unreadable.length > 0
         ? ` ${unreadable.length} of its stored ${unreadable.length === 1 ? 'record' : 'records'} could not be read, which may be why.`
         : '';
+      // WHAT THE PRODUCT IS STILL BEING COMPARED AGAINST, asked rather than assumed.
+      //
+      // This branch used to end every one of its sentences with "Nothing about <product> is
+      // being compared against anything yet", whether or not that was true. Measured on
+      // 2026-08-31: a project that had shipped once and had a reference sitting in its store
+      // was told exactly that after a second release nobody had checked — and the very next
+      // `staysfixed check` went on comparing against that reference and would have reported
+      // any regression it found. Telling somebody the safety net is off while it is on is the
+      // one direction of wrong answer that gets a broken build waved through, because a
+      // person who believes nothing is watching stops reading what it says.
+      const standing = await standingReference(store, product);
       result.lines = [
         `${product} ${release.describe}`,
-        `Stays Fixed has no record of this build, so it did not become the reference. Nothing about ${product} is being compared against anything yet.${because}`,
+        `Stays Fixed has no record of this build, so it did not become the reference. ${stillComparedAgainst(standing, product)}${because}`,
         'Run `staysfixed check` once before the next release and it will record itself from then on.',
         ...(unreadable.length > 0 ? [`What could not be read: ${unreadable.join('; ')}`] : []),
       ];
-      result.summary = `${product} shipped ${release.what}, but Stays Fixed had never seen this build, so what "working" means has not moved.${because} Run a check before the next release.`;
+      result.summary = `${product} shipped ${release.what}, but Stays Fixed had never seen this build, so what "working" means has not moved.${because} ${stillComparedAgainst(standing, product)} Run a check before the next release.`;
       return result;
     }
 
@@ -195,14 +206,66 @@ export async function onShip(opts = {}) {
         `The reference did NOT move. ${result.refused}`,
         'Your release is unaffected — this only decides what future checks compare against.',
       ];
-      result.summary = `${product} shipped ${release.what}. What "working" means did NOT move: ${decision.why} Future checks still compare against the previous reference.`;
+      // "Still compare against the previous reference" was said whether or not there was a
+      // previous one. On a first release that is refused there is none, and the sentence
+      // quietly promises a safety net that does not exist yet — the same wrong answer as the
+      // no-record branch above, reached the other way round.
+      result.summary = `${product} shipped ${release.what}. What "working" means did NOT move: ${decision.why} ${stillComparedAgainst(await standingReference(store, product), product)}`;
       return result;
     }
 
+    // A RUN THAT OBSERVED NOTHING IS NOT AN ANSWER, and must never become the standard.
+    //
+    // Everything above asks whether a check CONCLUDED something: was there one, was it
+    // blocked, did it leave differences unaccounted for. None of those questions is "did the
+    // product actually do anything while it was being watched", and a run where every journey
+    // was refused answers all three the way a healthy one does. It was not blocked — it ran to
+    // the end. It found no differences — there was nothing to differ.
+    //
+    // Measured on 2026-08-31 on a three-route server with a `throw` at the top of it, so it
+    // could not start. `staysfixed check` correctly recorded three refusals — "not checked, the
+    // thing being observed fell over before it could be read" — and `staysfixed ship` answered
+    // "1.0.0 is now what poisonshop calls working. All 6 addresses it was watched at answered
+    // the same way twice." Two refusals do answer the same way twice.
+    //
+    // Both halves of what follows were then measured on that same project. Leave the server
+    // broken and the next check compares one refusal with the other, finds them equal and says
+    // "Nothing that worked has changed. 6 addresses checked" — a clean result about a product
+    // that cannot start, which is the one sentence this tool exists never to say. Fix the
+    // server and every route it now answers is reported as a difference nobody asked for: 13
+    // of them, and a route whose name says money or signing in lands in a class no agent is
+    // allowed to wave through, so the phantom goes to a person and stays there.
+    const saw = await whatTheRunActuallySaw(store, build.id);
+    const nothingWasObserved = saw.refused.length > 0 && saw.walked.length === 0;
+    if (nothingWasObserved && opts.force !== true) {
+      result.cut = false;
+      result.refused = [
+        `Refusing to make ${release.what} the standard for ${product}: the run behind it never got the product to do anything.`,
+        `All ${saw.refused.length} of the ${plural(saw.refused.length, 'journey', 'journeys')} on record for this build came back refused — it did not start, or could not be reached — so what would be written down as "working" is the words "could not be read", ${saw.refused.length === 1 ? 'once' : `${saw.refused.length} times over`}: ${saw.refused.join(', ')}.`,
+        'Every later check would then compare one refusal against another, find them equal, and report a product that cannot start as one where nothing has changed. And the day it does start, everything it does is reported as a difference nobody caused, some of it in a class no agent may wave through.',
+        'Get the product running, run `staysfixed check`, and ship again. Or force it, and this refusal is kept on the record beside the reference.',
+      ].join(' ');
+      result.lines = [
+        `${product} ${release.describe}`,
+        `The reference did NOT move. ${result.refused}`,
+        'Your release is unaffected — this only decides what future checks compare against.',
+      ];
+      result.summary = `${product} shipped ${release.what}. What "working" means did NOT move: nothing was actually observed of this build — all ${saw.refused.length} of its ${plural(saw.refused.length, 'journey', 'journeys')} were refused. ${stillComparedAgainst(await standingReference(store, product), product)}`;
+      return result;
+    }
+
+    // A cut forced past the gate above has to SAY it was, on the record and for good.
+    // `cutReference` stamps `forced` only when the store's own decision refused, and the store
+    // knows nothing about refused journeys — so without this the one cut that most needs a
+    // reason beside it would be the one indistinguishable from a healthy release, months later
+    // when somebody is asking why the reference is full of "could not be read".
+    const why = opts.why ?? opts.note ?? release.describe;
     const cut = await cutReference(store, {
       product,
       build,
-      why: opts.why ?? opts.note ?? release.describe,
+      why: nothingWasObserved
+        ? `${why} — FORCED: nothing was observed of this build. All ${saw.refused.length} of its ${plural(saw.refused.length, 'journey', 'journeys')} refused (${saw.refused.join(', ')}), so this reference records "could not be read" as what the product does.`
+        : why,
       setBy: opts.setBy ?? 'staysfixed ship',
       force: opts.force === true,
       at: opts.at,
@@ -231,6 +294,23 @@ export async function onShip(opts = {}) {
       // ran only once, so part of this reference has no steadiness record behind it.
       ...(cut.stability.measuredJourneys < cut.stability.journeys ? [cut.stability.note] : []),
       'Nobody has to approve anything. The next check compares against this.',
+      // A reference with holes in it is still worth cutting, and is not worth cutting
+      // quietly. A journey that refused is going into the standard as the words "could not be
+      // read", so what it does is not in this reference at all, and the day it runs properly
+      // every one of its answers is reported as a difference nobody caused. Said here because
+      // the coverage caveat below counts doors, not refusals, and these are the ones that will
+      // come back as findings rather than as a gap.
+      ...(saw.refused.length > 0 && saw.walked.length > 0
+        ? [
+            `${saw.refused.length} of ${saw.refused.length + saw.walked.length} ${plural(saw.refused.length + saw.walked.length, 'journey', 'journeys')} refused and ${plural(saw.refused.length, 'is', 'are')} being recorded as part of this reference without having observed anything: ${saw.refused.join(', ')}. What ${plural(saw.refused.length, 'it does is', 'those do is')} not in the standard, so the first check after ${plural(saw.refused.length, 'it starts', 'they start')} working will report ${plural(saw.refused.length, 'it', 'them')} as changed.`,
+          ]
+        : []),
+      // And the forced version of the same thing, said as plainly as it deserves.
+      ...(nothingWasObserved
+        ? [
+            `This was FORCED. Nothing was observed of this build — all ${saw.refused.length} of its ${plural(saw.refused.length, 'journey', 'journeys')} refused (${saw.refused.join(', ')}) — so what "working" now means for ${product} is the words "could not be read". Until it is shipped again from a run that saw something, a check of this product cannot tell you anything.`,
+          ]
+        : []),
       // Said in the same breath as the good news, exactly as every other surface says it.
       ...(missed ? [missed] : []),
     ];
@@ -277,6 +357,114 @@ async function whatTheCheckMissed(store) {
     // its own kind of lie.
     return null;
   }
+}
+
+/**
+ * The channels only a running product can fill.
+ *
+ * The same line coverage.js draws, one notch further along. `contract` is the code being
+ * READ — routes and channels listed out of the source — and a door read out of a file has
+ * never been opened, so it can never be the evidence that anything ran. `counters` is
+ * arithmetic done on whatever was found, including on the contract, so it cannot be that
+ * evidence either: a source-only walk of this very repository files a `counters` observation
+ * saying it read two environment variables, and nothing was started.
+ *
+ * What is left is the product doing something where somebody could watch: what it gave back,
+ * what it printed, what it changed, what it drew, what a screen reader would read.
+ */
+const CHANNELS_ONLY_A_RUNNING_PRODUCT_FILLS = new Set(['meaning', 'effects', 'complaints', 'results', 'pixels']);
+
+/**
+ * Which of this build's journeys really watched the product, and which only refused.
+ *
+ * A journey counts as WALKED when its newest stored recording holds at least one observation
+ * that a running product had to produce and that was not refused. It counts as REFUSED when
+ * it holds observations of that kind and every one of them is a refusal — the adapter was
+ * asked, and said it could not. A journey with neither — the source reader, which only lists
+ * doors — is in neither list, because it is neither evidence that the product ran nor
+ * evidence that it would not.
+ *
+ * The newest recording per journey is the one read, because the newest recording per journey
+ * is what a later check compares against. Reading them all would say something truer about
+ * history and nothing truer about what this reference is going to mean.
+ *
+ * It never throws. A record that will not open leaves the journey out of both lists, which
+ * lands on the behaviour this file had before — the cut goes ahead — rather than turning a
+ * damaged file into a blocked release.
+ *
+ * @param {Store} store
+ * @param {string} buildId
+ * @returns {Promise<{walked: string[], refused: string[]}>}  Journey names, sorted.
+ */
+async function whatTheRunActuallySaw(store, buildId) {
+  /** @type {string[]} */
+  const walked = [];
+  /** @type {string[]} */
+  const refused = [];
+  try {
+    const refs = await listCaptures(store, { buildId });
+    for (const journey of [...new Set(refs.map((r) => r.journey))].sort()) {
+      const capture = await latestCapture(store, { buildId, journey });
+      if (!capture) continue;
+      const fromTheProduct = capture.observations.filter((o) => CHANNELS_ONLY_A_RUNNING_PRODUCT_FILLS.has(o.channel));
+      if (fromTheProduct.length === 0) continue;
+      if (fromTheProduct.some((o) => o.meta?.refused !== true)) walked.push(journey);
+      else refused.push(journey);
+    }
+  } catch {
+    // See above: what could not be read is left out, never guessed at in either direction.
+  }
+  return { walked, refused };
+}
+
+/**
+ * What this product currently compares against, or an honest admission that we cannot tell.
+ *
+ * Three answers, not two. 'none' and a real reference are the easy ones; a store that will
+ * not open is the third, and collapsing it into 'none' is what produced the sentence this
+ * helper exists to stop — a confident "nothing is being compared" from a reader that never
+ * managed to look.
+ *
+ * @param {Store} store
+ * @param {string} product
+ * @returns {Promise<{name: string, at: string}|'none'|'unknown'>}
+ */
+async function standingReference(store, product) {
+  try {
+    const current = await currentReference(store, product);
+    if (!current) return 'none';
+    return {
+      name: current.cut?.build?.version ?? current.pointer.buildId,
+      at: current.pointer.setAt.slice(0, 10),
+    };
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * One sentence saying whether the safety net is on, for a release that did not move it.
+ *
+ * @param {{name: string, at: string}|'none'|'unknown'} standing
+ * @param {string} product
+ * @returns {string}
+ */
+function stillComparedAgainst(standing, product) {
+  if (standing === 'none') return `Nothing about ${product} is being compared against anything yet.`;
+  if (standing === 'unknown') {
+    return `What ${product} compares against could not be read just now, so this cannot say whether a standard is in place — check with \`staysfixed ship --history\` before trusting either answer.`;
+  }
+  return `Checks of ${product} go on comparing against ${standing.name}, the build shipped on ${standing.at} — that is still the standard, so a regression this release introduced would be reported rather than adopted.`;
+}
+
+/**
+ * @param {number} n
+ * @param {string} one
+ * @param {string} many
+ * @returns {string}
+ */
+function plural(n, one, many) {
+  return n === 1 ? one : many;
 }
 
 // ---------------------------------------------------------------------------
@@ -751,6 +939,16 @@ async function printHistory(ctx, root, asJson) {
   }
 
   if (history.length === 0) {
+    // An empty log is not the same fact as an empty store. The pointer is what a check
+    // actually reads, and the two can come apart — a log truncated by hand, a store restored
+    // without it. Announcing "there is nothing to compare any build against" while the
+    // pointer sits there is the same lie the ship summary used to tell, one command over.
+    if (current) {
+      warn(`${product} has no record of when its reference was cut, so this cannot list the history.`);
+      say(current.note);
+      say('Checks are still comparing against that build. Ship once more and the history starts again from there.');
+      return EXIT.ok;
+    }
     warn(`${product} has never had a reference cut, so there is nothing to compare any build against yet.`);
     say('Ship once with `staysfixed ship` at the end of your release script and the next check has a standard to work from.');
     return EXIT.ok;
@@ -761,6 +959,11 @@ async function printHistory(ctx, root, asJson) {
     const marker = current?.pointer.buildId === cut.buildId ? '→ ' : '  ';
     say(`${marker}${cut.at.slice(0, 16).replace('T', ' ')}  ${cut.build?.version ?? cut.buildId}${cut.forced ? '  (FORCED)' : ''}`);
     say(`     ${cut.summary}`);
+    // The reason the cut was made, which the summary never carries. It holds the person's own
+    // words about the release, and — the case this is here for — the sentence saying a cut was
+    // forced past a run that observed nothing. Dropping it left the only surface that answers
+    // "why is this the standard" unable to answer it.
+    if (cut.why && cut.why.trim() && cut.why.trim() !== cut.summary.trim()) say(`     Why: ${cut.why.trim()}`);
   }
   return EXIT.ok;
 }
