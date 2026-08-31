@@ -8,6 +8,82 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.12.0] — 2026-08-31
+
+Five capabilities that were missing rather than broken. Each was built by a lane working on
+its own, each had to prove itself against a real product before it was believed, and three of
+the five turned up a false all-clear on the way in.
+
+### Record yourself using it once, and it is checked for ever
+
+Everything this tool checked before, it worked out by READING — routes out of the source,
+exports out of a package, screens out of a router. That finds what the code says it does. It
+never found the way somebody actually uses the thing. `staysfixed record <a-name>` now opens
+your product, follows what you do, and writes it down.
+
+- **A click that moves the page is written down as the CLICK, not the destination.** Writing
+  the destination would open that page whether or not the button works, so a broken button
+  would have come back clean. That is the whole feature failing quietly, and it is guarded.
+- **A recording is walked twice before it is accepted.** Anything that differs between the two
+  walks is not a step, it is noise, and the recording is refused rather than kept. A recording
+  that never got through its own steps even once is refused too — both walks failing
+  identically would otherwise read as perfectly steady.
+- A project that asks for recorded sessions and has none is reported as not checked, never as
+  a pass.
+
+### Phones compare two builds side by side
+
+Both phone surfaces refused a paired run because nobody knew whether an emulator or simulator
+comes back the same twice. Nobody had ever measured it. Measured now, one build walked ten
+times with a restore between every walk:
+
+- **iOS: 725 of 725 addresses agreed across five pairs.**
+- **Android: 301 of 309.** The eight that moved were the app's own freshly-made identity code
+  — ordinary wobble, which this tool already subtracts. A control run with the restore switched
+  off produced the same eight and no others, so the restore contributed exactly zero.
+
+So paired is on for both, and every sentence that repeated the old guess now carries the
+number instead. The real obstacle turned out to be somewhere else entirely: a paired phone run
+needs a kept copy of the OLD build's APK or `.app`, because a build output is in no checkout of
+the old commit. That is the new `reference` setting — and pointing it at the SAME file as the
+new build is caught and reported as a hole on every journey, rather than comparing one build
+with itself and calling it unchanged.
+
+Also fixed on the way: `simctl` lists the newest iPhone first and the adapter took the last
+one, asking for an iPhone 6s on iOS 27 — which Apple refuses with an empty message. The whole
+iPhone surface was dark on a Mac that had everything it needed.
+
+### Three new kinds of product
+
+- **Native Mac apps** (Swift or Objective-C, not Electron). Read through the Accessibility API
+  by JavaScript handed to macOS's own `osascript` — nothing is installed. Two builds of an
+  AppKit app differing by one line came back as exactly that one difference out of 75 things
+  read. **Two copies of one Mac app make one of them stop answering, and a silent app looks
+  exactly like an app with no controls** — so every read is cross-checked against the window
+  server's own list of what is on screen, and runs are one at a time.
+- **Native Linux desktop apps** (GTK or Qt). Read over ssh through the accessibility bus every
+  screen reader already uses, with nothing installed on that machine: 190 controls in 305ms,
+  the same cost as the Windows surface. A machine with nobody logged in has no accessibility
+  bus at all and is told so, rather than reported as an app with no controls.
+- **Browser extensions** (Chromium). The manifest is read as a contract — a permission that
+  appears, or a host permission widening from one named site to every site, is a change
+  somebody has to agree to, and that half needs no browser. Then the popup and options pages
+  are walked, and what a content script does to somebody else's page is measured by opening
+  that page with the extension and without it. What the background worker logs and asks the
+  network for is a named hole on every run, because both happen before anything can listen.
+
+### False all-clears found while building the above
+
+- **The browser launcher passes `--disable-extensions` unconditionally**, and Chrome accepts
+  that alongside `--load-extension` without a word and loads nothing. Anything routed through
+  it would have walked a browser with no extension in it and reported everything as unchanged.
+- **The settings lookup for a built program searched the whole file, not its own block.** `app`
+  means an iPhone bundle under `ios:` and a Mac bundle under `macos:`; `remoteExe` means the
+  same thing under `windows:` and `linux:`. Every one of them is scoped now, before the new
+  surfaces could make it true.
+- **A `reference` pointing at the same file as the new build** compares a build with itself,
+  finds nothing, and says nothing changed. Caught by real path, on every journey.
+
 ## [0.11.1] — 2026-08-31
 
 Two defects that a Mac could never have shown, both caught by CI on Linux minutes after
