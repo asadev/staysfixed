@@ -634,9 +634,12 @@ Full wiring for every client: [docs/mcp.md](docs/mcp.md).
 Every version ships knowing, in machine-readable form and in plain English: what
 it can check on this machine right now and what it cannot; what is missing that
 would unlock more, and whether the tool can install it itself or a person has to;
-which other machines it can already reach, **found by dialling them** rather than
-by asking you; and the shape of its own results, so an agent can act on them
-without being taught. That is `staysfixed doctor --json`, and it is
+which other machines your ssh config names, and — for the ones your own settings
+name, plus any you ask about with `--machines` — whether they answer, what they
+run and what they are short of; and the shape of its own results, so an agent can
+act on them without being taught. It does **not** dial your machines unasked: the
+first command a stranger runs must not open connections to their production
+servers, so naming a machine in your settings is what asks about it. That is `staysfixed doctor --json`, and it is
 `staysfixed_capabilities` over MCP.
 
 ---

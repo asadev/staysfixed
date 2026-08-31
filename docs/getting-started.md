@@ -297,6 +297,16 @@ Say these once, when someone asks how much it covers. They are permanent, they a
 | `staysfixed check --against <ref>` | Compare against a tag, commit or marker. |
 | `staysfixed check --selfcheck` | Prove the engine still catches deliberate breakage. |
 | `staysfixed ship` | The build that went out is now what "working" means. |
+| `staysfixed coverage` | What the last check did NOT look at. Read it before calling anything safe. |
+| `staysfixed intent "<what you meant to change>"` | Seal what you meant to change, before you check. |
+| `staysfixed explain <id>` | One finding from the last check, in full. |
+| `staysfixed prove <id>` | Undo your own edit and re-measure, to see whether it really caused the finding. |
+| `staysfixed waive <id> --why "<reason>"` | Record that a difference was intended. It is not approval. |
+
+Those last five existed only over MCP until 2026-08-31, which meant a person at a terminal
+got a strictly worse answer about their own product than an agent did. Every one of them is
+now a command as well, and both roads reach the same code. `check` prints the finding ids, so
+there is something to hand them.
 
 If you have to write a settings block by hand — something `init` could not know, a second
 product, a journey through a screen — every option is in

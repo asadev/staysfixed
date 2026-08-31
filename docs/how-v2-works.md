@@ -366,8 +366,11 @@ It carries:
   the seven channels are reachable for each
 - what is missing, why it matters, and the exact command that would fix it —
   marked with whether the tool can do it itself or a person has to
-- which other machines it can already reach, **detected by dialling them**, so a
-  working SSH host is never presented as something to go and set up
+- which other machines your ssh config names, and whether the ones it is allowed
+  to dial answer — the ones your own settings name, plus any you ask about with
+  `--machines` — so a working SSH host is never presented as something to go and
+  set up. Nothing is dialled unasked: the first command a stranger runs must not
+  open connections to their production servers
 - the shape of its own results, so an agent can act on them without being taught
 - what it will never be able to see, on any machine
 
