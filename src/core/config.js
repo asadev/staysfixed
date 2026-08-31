@@ -84,8 +84,39 @@ export const DEFAULT_MCP = {
 };
 
 /**
+ * The `app.kind` of a project that has nothing to open at all.
+ *
+ * A command-line tool, a library and a plain server are all perfectly ordinary products with
+ * no screen anywhere in them, and every command that only READS what is on disk — status,
+ * flake, mark, trace, approve — works on one exactly as well as it works on a website. They
+ * were all refused anyway, because the only way to load settings was through a check that
+ * insisted on something to open. This value is how a command says "I open nothing, so do not
+ * ask", and it is a made-up word on purpose: nothing can accidentally match it, and anything
+ * that reads it and does not understand it fails loudly rather than photographing a guess.
+ */
+export const NOTHING_TO_OPEN = 'nothing-to-open';
+
+/**
+ * Do these settings name anything this tool could open and photograph?
+ *
+ * Exported so a command can ask before it tries, and say something true about this project
+ * instead of the same refusal for every shape of product.
+ *
+ * @param {import('../types.js').ResolvedConfig} config
+ * @returns {boolean}
+ */
+export function hasSomethingToOpen(config) {
+  // Read as a plain string on purpose. The declared shape of `app.kind` is version 1's two
+  // words, and this third one is deliberately outside it — see NOTHING_TO_OPEN above.
+  return /** @type {string} */ (config?.app?.kind) !== NOTHING_TO_OPEN;
+}
+
+/**
  * Find, import and resolve the config.
- * @param {{cwd?: string, configFile?: string}} [opts]
+ * @param {{cwd?: string, configFile?: string, opening?: boolean}} [opts]
+ *   `opening: false` is a command promising it will not open or photograph anything — it
+ *   only reads what is already on disk. Settings with no screen in them are then a normal,
+ *   correct shape rather than a reason to refuse.
  * @returns {Promise<import('../types.js').Project>}
  */
 export async function loadProject(opts = {}) {
@@ -98,7 +129,7 @@ export async function loadProject(opts = {}) {
   }
   const raw = await importConfig(file);
   const root = rootForConfig(file);
-  const config = resolveConfig(raw, file);
+  const config = resolveConfig(raw, file, { opening: opts.opening });
   const paths = pathsFor(root, file, config.dir);
   // `guards` is the one folder a project is free to move, so the config wins over the
   // default layout. Without this the setting silently did nothing and the tool reported
@@ -136,9 +167,11 @@ async function importConfig(file) {
  * Fill in defaults and reject anything that would fail later in a confusing way.
  * @param {unknown} raw
  * @param {string} file
+ * @param {{opening?: boolean}} [opts]
+ *   `opening: false` from a command that only reads what is on disk. See {@link loadProject}.
  * @returns {import('../types.js').ResolvedConfig}
  */
-export function resolveConfig(raw, file = '(inline)') {
+export function resolveConfig(raw, file = '(inline)', opts = {}) {
   if (!raw || typeof raw !== 'object') {
     throw new StaysFixedError(`${path.basename(file)} did not export a config object.`, {
       hint: 'It should `export default { app: { ... }, screens: [ ... ] }`.',
@@ -158,8 +191,8 @@ export function resolveConfig(raw, file = '(inline)') {
   // Where the address is actually knowable, take it and let the command work. Booting is
   // version 2's job and these commands cannot do it, so `web.start` alone is not enough —
   // that case falls through to the message below, which now says so honestly.
+  const v2 = /** @type {Record<string, any>} */ (/** @type {unknown} */ (c));
   if ((!c.app || typeof c.app !== 'object')) {
-    const v2 = /** @type {Record<string, any>} */ (/** @type {unknown} */ (c));
     if (v2.web && typeof v2.web === 'object' && typeof v2.web.url === 'string' && v2.web.url) {
       c.app = { kind: 'web', url: v2.web.url };
     } else if (v2.electron && typeof v2.electron === 'object' && typeof v2.electron.binary === 'string' && v2.electron.binary) {
@@ -167,15 +200,49 @@ export function resolveConfig(raw, file = '(inline)') {
     }
   }
 
+  // The screens come across with the address, and they did not before.
+  //
+  // Half a bridge is worse than none: on a version 2 website `walk` and `approve` were
+  // handed the address and then found nothing to photograph, because version 2 keeps its
+  // screens under `web` and these commands only ever looked at the top level. So the
+  // commands ran, opened a browser, and reported an empty walk of a site with six pages in
+  // its settings — measured 2026-08-31. Only a screen with a name and a plain address is
+  // carried over; anything reached by clicking is version 2's to walk, not this half's, and
+  // inventing a journey out of one would put a screen in the report nobody can reach.
+  if (c.app && typeof c.app === 'object' && !Array.isArray(c.screens)) {
+    const fromV2 = Array.isArray(v2.web?.screens) ? v2.web.screens : [];
+    const carried = fromV2.filter((/** @type {any} */ s) => s && typeof s.name === 'string' && typeof s.url === 'string' && s.url !== '');
+    if (carried.length > 0) c.screens = carried.map((/** @type {any} */ s) => ({ name: s.name, url: s.url }));
+  }
+
+  // A command that opens nothing must never be refused for having nothing to open.
+  //
+  // `status`, `flake`, `mark`, `trace` and `approve` all do their whole job by reading files
+  // this tool has already written. Every one of them was dead on the settings this tool's own
+  // `init` writes for a command-line tool, a library or a server — five commands offered in
+  // `--help`, all answering with a paragraph about an `app` key that version 2 never writes
+  // and that nobody running them had ever seen. Measured 2026-08-31 on a Python command-line
+  // tool and on a plain Node one; both were set up by `staysfixed init` seconds earlier.
+  if ((!c.app || typeof c.app !== 'object') && opts.opening === false) {
+    c.app = /** @type {any} */ ({ kind: NOTHING_TO_OPEN });
+  }
+
   if (!c.app || typeof c.app !== 'object') {
-    // Every command that lands here — status, walk, approve, mark, trace, flake, and
-    // `check --pictures` — works by OPENING something and photographing it. A settings
-    // file with no `app` in it is the normal, correct shape for a command-line tool, a
-    // library or a server: there is nothing to open, and telling somebody to go and add a
-    // web address they do not have sends them off inventing one. So the message says which
-    // half of the tool needs it, and names the half that does not.
+    // Only the commands that really do open something land here now — `walk`, and
+    // `check --pictures`. They photograph a screen, so a project with no screen anywhere in
+    // it genuinely cannot be walked, and the honest thing is to say which product this is
+    // and stop offering it.
+    //
+    // What this message must never do is name a key the person has not got. `app` is version
+    // 1's word for the thing to open; the settings `staysfixed init` writes today have no
+    // `app` in them and never will, so telling somebody to add one sends them editing a file
+    // against a shape nothing else in the tool uses. Where there IS advice worth giving, it
+    // is given in the words their own settings file already uses — `url` inside the `web`
+    // block — and only for a file that is written that way.
     const anything = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (c));
-    const notVisual = ['process', 'http', 'source', 'android', 'ios', 'windows'].filter((k) => anything[k] && typeof anything[k] === 'object');
+    const versionTwo = ['process', 'source', 'http', 'web', 'electron', 'android', 'ios', 'windows']
+      .filter((k) => anything[k] && typeof anything[k] === 'object');
+    const notVisual = ['process', 'http', 'source', 'android', 'ios', 'windows'].filter((k) => versionTwo.includes(k));
     // A project that DOES have a screen, described the version 2 way, must never be told it
     // has none. It is told the true thing instead: this half of the tool photographs an
     // address you can point it at, and version 2 finds the address by booting the product,
@@ -186,23 +253,36 @@ export function resolveConfig(raw, file = '(inline)') {
         hint: "`staysfixed check` covers it exactly as it is — it boots `web.start` and finds the address itself. These picture commands need one they can point at, so add `url: 'http://localhost:3000'` beside `start` in the `web` block if you want them too.",
       });
     }
+    if (versionTwo.length > 0) {
+      throw new StaysFixedError(
+        `This command photographs a screen, and this project has none — these settings describe ${plainList(versionTwo.map(describeBlock))}.`,
+        {
+          hint: `Nothing is missing and nothing needs adding. Run \`staysfixed check\`, which covers ${notVisual.length === versionTwo.length ? 'exactly what is here' : 'all of it'} without a picture.`
+            + (versionTwo.includes('web') ? " If you want the picture commands on the site too, add `url: 'http://localhost:3000'` inside the `web` block so there is an address to point at." : ''),
+        },
+      );
+    }
     throw new StaysFixedError('These settings do not name anything to open, and this command works by opening your product and photographing it.', {
-      hint: notVisual.length
-        ? `That is the right shape for what this project is — ${notVisual.join(', ')} settings need nothing to open. Run \`staysfixed check\`, which covers it without a picture. If there IS a screen here too, add \`app: { kind: 'web', url: 'http://localhost:3000' }\` or \`app: { kind: 'electron', binary: '...' }\`.`
-        : "Add `app: { kind: 'web', url: 'http://localhost:3000' }` or `app: { kind: 'electron', binary: '...' }`. If your product has no screen at all, `staysfixed check` covers it without one.",
+      hint: "Add `app: { kind: 'web', url: 'http://localhost:3000' }` or `app: { kind: 'electron', binary: '...' }`. If your product has no screen at all, `staysfixed check` covers it without one.",
     });
   }
-  const kind = c.app.kind;
-  if (kind !== 'web' && kind !== 'electron') {
-    throw new StaysFixedError(`app.kind must be 'web' or 'electron' (found ${JSON.stringify(kind)}).`);
-  }
-  if (kind === 'web' && !c.app.url && !c.app.attach) {
-    throw new StaysFixedError('A web app needs `app.url` — the address to open.');
-  }
-  if (kind === 'electron' && !c.app.binary && !c.app.attach) {
-    throw new StaysFixedError('An Electron app needs `app.binary` — the path to the executable.', {
-      hint: 'On macOS that is inside the bundle: /Applications/Your App.app/Contents/MacOS/Your App',
-    });
+  // Read as a plain string, because a project with nothing to open carries a third value
+  // that is deliberately outside version 1's two — see NOTHING_TO_OPEN at the top.
+  const kind = /** @type {string} */ (c.app.kind);
+  // A command that told us it opens nothing gets no further questions. Asking a project with
+  // no screen for an address or a binary is the refusal this whole branch exists to stop.
+  if (kind !== NOTHING_TO_OPEN) {
+    if (kind !== 'web' && kind !== 'electron') {
+      throw new StaysFixedError(`app.kind must be 'web' or 'electron' (found ${JSON.stringify(kind)}).`);
+    }
+    if (kind === 'web' && !c.app.url && !c.app.attach) {
+      throw new StaysFixedError('A web app needs `app.url` — the address to open.');
+    }
+    if (kind === 'electron' && !c.app.binary && !c.app.attach) {
+      throw new StaysFixedError('An Electron app needs `app.binary` — the path to the executable.', {
+        hint: 'On macOS that is inside the bundle: /Applications/Your App.app/Contents/MacOS/Your App',
+      });
+    }
   }
 
   const screens = (c.screens ?? []).map((s, i) => resolveScreen(s, i));
@@ -284,4 +364,35 @@ export function settingsForScreen(config, screen) {
     },
     masks: [...config.masks, ...(screen.masks ?? [])],
   };
+}
+
+/**
+ * What one block of version 2 settings actually is, in words somebody who did not write this
+ * tool would use. Said out loud in a refusal so the sentence names this project rather than
+ * naming a missing key.
+ *
+ * @param {string} key
+ * @returns {string}
+ */
+function describeBlock(key) {
+  return /** @type {Record<string,string>} */ ({
+    process: 'commands to run and libraries to import',
+    source: 'code to read without running it',
+    http: 'a server to boot and ask for its routes',
+    web: 'a website to open',
+    electron: 'a desktop app to open',
+    android: 'an Android app',
+    ios: 'an iPhone app',
+    windows: 'a native Windows app',
+  })[key] ?? key;
+}
+
+/**
+ * A list a person reads out loud: "a, b and c". Two commas and an "and" beats three commas.
+ * @param {string[]} items
+ * @returns {string}
+ */
+function plainList(items) {
+  if (items.length <= 1) return items[0] ?? '';
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 }

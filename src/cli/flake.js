@@ -17,7 +17,10 @@ import { EXIT } from '../core/errors.js';
  * @returns {Promise<number>}
  */
 export async function run(ctx) {
-  const project = await loadProject({ cwd: ctx.cwd, configFile: ctx.configFile });
+  // `opening: false` — the register is a file on disk and reading it opens nothing. Without
+  // this, the one command whose whole job is to name unreliable checks was itself refused on
+  // every command-line tool and library this tool sets up. Measured 2026-08-31.
+  const project = await loadProject({ cwd: ctx.cwd, configFile: ctx.configFile, opening: false });
   const history = await loadHistory(project.paths.historyFile);
 
   const forgive = ctx.str('clear');

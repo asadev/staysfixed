@@ -30,7 +30,7 @@ import path from 'node:path';
 import { readFile } from '../../src/v2/adapters/source.js';
 import { readPythonFile, changingParts, addressFromRegex, withoutCommentsAndDocstrings } from '../../src/v2/adapters/python.js';
 import { detectProject } from '../../src/v2/detect.js';
-import { plan, readinessFor } from '../../src/v2/init.js';
+import { plan, readinessFor, whatItCallsItself, commandsThatRun, pythonEntryPoints, pythonRunFor, configText } from '../../src/v2/init.js';
 
 /**
  * Every route one file declares, as "METHOD path", sorted so a test can compare a whole set.
@@ -561,5 +561,248 @@ describe('setting up must never promise more than a run can deliver', () => {
       1,
       'the same missing file was asked for twice — once with a command to run and once with a paragraph saying the tool would never run it, which reads as a flat contradiction to anybody who does not write code',
     );
+  });
+});
+
+
+/*
+ * Setting up a Python project without lying to its owner.
+ *
+ * All of this was found on 2026-08-31 by pointing the published tool at a real Python
+ * command-line tool — pyproject.toml, a src/ package, subcommands, a --help. `staysfixed
+ * init` wrote three commands into the settings, TWO of which answered "command not found"
+ * with exit 127, so the first check the owner ran came back red about nothing. It said twice
+ * that it had read them "from package.json", in a project that has no package.json. And it
+ * recorded the product under the name of the folder it happened to be checked out into,
+ * rather than the name the project gives itself in the line every Python tool reads.
+ *
+ * Every test below fails on the code as it was that morning.
+ */
+describe('setting up a Python project', () => {
+  /** @type {string[]} */
+  const made = [];
+
+  /**
+   * Write a throwaway project and hand back its folder.
+   * @param {Record<string, string>} files
+   */
+  const projectOf = async (files) => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-python-'));
+    made.push(root);
+    for (const [name, text] of Object.entries(files)) {
+      await fsp.mkdir(path.join(root, path.dirname(name)), { recursive: true });
+      await fsp.writeFile(path.join(root, name), text);
+    }
+    return root;
+  };
+
+  test.after(async () => {
+    for (const root of made) await fsp.rm(root, { recursive: true, force: true });
+  });
+
+  /** A src-layout package whose command line is exactly where a Python one usually is. */
+  const srcLayout = {
+    'pyproject.toml': [
+      '[project]',
+      'name = "lint-lens"',
+      'version = "0.3.1"',
+      '',
+      '[project.scripts]',
+      'lint-lens = "lint_lens.cli:main"',
+      'lenscheck = "lint_lens.cli:check_main"',
+      '',
+    ].join('\n'),
+    'src/lint_lens/__init__.py': '__version__ = "0.3.1"\n',
+    'src/lint_lens/cli.py': [
+      'import argparse',
+      'import sys',
+      '',
+      '',
+      'def main(argv=None):',
+      '    argparse.ArgumentParser(prog="lint-lens").parse_args(argv)',
+      '    return 0',
+      '',
+      '',
+      'def check_main(argv=None):',
+      '    return 0',
+      '',
+      '',
+      'if __name__ == "__main__":',
+      '    sys.exit(main())',
+      '',
+    ].join('\n'),
+  };
+
+  describe('what the project calls itself, and where that came from', () => {
+    test('the name comes out of pyproject.toml, not out of the folder name', async () => {
+      const root = await projectOf(srcLayout);
+      const called = whatItCallsItself(root);
+      // The folder here is a random mkdtemp name, so this is the exact failure: the record of
+      // what "working" means was being kept under a name that changes if anybody re-clones
+      // the repository into a differently named folder.
+      assert.equal(called.name, 'lint-lens');
+      assert.equal(called.from, 'pyproject.toml');
+    });
+
+    test('a Poetry project declares itself in a different table, and it is read too', async () => {
+      const root = await projectOf({
+        'pyproject.toml': '[tool.poetry]\nname = "deep-tool"\nversion = "1.4.0"\n',
+      });
+      assert.deepEqual(whatItCallsItself(root), { name: 'deep-tool', from: 'pyproject.toml' });
+    });
+
+    test('setup.py and setup.cfg are read as well, because plenty of projects still use them', async () => {
+      const cfg = await projectOf({ 'setup.cfg': '[metadata]\nname = old-style\nversion = 1.0\n' });
+      assert.deepEqual(whatItCallsItself(cfg), { name: 'old-style', from: 'setup.cfg' });
+      const py = await projectOf({ 'setup.py': 'from setuptools import setup\nsetup(name="older-still", version="1.0")\n' });
+      assert.deepEqual(whatItCallsItself(py), { name: 'older-still', from: 'setup.py' });
+    });
+
+    test('when nothing declares a name the answer says so, instead of naming a file', async () => {
+      const root = await projectOf({ 'notes.txt': 'nothing here\n' });
+      assert.equal(whatItCallsItself(root).from, 'the folder name');
+    });
+
+    test('the settings file records the declared name and names the file it read', async () => {
+      const shape = await detectProject({ root: await projectOf(srcLayout) });
+      const text = configText(shape);
+      assert.match(text, /product: "lint-lens"/, 'the record is kept under this name, so a wrong one splits one product’s history in two');
+      assert.match(text, /the folder names and pyproject\.toml/);
+      assert.doesNotMatch(text, /package\.json/, 'there is no package.json in this project, and claiming one is a small lie a person can check in one second');
+    });
+
+    test('a journey says the file it really came from', async () => {
+      const made = await plan({ cwd: await projectOf(srcLayout), offline: true });
+      const walked = made.journeys.filter((j) => j.surface === 'cli');
+      assert.ok(walked.length > 0, 'a Python command-line tool has to have something to walk');
+      for (const journey of walked) {
+        assert.notEqual(journey.from, 'package.json', 'it said this twice on one screen about a project with no package.json in it');
+      }
+    });
+  });
+
+  describe('the commands it writes down', () => {
+    test('a console script is never written down as a bare name', async () => {
+      const root = await projectOf(srcLayout);
+      const shape = await detectProject({ root });
+      const cli = shape.products.find((p) => p.kind === 'cli');
+      assert.ok(cli);
+      const { ready } = commandsThatRun(shape, cli);
+      assert.ok(ready.length > 0, 'this project has two perfectly good commands in it');
+      for (const command of ready) {
+        // `lint-lens --help` is a file pip WRITES when somebody installs the package. On a
+        // fresh clone it answers "command not found", exit 127 — which is what the first
+        // check on a real project did, twice, on 2026-08-31.
+        assert.doesNotMatch(command.run, /^(lint-lens|lenscheck)\b/);
+        assert.match(command.run, /^python3 /);
+      }
+    });
+
+    test('each entry point keeps its own function, so two commands never become one', async () => {
+      const root = await projectOf(srcLayout);
+      const shape = await detectProject({ root });
+      const cli = /** @type {any} */ (shape.products.find((p) => p.kind === 'cli'));
+      const { ready } = commandsThatRun(shape, cli);
+      const runs = ready.map((c) => c.run).join('\n');
+      assert.match(runs, /import main; sys\.exit\(main\(\)\)/);
+      assert.match(runs, /import check_main; sys\.exit\(check_main\(\)\)/,
+        'one module can hold two entry points and its __main__ block calls only one of them, so taking the block first compares the wrong program’s help for ever');
+    });
+
+    test('a src layout is carried as PYTHONPATH rather than written in front of the command', async () => {
+      const root = await projectOf(srcLayout);
+      const shape = await detectProject({ root });
+      const cli = /** @type {any} */ (shape.products.find((p) => p.kind === 'cli'));
+      for (const command of commandsThatRun(shape, cli).ready) {
+        assert.deepEqual(command.env, { PYTHONPATH: 'src' });
+        // `PYTHONPATH=src python3 ...` is a shell feature Windows has not got.
+        assert.doesNotMatch(command.run, /PYTHONPATH=/);
+      }
+    });
+
+    test('the same program found two ways is written down once', async () => {
+      const root = await projectOf(srcLayout);
+      const shape = await detectProject({ root });
+      const cli = /** @type {any} */ (shape.products.find((p) => p.kind === 'cli'));
+      const { ready } = commandsThatRun(shape, cli);
+      assert.equal(new Set(ready.map((c) => c.run)).size, ready.length,
+        'the same command written twice makes every check run it twice and compare it against itself');
+    });
+
+    test('a module with no way in is left blank, with a sentence saying what to put there', async () => {
+      const root = await projectOf({
+        'pyproject.toml': '[project]\nname = "hidden-tool"\nversion = "0.1.0"\n\n[project.scripts]\nhidden = "hidden_tool.entry:run"\n',
+        'hidden_tool/__init__.py': '',
+        'hidden_tool/helpers.py': 'GREETING = "hi"\n',
+        'hidden_tool/cli.py': 'import argparse\nimport sys\n\nfrom .helpers import GREETING\n\n\ndef go(argv=None):\n    argparse.ArgumentParser(prog="hidden").parse_args(argv)\n    return 0\n',
+      });
+      const shape = await detectProject({ root });
+      const cli = /** @type {any} */ (shape.products.find((p) => p.kind === 'cli'));
+      const judged = commandsThatRun(shape, cli);
+      assert.equal(judged.ready.length, 0, 'nothing here can be run without installing the package first');
+      assert.ok(judged.unsure.length > 0, 'and an honest blank beats a broken default');
+      for (const one of judged.unsure) {
+        assert.ok(one.why.length > 20 && one.whatToPut.length > 20, 'a blank with no sentence beside it is just a missing feature');
+      }
+      const text = configText(shape);
+      assert.match(text, /is left blank on purpose/);
+      assert.match(text, /\/\/ \{ name: "hidden --help", run: '\.\.\.'/, 'the blank has to be a line somebody can uncomment and fill in');
+    });
+
+    test('a project whose commands were all left blank is never called ready', async () => {
+      const made = await plan({
+        cwd: await projectOf({
+          'pyproject.toml': '[project]\nname = "hidden-tool"\nversion = "0.1.0"\n\n[project.scripts]\nhidden = "hidden_tool.entry:run"\n',
+          'hidden_tool/__init__.py': '',
+          'hidden_tool/helpers.py': 'GREETING = "hi"\n',
+          'hidden_tool/cli.py': 'import argparse\nimport sys\n\nfrom .helpers import GREETING\n\n\ndef go(argv=None):\n    return 0\n',
+        }),
+        offline: true,
+      });
+      const cli = made.readiness.find((r) => r.kind === 'cli');
+      assert.ok(cli);
+      assert.notEqual(cli.state, 'ready', 'a product with no runnable command was reported as covered in full');
+      const about = cli.needs.filter((n) => n.topic === 'commands');
+      assert.equal(about.length, 1, 'the same missing thing said twice, once in Python’s words and once in Node’s, is one need said twice');
+      assert.doesNotMatch(about[0].fix, /node bin\/cli\.js/, 'a Node example in a Python project is advice nobody there can follow');
+    });
+
+    test('Poetry declares its scripts in a table of its own, and it is read', async () => {
+      const root = await projectOf({
+        'pyproject.toml': '[tool.poetry]\nname = "deep-tool"\n\n[tool.poetry.scripts]\ndeep = "deep_tool.cli:main"\n',
+        'src/deep_tool/__init__.py': '',
+        'src/deep_tool/rules.py': 'RULES = ["one"]\n',
+        'src/deep_tool/cli.py': 'import argparse\n\nfrom .rules import RULES\n\n\ndef main(argv=None):\n    argparse.ArgumentParser(prog="deep").parse_args(argv)\n    return 0\n',
+      });
+      assert.deepEqual([...pythonEntryPoints(root)], [['deep', 'deep_tool.cli:main']]);
+      // Running that file by its path is what init used to write, and it dies on the first
+      // line: ImportError, attempted relative import with no known parent package, exit 1.
+      const built = pythonRunFor(root, 'deep_tool.cli:main');
+      assert.deepEqual(built, {
+        run: 'python3 -c "import sys; from deep_tool.cli import main; sys.exit(main())"',
+        env: { PYTHONPATH: 'src' },
+      });
+    });
+
+    test('a module with no __main__ block is never handed to `python3 -m`', async () => {
+      const root = await projectOf({
+        'quiet_tool/__init__.py': '',
+        'quiet_tool/cli.py': 'def main():\n    return 0\n',
+      });
+      // Measured: `python3 -m quiet_tool.cli` imports the module, finds nothing to do and
+      // exits 0 having printed nothing. A command that succeeds silently would have this
+      // tool comparing an empty string against an empty string for ever.
+      assert.deepEqual(pythonRunFor(root, 'quiet_tool.cli:main'), {
+        run: 'python3 -c "import sys; from quiet_tool.cli import main; sys.exit(main())"',
+      });
+      assert.equal(pythonRunFor(root, 'quiet_tool.cli'), null, 'with no function named and no __main__ block there is no honest answer');
+    });
+
+    test('nothing is told to go and build a program that runs straight from the source', async () => {
+      const shape = await detectProject({ root: await projectOf(srcLayout) });
+      const text = configText(shape);
+      assert.doesNotMatch(text, /has not been built here/,
+        'it told a Python tool and a plain Node one to build something that was sitting right there and that the same run had already worked out how to run');
+    });
   });
 });

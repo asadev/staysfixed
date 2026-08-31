@@ -13,7 +13,11 @@ import { StaysFixedError, EXIT } from '../core/errors.js';
  * @returns {Promise<number>}
  */
 export async function run(ctx) {
-  const project = await loadProject({ cwd: ctx.cwd, configFile: ctx.configFile });
+  // `opening: false` — a marker is a commit, a date and a set of fingerprints written to a
+  // file. Nothing is opened and nothing is photographed, so a project with no screen can pin
+  // a known-good version exactly like any other. It was refused on every one of them until
+  // 2026-08-31, which took `trace` down with it: there was nothing to trace back to.
+  const project = await loadProject({ cwd: ctx.cwd, configFile: ctx.configFile, opening: false });
 
   if (ctx.bool('list')) return showAll(project);
 

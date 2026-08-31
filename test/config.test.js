@@ -8,6 +8,7 @@
 
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
@@ -15,6 +16,8 @@ import {
   loadProject,
   resolveConfig,
   settingsForScreen,
+  hasSomethingToOpen,
+  NOTHING_TO_OPEN,
   DEFAULT_VIEWPORT,
   DEFAULT_FREEZE,
   DEFAULT_TOLERANCE,
@@ -23,7 +26,7 @@ import {
 } from '../src/core/config.js';
 import { StaysFixedError } from '../src/core/errors.js';
 import { versionTwoState } from '../src/cli/status.js';
-import { scratchDir, cleanUp } from './support.mjs';
+import { cliPath, scratchDir, cleanUp } from './support.mjs';
 
 /** The smallest config that is allowed to exist. */
 const minimal = () => ({ app: { kind: 'web', url: 'http://localhost:3000' } });
@@ -139,7 +142,11 @@ describe('what a config is refused for', () => {
       (error) => {
         assert.ok(error instanceof StaysFixedError);
         assert.match(String(error.hint), /staysfixed check/, 'it has to name the half of the tool that does cover this project');
-        assert.match(String(error.hint), /process/, 'and say which of these settings it recognised, so the refusal is about THIS project');
+        assert.match(error.message, /commands to run/, 'and say what these settings ARE, so the refusal is about THIS project');
+        // `app` is version 1's word for the thing to open. The settings this tool writes
+        // today have no `app` in them and never will, so telling somebody to add one sends
+        // them editing their file against a shape nothing else in the tool uses.
+        assert.doesNotMatch(error.message + String(error.hint), /\bapp:/, 'never a key the person has never heard of');
         return true;
       },
     );
@@ -385,5 +392,142 @@ describe('loading a config from disk', () => {
     );
     const project = await loadProject({ cwd: dir, configFile: 'other.config.json' });
     assert.equal(project.config.app.url, 'http://localhost:9');
+  });
+});
+
+
+/*
+ * The commands that were dead on the settings this tool writes for itself.
+ *
+ * Found on 2026-08-31 by using the published tool as a stranger would, on a Python
+ * command-line tool and again on a plain Node one. `staysfixed init` wrote the settings, and
+ * then FIVE of the commands `--help` offers — status, flake, mark, trace and approve —
+ * refused to run at all. Every one of them does its whole job by reading files this tool has
+ * already written; not one of them opens anything. They were refused because the only way to
+ * load settings insisted on an `app` key that version 2's `init` never writes, so the
+ * message a person got was a paragraph about a key they had never seen, in a file they had
+ * never edited, about a project that was set up correctly.
+ */
+describe('commands that open nothing are never refused for having nothing to open', () => {
+  /** The shape `staysfixed init` writes for a command-line tool or a library. */
+  const versionTwoSettings = () => ({
+    product: 'lint-lens',
+    source: { folders: ['src'] },
+    process: { commands: [{ name: 'lint-lens --help', run: 'python3 -m lint_lens.cli --help' }] },
+  });
+
+  test('a command that promises to open nothing gets its settings', () => {
+    const config = resolveConfig(versionTwoSettings(), 'staysfixed.config.mjs', { opening: false });
+    assert.equal(config.app.kind, NOTHING_TO_OPEN);
+    assert.equal(hasSomethingToOpen(config), false);
+    // And everything else in the file is still there to be read, which is the whole point:
+    // `status` has to be able to say what these settings cover.
+    assert.equal(/** @type {any} */ (config).process.commands.length, 1);
+  });
+
+  test('and one that does open something is still asked the same questions', () => {
+    refuses(() => resolveConfig(versionTwoSettings()), /photographs a screen/);
+    refuses(() => resolveConfig({ app: { kind: 'web' } }, '(inline)', { opening: false }), /needs `app\.url`/);
+  });
+
+  test('a version 2 website hands its screens across, not only its address', () => {
+    // Half a bridge is worse than none. `walk` was given the address and then found nothing
+    // to photograph, so it opened a browser and reported an empty walk of a site with three
+    // screens sitting in its own settings file.
+    const config = resolveConfig({
+      product: 'site',
+      web: { url: 'http://localhost:3000', screens: [{ name: 'the front page', url: '/' }, { name: 'pricing', url: '/pricing' }] },
+    });
+    assert.equal(config.app.kind, 'web');
+    assert.deepEqual(config.screens.map((s) => s.name), ['the front page', 'pricing']);
+    assert.deepEqual(config.screens[1].steps, [{ goto: '/pricing' }]);
+  });
+
+  test('a screen reached by clicking is not carried over as an address', () => {
+    // Version 2 walks those by clicking the control that names them. Turning one into an
+    // address here would put a screen in the report that nobody can actually reach.
+    const config = resolveConfig({
+      product: 'site',
+      web: { url: 'http://localhost:3000', screens: [{ name: 'the front page', url: '/' }, { name: 'the settings tab' }] },
+    });
+    assert.deepEqual(config.screens.map((s) => s.name), ['the front page']);
+  });
+
+  test('screens already written the version 1 way are never overwritten', () => {
+    const config = resolveConfig({
+      product: 'site',
+      screens: [{ name: 'mine', url: '/mine' }],
+      web: { url: 'http://localhost:3000', screens: [{ name: 'theirs', url: '/theirs' }] },
+    });
+    assert.deepEqual(config.screens.map((s) => s.name), ['mine']);
+  });
+});
+
+describe('every command in --help, on the settings this tool writes', () => {
+  /**
+   * Run the CLI and wait for it, whatever it exits with.
+   * @param {string[]} args
+   * @param {string} cwd
+   */
+  const cli = (args, cwd) => new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      [cliPath, ...args],
+      { cwd, env: { ...process.env, NO_COLOR: '1' }, timeout: 120_000 },
+      (error, stdout, stderr) => resolve({
+        code: error && typeof (/** @type {any} */ (error).code) === 'number' ? /** @type {any} */ (error).code : 0,
+        out: String(stdout) + String(stderr),
+      }),
+    );
+  });
+
+  /** A project set up exactly the way `staysfixed init` sets one up. */
+  const setUp = async () => {
+    const dir = await scratchDir('staysfixed-v2-settings');
+    await fsp.writeFile(path.join(dir, 'staysfixed.config.mjs'), [
+      'export default {',
+      '  product: "lint-lens",',
+      '  source: { folders: ["src"] },',
+      '  process: { commands: [{ name: "lint-lens --help", run: "python3 -m lint_lens.cli --help" }] },',
+      '};',
+      '',
+    ].join('\n'));
+    return dir;
+  };
+
+  test('status, flake, mark, trace and approve all run, and none of them mentions a key nobody wrote', async () => {
+    const dir = await setUp();
+    for (const args of [['status'], ['flake'], ['mark', 'v0.1.0'], ['trace'], ['approve']]) {
+      const { code, out } = await cli(args, dir);
+      assert.equal(code, 0, `\`staysfixed ${args.join(' ')}\` refused to run on the settings this tool writes:\n${out}`);
+      assert.doesNotMatch(out, /do not name anything to open/, `\`${args[0]}\` is still refusing over a screen it never needed`);
+      assert.doesNotMatch(out, /app: \{ kind:/, `\`${args[0]}\` is still telling somebody to add a key version 2 never writes`);
+    }
+  });
+
+  test('status says what these settings actually cover, instead of four zeroes', async () => {
+    const { out } = await cli(['status'], await setUp());
+    // "0 approved pictures, 0 screens, 0 guards, 0 markers" is every word of it true and
+    // together reads as "nothing is set up" about a project whose settings name a command
+    // and a folder of source.
+    assert.match(out, /1 command to run and compare word for word/);
+    assert.match(out, /the code in src/);
+  });
+
+  test('trace refuses a project with no screen by saying why, not by naming a setting', async () => {
+    const { code, out } = await cli(['trace'], await setUp());
+    assert.equal(code, 0);
+    assert.match(out, /no screen in this project to trace/);
+    // The generic ending told somebody to pin a good version — which, on a project that had
+    // just pinned one, was advice they had already followed thirty seconds earlier.
+    assert.doesNotMatch(out, /Pin a good version first/);
+  });
+
+  test('walk still refuses, and the refusal names this project rather than a missing key', async () => {
+    const { code, out } = await cli(['walk'], await setUp());
+    assert.equal(code, 2, 'a project with no screen genuinely cannot be walked');
+    assert.match(out, /photographs a screen, and this project has none/);
+    assert.match(out, /commands to run/, 'it has to say what this project IS');
+    assert.doesNotMatch(out, /app: \{ kind:/);
   });
 });
