@@ -422,3 +422,103 @@ describe('importing the package entry a project actually has', () => {
     assert.match(ran.stdout, /join/, 'node:path exports join, so the package route still works');
   });
 });
+
+describe('what the product said for itself, kept instead of thrown away', () => {
+  /**
+   * Everything `describeRun` writes for one command, as { path: sentence }.
+   *
+   * @param {{stdout?: string, stderr?: string, code?: number|null, couldNotStart?: string}} result
+   */
+  const sentencesFor = async (result) => {
+    const out = await describeRun({
+      journey: /** @type {any} */ ({ name: 'help', describe: 'ask it to print its help' }),
+      result: /** @type {any} */ ({
+        stdout: '', stderr: '', code: 1, signal: null, timedOut: false, ms: 5, ...result,
+      }),
+      before: new Map(),
+      after: new Map(),
+      watched: /** @type {any} */ ({ inForce: false, ran: new Map(), reachedOut: [], torn: 0, settingsRead: [] }),
+      ctx: /** @type {any} */ ({ evidenceDir: await scratchDir('staysfixed-said-evidence') }),
+      footprint: { dirs: [] },
+    });
+    return out;
+  };
+
+  // Measured 2026-08-31 on three deliberately broken products. All three were correctly
+  // refused — the tool never claimed they were fine — and a grep of the whole reply, with
+  // --verbose on, found none of these three words anywhere in it. The owner was told "the
+  // thing being observed fell over before it could be read", six times over, and had to go
+  // and find the reason themselves.
+  for (const [what, stderr, wanted] of /** @type {[string, string, RegExp][]} */ ([
+    [
+      'a JavaScript syntax error',
+      'file:///p/server.js:18\n\n\nSyntaxError: Unexpected end of input\n    at compileSourceTextModule (node:internal/modules/esm/utils:355:16)\n\nNode.js v26.5.1\n',
+      /SyntaxError: Unexpected end of input/,
+    ],
+    [
+      'a Python module that is not installed',
+      'Traceback (most recent call last):\n  File "/p/cli.py", line 4, in <module>\n    import tabulate\n    ^^^^^^^^^^^^^^^\nModuleNotFoundError: No module named \'tabulate\'\n',
+      /ModuleNotFoundError: No module named 'tabulate'/,
+    ],
+    [
+      'a Node package that is not installed',
+      "node:internal/modules/package_json_reader:301\n  throw new ERR_MODULE_NOT_FOUND(x);\n        ^\n\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'chalk' imported from /p/cli.js\n    at Object.getPackageJSONURL (node:x:301:9) {\n  code: 'ERR_MODULE_NOT_FOUND'\n}\n\nNode.js v26.5.1\n",
+      /ERR_MODULE_NOT_FOUND/,
+    ],
+  ])) {
+    test(`${what} is named in the reply, not just "it fell over"`, async () => {
+      const out = await sentencesFor({ stderr, code: 1 });
+      const crash = out.find((o) => o.path === 'cli.help.ran at all');
+      assert.ok(crash, 'a command that printed nothing and died must still say it never reached the product');
+      assert.match(String(crash.meta?.describe), wanted, 'the product printed the reason; the reply has to carry it');
+      // And it has to survive being trimmed. `staysfixed coverage` prints this sentence with a
+      // 160 character budget, so a reason parked at the end of a long sentence is a reason
+      // nobody ever reads.
+      assert.match(String(crash.meta?.describe).slice(0, 160), wanted, 'it has to be inside the first 160 characters');
+      assert.match(String(crash.meta?.refusedWhy), wanted, 'and the refusal reason carries the fuller quote');
+    });
+  }
+
+  test('the reason goes in the sentence and never in the value, so two crashes are not a difference', async () => {
+    const one = await sentencesFor({ stderr: 'SyntaxError: Unexpected end of input\n', code: 1 });
+    const two = await sentencesFor({ stderr: "ModuleNotFoundError: No module named 'tabulate'\n", code: 1 });
+    const valueOf = (/** @type {any[]} */ o) => o.find((x) => x.path === 'cli.help.ran at all')?.value;
+    // Two builds that fall over for two different reasons must not report a difference AT THIS
+    // ADDRESS. What went wrong is a fact about the crash; the run says so in words, and the
+    // comparison stays out of it.
+    assert.deepEqual(valueOf(one), valueOf(two), 'the compared value has to be the same fixed sentence either way');
+  });
+
+  test('a command that printed something is still a real observation and is not touched', async () => {
+    const out = await sentencesFor({ stdout: 'usage: thing [options]\n', stderr: 'warning: old flag\n', code: 1 });
+    assert.equal(out.find((o) => o.path === 'cli.help.ran at all'), undefined,
+      'a linter that exits 1 with a list of problems reached the product, and must go on being compared');
+  });
+
+  test('a module that will not import says why, instead of pointing at another channel', () => {
+    const out = apiSurface(
+      /** @type {any} */ ({ name: 'the entry', describe: 'import the package entry' }),
+      /** @type {any} */ ({ stdout: '', stderr: "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'chalk'\n    at x\n" }),
+    );
+    assert.match(String(out[0].meta?.describe), /ERR_MODULE_NOT_FOUND/);
+  });
+});
+
+describe('the command line is quoted the way this machine reads quotes', () => {
+  test('the import probe carries no newline, because cmd.exe cannot pass one', () => {
+    // Measured on a real Windows 11 machine on 2026-08-31: the probe is many lines long, the
+    // first newline ended the command, and what ran was a fragment. The run then reported the
+    // product broken when nothing had been run at all.
+    const line = importProbeCommand('./index.js');
+    assert.doesNotMatch(line, /\n/, 'a command line with a newline in it is truncated by cmd.exe');
+  });
+
+  test('the probe still works when it is carried, which is the whole point of carrying it', async () => {
+    const dir = await scratchDir('staysfixed-probe-carried');
+    await fsp.writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: 'p', type: 'module' }));
+    await fsp.writeFile(path.join(dir, 'index.js'), 'export const add = (a, b) => a + b\n');
+    const ran = await runCommand(importProbeCommand('index.js'), { cwd: dir, env: /** @type {any} */ (process.env), timeoutMs: 60000 });
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.match(ran.stdout, /add/);
+  });
+});

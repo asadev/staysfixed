@@ -532,10 +532,27 @@ export function readFile(relFile, text) {
   // Command-line flags. These are a mention, not a proof — a string that looks like a flag
   // may be one this program accepts or one it passes on to something else. It gets its own
   // wording so nobody mistakes the two.
-  for (const token of tokens) {
-    if (token.t === 'string' && /^--[a-z0-9][a-z0-9-]*$/i.test(token.v)) {
-      doors.push(door('command', token.v, 'a flag this file mentions', relFile, token.line, inTest, true, 'literal'));
-    }
+  //
+  // A CSS CUSTOM PROPERTY IS NOT A FLAG. `style={{ '--px': '1rem' }}` is a component setting
+  // its own spacing, and it was read here as a command-line flag this program accepts.
+  // Measured 2026-08-31 on a real site: eleven of them became doors, padding the denominator
+  // of the coverage ledger with eleven things no journey can ever walk, so a site whose real
+  // coverage was good read as worse than it was and the real never-opened doors sat in a list
+  // of invented ones.
+  //
+  // An object key is what tells them apart, and it is decided by BOTH neighbours, not one. A
+  // key is a string with a colon after it AND an opening brace or a comma in front of it.
+  // Checking only the colon would also throw away `cond ? '--verbose' : '--quiet'`, where the
+  // first branch has a colon after it too — and dropping a real flag is the wrong mistake to
+  // make here: an invented door makes the ledger read worse than the truth, a missing one
+  // makes it read better, and only one of those two can end in somebody believing a clean
+  // result they should not have.
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.t !== 'string' || !/^--[a-z0-9][a-z0-9-]*$/i.test(token.v)) continue;
+    const isAKey = tokens[i + 1]?.v === ':' && (tokens[i - 1]?.v === '{' || tokens[i - 1]?.v === ',');
+    if (isAKey) continue;
+    doors.push(door('command', token.v, 'a flag this file mentions', relFile, token.line, inTest, true, 'literal'));
   }
 
   // A server written straight on node:http registers nothing. There is no `app.get` for the
@@ -1286,6 +1303,19 @@ async function collectFiles(root, folders, maxFileBytes) {
 // ---------------------------------------------------------------------------
 
 /**
+ * What each Next.js metadata file is actually served at. The file is named for what it is;
+ * the address it answers on is a different word, and asking for the file's own name gets a
+ * 404 — which would then be reported as a route the build has lost.
+ */
+const SERVED_AS = /** @type {Record<string, string>} */ ({
+  sitemap: 'sitemap.xml',
+  robots: 'robots.txt',
+  manifest: 'manifest.webmanifest',
+  'opengraph-image': 'opengraph-image',
+  icon: 'icon',
+});
+
+/**
  * Every route that is not written as a call in JavaScript.
  *
  * Next.js puts its routes in folder names, so no amount of reading calls will find them.
@@ -1341,7 +1371,40 @@ export async function readFileRoutes(root) {
 
   for (const appDir of ['app', 'src/app']) {
     await walk(path.join(root, appDir), async (rel, full) => {
-      if (!/(^|\/)route\.[cm]?[jt]sx?$/.test(rel.split(path.sep).join('/'))) return;
+      // METADATA FILES ARE ROUTES, and they were invisible. A Next.js site serves
+      // `/sitemap.xml` and `/robots.txt` from `app/sitemap.ts` and `app/robots.ts`, and this
+      // reader knew about neither, so neither was a door and no journey ever asked for either.
+      // Measured 2026-08-31 on a real site: two entries were deleted out of the sitemap and the
+      // run reported nothing whatever. A sitemap is how a search engine finds a product, so a
+      // sitemap that silently stops listing half of it is exactly the kind of break that is
+      // never noticed until the traffic has already gone.
+      //
+      // The file's name decides the address it is served at, and the folder it sits in decides
+      // what comes in front of that — the same rule as `route.ts`, so route groups in brackets
+      // and private folders starting with an underscore drop out the same way. `twitter-image`
+      // and `apple-icon` work identically and are left out only because nothing has measured
+      // them; adding one is adding a line to this list.
+      const asPosix = rel.split(path.sep).join('/');
+      const metadata = /(^|\/)(sitemap|robots|manifest|opengraph-image|icon)\.[cm]?[jt]sx?$/.exec(asPosix);
+      if (metadata) {
+        const under = '/' + path.dirname(rel)
+          .split(path.sep)
+          .filter((one) => one !== '.' && !(one.startsWith('(') && one.endsWith(')')) && !one.startsWith('_'))
+          .join('/');
+        const prefix = under === '/' ? '' : under.replace(/\/$/, '');
+        doors.push({
+          kind: 'route',
+          name: `${prefix}/${SERVED_AS[metadata[2]]}`,
+          detail: 'GET',
+          file: path.relative(root, full),
+          line: 1,
+          inTest: false,
+          named: true,
+          via: 'a Next.js metadata file',
+        });
+        return;
+      }
+      if (!/(^|\/)route\.[cm]?[jt]sx?$/.test(asPosix)) return;
       // A folder in brackets is a grouping, not part of the address; one starting with an
       // underscore is private and is not routed at all.
       const url = '/' + path.dirname(rel)
@@ -1625,7 +1688,23 @@ export const sourceAdapter = defineAdapter({
    * @param {import('./contract.js').PreparedBuild} build
    */
   async run(journey, build) {
-    const reading = await readContract({ root: build.root });
+    // THE FOLDERS THE JOURNEY NAMES, not the guessed ones.
+    //
+    // This walk read the project's source with no folders at all, so it fell back to the
+    // built-in guess — src, lib, app, bin, server, pages, api, electron, main, packages —
+    // while `journeys()` three functions above had already worked out the real list from the
+    // settings and written it into the step. Measured 2026-08-31 on a real Next.js site: the
+    // contract channel recorded 24 observations against 25 doors and never saw `format`,
+    // `slugify` or `emptyCart`, because they live in a folder the guess does not name.
+    //
+    // This is the worst shape a hole in this tool can take. The contract channel exists for
+    // exactly one job — noticing that an exported function has disappeared — and for every
+    // export outside the guessed folders it was not doing that job, silently, on every run,
+    // while the run reported a clean result. The step already carries the answer.
+    const reading = await readContract({
+      root: build.root,
+      folders: Array.isArray(journey.steps?.[0]?.folders) ? journey.steps[0].folders : undefined,
+    });
     const fileRoutes = await readFileRoutes(build.root);
     reading.doors.push(...fileRoutes.doors);
     // A folder the route walk could not open is a hole in the door list, and the door list is

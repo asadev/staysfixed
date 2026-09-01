@@ -40,7 +40,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   defineAdapter, howLongItTook, joinPath, notCovered, observation, sizeBucket,
-  trimForStorage, undoOurFootprint,
+  trimForStorage, undoOurFootprint, whatItSaid,
 } from './contract.js';
 // The harvest writes the test-file steps this adapter walks, and it owns reading a runner's
 // output back. One place on purpose: a journey read differently from the way it was
@@ -1382,7 +1382,16 @@ export function importProbeCommand(moduleId) {
     "}",
     "process.stdout.write('\\n' + " + JSON.stringify(EXPORTS_MARKER) + " + '\\n' + JSON.stringify(out, null, 2));",
   ].join('\n');
-  return `node --input-type=module -e ${shellQuote(probe)} ${shellQuote(moduleId)}`;
+  // The probe travels as base64 inside a data: URL rather than as its own text.
+  //
+  // It is many lines long, and a `cmd.exe` command line cannot carry a newline at all — the
+  // first one ends the command. It also contains quotes, colons and angle brackets, every one
+  // of which means something to a shell. Base64 is letters, digits and three punctuation marks
+  // that no shell reads as anything, so what arrives is what was sent, on every machine.
+  // Measured on a real Windows 11 machine on 2026-08-31.
+  const carried = Buffer.from(probe, 'utf8').toString('base64');
+  const load = `await import('data:text/javascript;base64,${carried}')`;
+  return `node --input-type=module -e ${shellQuote(load)} ${shellQuote(moduleId)}`;
 }
 
 /**
@@ -1568,8 +1577,20 @@ async function fingerprintOf(file) {
   }
 }
 
-/** @param {string} text */
+/**
+ * One argument, quoted the way THIS machine's shell reads quotes.
+ *
+ * Single quotes everywhere except Windows, where `cmd.exe` does not treat them as quotes at
+ * all — it hands the quote through as part of the word. Measured on a real Windows 11 machine
+ * on 2026-08-31: every command built here arrived as literal text, the probe came back
+ * `SyntaxError: Invalid or unexpected token` on the text `'const`, and the run reported the
+ * product broken when nothing had been run. Windows uses double quotes, and a double quote
+ * inside the value is doubled, which is how `cmd.exe` spells one.
+ *
+ * @param {string} text
+ */
 function shellQuote(text) {
+  if (process.platform === 'win32') return `"${String(text).replace(/"/g, '""')}"`;
   return `'${text.split("'").join(`'\\''`)}'`;
 }
 
@@ -1686,15 +1707,45 @@ export async function describeRun(input) {
         : result.signal
           ? `it was killed by ${result.signal} having printed nothing`
           : `it exited ${result.code} without printing anything at all`;
+    // AND SAY WHAT IT ACTUALLY SAID. This was the whole gap, measured 2026-08-31 on three
+    // deliberately broken products — a Node server with a syntax error, a Python command
+    // importing a module that is not installed, and a Node command importing a package that is
+    // not installed. Every one of them was correctly refused, and every one of their owners was
+    // told only "it fell over", six times over, with `--verbose` on. All three had printed the
+    // reason on their own standard error, in one line, and this sentence threw it away. Being
+    // told "it fell over" instead of "line 18 of server.js has a syntax error" sends a person
+    // off to find it themselves, which is the one thing this tool exists not to do.
+    //
+    // TWO RENDERINGS, because they are read in two places with two different budgets.
+    // `staysfixed coverage` prints this sentence with 160 characters and the refusal's reason
+    // underneath it with 400. So the sentence gets the ONE line that names the thing — a
+    // runtime puts that last, which is why it is the last line — and the reason underneath
+    // gets the fuller quote, file and line and all. Neither is ever compared: both live in
+    // `meta`, so a crash worded differently on two machines cannot register as a change in the
+    // product.
+    const spoke = input.quieten
+      ? input.quieten(undoOurFootprint(result.stderr, footprint))
+      : undoOurFootprint(result.stderr, footprint);
+    // Standard error first, because that is where a runtime puts the reason. Standard output is
+    // the fallback for a program that complains on the wrong channel, and there is nothing to
+    // fall back to when a command never started at all — the machine's own words are in `why`.
+    const spokeOrPrinted = spoke.trim() === '' ? undoOurFootprint(result.stdout, footprint) : spoke;
+    const headline = whatItSaid(spokeOrPrinted, { mostLines: 1 });
+    const inFull = whatItSaid(spokeOrPrinted);
     out.push(notCovered({
       channel: 'complaints',
       path: joinPath('cli', id, 'ran at all'),
       reason: 'crashed',
+      // What it said leads, ahead of the journey's own name, and that ordering is the point:
+      // the name of the journey is something the reader already knows, and the error is the
+      // only new fact in the sentence. Put second, it is what a trim cuts off.
       says:
-        `"${journey.describe}" did not get far enough to observe the product: ${why}. What it complained about and how ` +
-        `it finished are recorded below and are facts about the crash, not about the product — so nothing here is ` +
-        `compared with the other build. A command that fails the same way on both builds otherwise agrees at every ` +
-        `address, and that agreement reads exactly like a clean run.`,
+        `Nothing was seen of the product${headline ? `. It said: ${headline}` : ''}. That is as far as ` +
+        `"${journey.describe}" got — ${why}. What it complained about and how it finished are recorded below and are ` +
+        `facts about the crash, not about the product — so nothing here is compared with the other build. A command ` +
+        `that fails the same way on both builds otherwise agrees at every address, and that agreement reads exactly ` +
+        `like a clean run.`,
+      detail: inFull,
     }));
   }
   out.push(observation({
@@ -1871,11 +1922,24 @@ export function apiSurface(journey, result) {
     surface = JSON.parse(at === -1 ? result.stdout : result.stdout.slice(at + EXPORTS_MARKER.length));
     if (surface === null || typeof surface !== 'object' || Array.isArray(surface)) throw new Error('not a list of names');
   } catch {
+    // A module that will not import is the same defect as a command that will not run, and it
+    // was answered the same unhelpful way: "could not be imported", with the reason sitting
+    // unread in the complaints channel. "Whatever it printed instead is under printed" is
+    // directions to go and look, and a person who has to go and look has not been told
+    // anything. Measured 2026-08-31 alongside the three broken products; the reason a module
+    // fails to import is almost always one line — a missing package, a syntax error — and it is
+    // the one line that fixes it.
+    const spoke = result.stderr.trim() === '' ? result.stdout : result.stderr;
+    const headline = whatItSaid(spoke, { mostLines: 1 });
     return [notCovered({
       channel: 'results',
       path: joinPath('export', journey.name, 'readable at all'),
       reason: 'crashed',
-      says: `"${journey.describe}" could not be imported, so nothing is known about what it exports. Whatever it printed instead is under "printed".`,
+      says:
+        `Nothing is known about what "${journey.describe}" exports, because it could not be imported${
+          headline ? `. It said: ${headline}` : ''
+        }. Whatever else it printed is under "printed".`,
+      detail: whatItSaid(spoke),
     })];
   }
   const names = Object.keys(surface).sort();

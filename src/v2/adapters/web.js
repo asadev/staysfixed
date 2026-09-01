@@ -43,7 +43,7 @@ import path from 'node:path';
 
 import {
   countBucket, defineAdapter, howLongItTook, joinPath, notCovered, observation, sizeBucket,
-  timeBucket, trimForStorage, undoOurFootprint,
+  timeBucket, trimForStorage, undoOurFootprint, whatItSaid,
 } from './contract.js';
 import { copyForScratch, frozenEnvironment } from './process.js';
 import { freePort, looksDestructive, waitForServer } from './http.js';
@@ -298,7 +298,16 @@ export function journeysFrom(input) {
       surface: 'web',
       from: page.file,
       channels: ['meaning', 'effects', 'complaints', 'results', 'counters', 'pixels'],
-      steps: /** @type {any} */ ([{ act: 'open', goto: url, note: `open ${page.url}`, unfilled }]),
+      // `door`, `kind` and `doorDetail` are how the coverage ledger learns that this journey
+      // walked that page. Without them a page counted as opened only if an observation happened
+      // to land at the page's own address, and this adapter writes everything under
+      // `screen.<journey name>` — so every page of every site read as never walked, on runs
+      // that had just opened all of them. The HTTP adapter has named its doors this way since
+      // it was written; this is the same three fields, for the same reason. A page is reached
+      // by asking for its address, so the verb is GET.
+      steps: /** @type {any} */ ([
+        { act: 'open', goto: url, note: `open ${page.url}`, unfilled, door: page.url, kind: 'route', doorDetail: 'GET' },
+      ]),
     });
   }
 
@@ -578,11 +587,20 @@ export const webAdapter = defineAdapter({
     });
     if (!up.up) {
       await stopServer(child);
+      // The app's own words go first, ahead of the wait's account of which loopback address it
+      // knocked on. Same measurement, same date as the HTTP adapter's copy of this: the reason
+      // a site will not boot is one line the runtime printed, the sentence built from this is
+      // trimmed to 160 characters where a person reads it, and anything after the first
+      // sentence was therefore never seen by anybody.
+      const printed = Buffer.concat(said).toString('utf8');
+      const headline = whatItSaid(printed, { mostLines: 1 });
       return {
         build,
         root: work,
         ready: false,
-        why: `${up.why} What it printed while trying: ${trimForStorage(Buffer.concat(said).toString('utf8'), 1500).text || '(nothing)'}`,
+        why: `${headline ? `It said: ${headline}. ` : ''}${up.why} What it printed while trying, in full: ${
+          trimForStorage(printed, 1500).text || '(nothing)'
+        }`,
         dispose: async () => {
           await stopServer(child);
           await fsp.rm(base, { recursive: true, force: true });
@@ -984,9 +1002,33 @@ async function lookAt(input) {
 export function describeTraffic(journey, calls, footprint) {
   /** @type {Observation[]} */
   const out = [];
+  /** Addresses that only exist because of a request WE cancelled. See below. */
+  const ourOwnFootprint = [];
   for (const call of calls) {
     const asked = `${call.method} ${call.pattern}`;
     const where = joinPath('net', journey.name, asked);
+
+    // A REQUEST OUR OWN TEARDOWN CANCELLED IS NOT PART OF THE PRODUCT'S ADDRESS LIST.
+    //
+    // Next.js starts a prefetch behind every internal link, on its own, with nobody asking.
+    // Closing the page cancels whatever is still in flight. Whether a given prefetch got far
+    // enough to become a call at all is therefore a race between it and our own teardown — so
+    // the ADDRESSES it produces exist on one pass of a build and not on the other. Measured
+    // 2026-08-31 across eight runs a side: with nothing timing out the total is 852 every time,
+    // and about 90 of those 852 — roughly one in nine — were reached by only one of the two
+    // passes. Two byte-identical passes disagreeing about which addresses exist is the
+    // measurement contradicting its own method.
+    //
+    // An earlier fix stopped these being reported as the product complaining, which killed the
+    // phantom findings; it could not stop them moving the count, because the address is still
+    // created on the pass that saw it. This is that fix taken one step further: the whole call
+    // contributes nothing, because none of it is a fact about the product — it is a fact about
+    // when we closed the browser. Nothing is dropped silently: how many there were, and which,
+    // is said in one observation at a fixed address at the end of this function.
+    if (call.unfinishedAtTeardown && !call.refused && !call.failed) {
+      ourOwnFootprint.push(asked);
+      continue;
+    }
 
     if (call.refused) {
       out.push(
@@ -1045,22 +1087,6 @@ export function describeTraffic(journey, calls, footprint) {
           surface: 'web',
         }),
       );
-    } else if (call.unfinishedAtTeardown) {
-      // Missing coverage, not a complaint. The page was still asking for this when the walk
-      // ended, and the abort that followed is this tool closing the page — reporting it as
-      // the product failing made an unchanged tree look broken in four runs out of five.
-      // Recorded rather than dropped: something was being asked for and how it ended was
-      // never seen, which is a hole, and a hole is louder than a complaint, never quieter.
-      out.push(
-        notCovered({
-          channel: 'effects',
-          path: `${where}.how it finished`,
-          reason: 'refused',
-          says:
-            `The page was still asking for ${asked} when the walk ended, so how that finished was never seen. ` +
-            `The request was cancelled by this tool closing the page, which is not the product doing anything wrong.`,
-        }),
-      );
     }
     if (call.status !== undefined) {
       out.push(
@@ -1099,6 +1125,30 @@ export function describeTraffic(journey, calls, footprint) {
         }),
       );
     }
+  }
+
+  // Said out loud, at ONE address that does not move, rather than at an address per request.
+  // The count and the list live in the sentence, which is never compared, so this can report a
+  // different number on two passes without ever reporting a difference. It is a hole, and it is
+  // named as one: something was being asked for and how it ended was never seen.
+  if (ourOwnFootprint.length > 0) {
+    const many = ourOwnFootprint.length !== 1;
+    out.push(
+      notCovered({
+        channel: 'effects',
+        path: joinPath('net', journey.name, 'requests still in flight when the walk ended'),
+        reason: 'refused',
+        says:
+          `${ourOwnFootprint.length} request${many ? 's were' : ' was'} still in flight when this walk ended, and ` +
+          `${many ? 'they were' : 'it was'} cancelled by this tool closing the page rather than by anything the ` +
+          `product did — a framework that prefetches behind every link starts these on its own. How ${many ? 'they' : 'it'} ` +
+          `would have finished was never seen: ${ourOwnFootprint.sort().slice(0, 8).join(', ')}` +
+          `${ourOwnFootprint.length > 8 ? `, and ${ourOwnFootprint.length - 8} more` : ''}. ` +
+          `Each one is kept out of the address list on purpose, because whether a cancelled request got far enough ` +
+          `to make an address is a race with our own teardown, and two passes of one build must not disagree about ` +
+          `which addresses exist.`,
+        }),
+    );
   }
   return out;
 }
