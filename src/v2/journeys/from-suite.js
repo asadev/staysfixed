@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
 /** @typedef {import('../types.js').Journey} Journey */
@@ -867,7 +868,14 @@ export function relativeIfInside(url, root) {
   let absolute = String(url);
   if (absolute.startsWith('file://')) {
     try {
-      absolute = new URL(absolute).pathname;
+      // `fileURLToPath`, never `.pathname`. On Windows the pathname of
+      // `file:///D:/a/project/total.js` is `/D:/a/project/total.js` — with a leading slash —
+      // which is absolute enough to pass the test below and yet matches no root, so
+      // `path.relative` answered `..\..` and every touched file was thrown away. The
+      // coverage measured from a test suite was therefore empty on Windows, quietly. Found by
+      // the automated checks on 2026-09-01, the first time they ran on Windows, on a runner
+      // that allows symbolic links where the machine it was developed against does not.
+      absolute = fileURLToPath(absolute);
     } catch {
       return null;
     }
