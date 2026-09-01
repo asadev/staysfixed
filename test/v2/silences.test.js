@@ -32,8 +32,9 @@ import { madeUnreadable, CANNOT_LOCK_A_FOLDER } from '../support.mjs';
 import { proveCause } from '../../src/v2/cause.js';
 import { subtractWobble, wobbleStorm } from '../../src/v2/observation.js';
 import { duplicateGaps } from '../../src/v2/run.js';
-import { readFileRoutes } from '../../src/v2/adapters/source.js';
-import { journeysFrom, readPageRoutes } from '../../src/v2/adapters/web.js';
+import { readContract, readFileRoutes, sourceAdapter } from '../../src/v2/adapters/source.js';
+import { httpAdapter } from '../../src/v2/adapters/http.js';
+import { describeTraffic, journeysFrom, readPageRoutes } from '../../src/v2/adapters/web.js';
 import { asAddress, readMeaning } from '../../src/v2/adapters/electron.js';
 import { declaredObservations, findAppBundle, iosAdapter, readDeclaredDoors } from '../../src/v2/adapters/ios.js';
 
@@ -791,5 +792,179 @@ describe('a proof that measured nothing does not get to sound like one that did'
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+describe('the channel that notices a function disappearing has to be reading the whole project', () => {
+  /** @param {string} name */
+  const site = async (name) => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), `staysfixed-${name}-`));
+    await fsp.mkdir(path.join(root, 'src'), { recursive: true });
+    await fsp.mkdir(path.join(root, 'helpers'), { recursive: true });
+    await fsp.writeFile(path.join(root, 'package.json'), JSON.stringify({ name, type: 'module' }));
+    await fsp.writeFile(path.join(root, 'src', 'index.js'), 'export function main() { return 1; }\n');
+    await fsp.writeFile(
+      path.join(root, 'helpers', 'money.js'),
+      'export function format(c) { return c; }\nexport function slugify(t) { return t; }\nexport function emptyCart() { return {}; }\n',
+    );
+    return root;
+  };
+
+  // Measured 2026-08-31 on a real Next.js site. `journeys()` worked out the folders from the
+  // settings and wrote them into the step; `run()` then read the project with no folders at
+  // all and fell back to the built-in guess — src, lib, app, bin, server, pages, api,
+  // electron, main, packages. The contract channel recorded 24 observations against 25 doors
+  // and never saw `format`, `slugify` or `emptyCart`. Deleting one of those exported functions
+  // would not have been noticed by the one channel that exists to notice exactly that.
+  test('it reads the folders the journey names, not the ones it guessed', async () => {
+    const root = await site('folders');
+    try {
+      const journeys = await sourceAdapter.journeys(/** @type {any} */ ({ root, config: { folders: ['src', 'helpers'] } }));
+      const out = await sourceAdapter.run(
+        journeys[0],
+        /** @type {any} */ ({ build: { id: 'x', root }, root, ready: true, why: '', dispose: async () => {} }),
+        /** @type {any} */ ({}),
+      );
+      const exports = out.map((o) => String(o.path)).filter((p) => p.startsWith('export.'));
+      for (const name of ['format', 'slugify', 'emptyCart']) {
+        assert.ok(exports.some((p) => p.endsWith(`.${name}`)), `${name} lives in a named folder and must be a door — got ${exports.join(', ')}`);
+      }
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('what is a door and what only looks like one', () => {
+  /** @param {string} source */
+  const commandsIn = async (source) => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-flags-'));
+    try {
+      await fsp.mkdir(path.join(root, 'src'), { recursive: true });
+      await fsp.writeFile(path.join(root, 'src', 'a.jsx'), source);
+      const reading = await readContract({ root, folders: ['src'] });
+      return reading.doors.filter((d) => d.kind === 'command').map((d) => String(d.name)).sort();
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  };
+
+  // Measured 2026-08-31 on a real site: eleven CSS custom properties became command doors and
+  // padded the ledger's denominator with eleven things no journey can ever walk, so a site
+  // whose coverage was good read as worse than it was.
+  test('a CSS custom property is not a command-line flag', async () => {
+    const found = await commandsIn("export const C = () => <div style={{ '--px': '1rem', '--gap': '8px' }} />;\n");
+    assert.deepEqual(found, [], 'a style object key is the component setting its own spacing');
+  });
+
+  test('a real flag is still a door, including both branches of a ternary', async () => {
+    // The narrow version of this fix — "a colon after it means it is a key" — would also throw
+    // away the first branch of `cond ? '--verbose' : '--quiet'`, and dropping a real door makes
+    // the ledger read BETTER than the truth, which is the one direction it must never move in.
+    const found = await commandsIn("const f = process.env.LOUD ? '--verbose' : '--quiet';\nexport default f;\n");
+    assert.deepEqual(found, ['--quiet', '--verbose']);
+  });
+});
+
+describe('routes that live in a file name rather than in a call', () => {
+  // Measured 2026-08-31: a built site serves /sitemap.xml and /robots.txt and this reader saw
+  // neither, so neither was a door and nothing ever asked for either. Two entries were deleted
+  // out of a sitemap and the run reported nothing whatever.
+  test('Next.js metadata files are the routes they are served at', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-meta-'));
+    try {
+      await fsp.mkdir(path.join(root, 'app', '(marketing)', 'pricing'), { recursive: true });
+      await fsp.writeFile(path.join(root, 'app', 'sitemap.ts'), 'export default function sitemap() { return []; }\n');
+      await fsp.writeFile(path.join(root, 'app', 'robots.ts'), 'export default function robots() { return {}; }\n');
+      await fsp.writeFile(path.join(root, 'app', 'manifest.ts'), 'export default function manifest() { return {}; }\n');
+      await fsp.writeFile(path.join(root, 'app', 'icon.tsx'), 'export default function Icon() { return null; }\n');
+      await fsp.writeFile(path.join(root, 'app', '(marketing)', 'pricing', 'opengraph-image.tsx'), 'export default function OG() { return null; }\n');
+      const { doors } = await readFileRoutes(root);
+      const routes = doors.map((d) => `${d.detail} ${d.name}`).sort();
+      // The file is named for what it IS; the address it answers on is a different word, and
+      // asking for the file's own name would get a 404 and be reported as a lost route.
+      assert.deepEqual(routes, [
+        'GET /icon',
+        'GET /manifest.webmanifest',
+        'GET /pricing/opengraph-image',
+        'GET /robots.txt',
+        'GET /sitemap.xml',
+      ]);
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Route discovery read only the built-in guess of folders, so a project keeping its routes
+  // anywhere else had them read as not existing at all. Measured 2026-08-31 with routes in a
+  // top-level `routes/` folder: one route was reported where there were three.
+  test('the server adapter reads the folders it is given', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'staysfixed-http-folders-'));
+    try {
+      await fsp.mkdir(path.join(root, 'src'), { recursive: true });
+      await fsp.mkdir(path.join(root, 'routes'), { recursive: true });
+      await fsp.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'api', type: 'module', dependencies: { express: '^4' } }));
+      await fsp.writeFile(path.join(root, 'src', 'boot.js'), "import express from 'express';\nexport const app = express();\napp.get('/health', (q, r) => r.json({}));\n");
+      await fsp.writeFile(path.join(root, 'routes', 'orders.js'), "import express from 'express';\nexport const router = express.Router();\nrouter.get('/api/orders', (q, r) => r.json([]));\nrouter.post('/api/orders', (q, r) => r.json({}));\n");
+      const named = await httpAdapter.journeys(/** @type {any} */ ({ root, config: { start: 'node x.js', folders: ['src', 'routes'] } }));
+      assert.deepEqual(named.map((j) => j.name).sort(), ['GET /api/orders', 'GET /health', 'POST /api/orders']);
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('two passes of one build have to look at the same addresses', () => {
+  /** @param {any[]} calls */
+  const addressesFrom = (calls) =>
+    describeTraffic(/** @type {any} */ ({ name: 'page /', describe: 'open /' }), calls, { dirs: [], ports: [] })
+      .map((o) => String(o.path))
+      .sort();
+
+  // Measured 2026-08-31 across eight runs a side: with nothing timing out the total is 852
+  // every time, and about 90 of those — roughly one in nine — were reached by only one of the
+  // two passes. Next.js starts a prefetch behind every internal link on its own; closing the
+  // page cancels whatever is in flight, so whether a prefetch became an address at all is a
+  // race with our own teardown.
+  test('a request our own teardown cancelled adds no address of its own', () => {
+    const answered = { method: 'GET', pattern: '/api/me', times: 1, kind: 'json', status: 200, sameOrigin: true };
+    const raced = [
+      answered,
+      { method: 'GET', pattern: '/blog', times: 1, kind: 'document', unfinishedAtTeardown: true, sameOrigin: true },
+      { method: 'GET', pattern: '/pricing', times: 1, kind: 'document', unfinishedAtTeardown: true, sameOrigin: true },
+    ];
+    const withRace = addressesFrom(raced);
+    const without = addressesFrom([answered]);
+    for (const one of ['net.page /.GET /blog', 'net.page /.GET /pricing']) {
+      assert.ok(!withRace.includes(one), `${one} exists only because of a race with our own teardown`);
+    }
+    // Not dropped in silence: however many there were is said once, at an address that does
+    // not move, with the count in the sentence where nothing compares it.
+    const summary = 'net.page /.requests still in flight when the walk ended';
+    assert.ok(withRace.includes(summary), 'a silent drop is the one thing this tool must never do');
+    assert.deepEqual(withRace.filter((a) => a !== summary), without);
+  });
+
+  test('a request that really failed is still the product complaining, and is still reported', () => {
+    const out = addressesFrom([
+      { method: 'GET', pattern: '/api/me', times: 1, kind: 'json', failed: 'net::ERR_CONNECTION_REFUSED', sameOrigin: true },
+    ]);
+    assert.ok(out.includes('net.page /.GET /api/me.never finished'));
+  });
+});
+
+describe('a page that was walked has to be able to reach the coverage ledger', () => {
+  // The HTTP adapter has named its doors on every step since it was written; the web adapter
+  // named none, so a page counted as opened only if an observation happened to land at the
+  // page's own address — and this adapter writes everything under `screen.<journey name>`.
+  // Measured 2026-08-31.
+  test('a page journey names the door it opens', async () => {
+    const journeys = journeysFrom({
+      config: {},
+      pages: [{ url: '/about', file: 'app/about/page.tsx', needs: [] }],
+    });
+    const step = /** @type {any} */ (journeys.find((j) => /about/.test(j.name))?.steps?.[0]);
+    assert.equal(step.door, '/about');
+    assert.equal(step.kind, 'route');
+    assert.equal(step.doorDetail, 'GET', 'a page is reached by asking for its address');
   });
 });

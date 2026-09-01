@@ -235,14 +235,30 @@ describe('reading a test runner back', () => {
 });
 
 describe('the command a harvested test file is walked with', () => {
+  /**
+   * One argument as THIS machine's shell would want it written.
+   *
+   * These three checks used to spell the quoting out as `'...'` and pass, on a Mac. `cmd.exe`
+   * does not read a single quote as a quote at all, so the code they check now writes double
+   * quotes on Windows — and a test that hard-codes one platform's quoting is a test that can
+   * only ever be run on that platform. Measured on a real Windows 11 machine on 2026-08-31,
+   * where this whole suite had never been run before.
+   *
+   * @param {string} text
+   */
+  const quoted = (text) => (process.platform === 'win32' ? `"${text.replace(/"/g, '""')}"` : `'${text}'`);
+
   test('every part is quoted, so a folder with a space in it is not a bug', () => {
     const line = testFileCommand({ command: process.execPath, argv: ['--test', 'test/my tests/a.test.js'] });
-    assert.equal(line, `'${process.execPath}' '--test' 'test/my tests/a.test.js'`);
+    assert.equal(line, `${quoted(process.execPath)} ${quoted('--test')} ${quoted('test/my tests/a.test.js')}`);
   });
 
   test('a Node that is not on this machine is replaced with the one that is', () => {
     const line = testFileCommand({ command: '/nowhere/at/all/node', argv: ['--test'] });
-    assert.match(line, new RegExp(`^'${process.execPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+    assert.ok(
+      line.startsWith(quoted(process.execPath)),
+      `the command has to start with this machine's own Node, quoted for this machine's shell — it was ${line}`,
+    );
     assert.doesNotMatch(
       line,
       /nowhere/,
@@ -251,7 +267,10 @@ describe('the command a harvested test file is walked with', () => {
   });
 
   test('a program named rather than pathed is left for the shell to find', () => {
-    assert.equal(testFileCommand({ command: 'npx', argv: ['vitest', 'run'] }), `'npx' 'vitest' 'run'`);
+    assert.equal(
+      testFileCommand({ command: 'npx', argv: ['vitest', 'run'] }),
+      `${quoted('npx')} ${quoted('vitest')} ${quoted('run')}`,
+    );
   });
 });
 

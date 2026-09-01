@@ -378,6 +378,10 @@ export function compareJson(a, b) {
  * @param {string} spec.says
  * @param {boolean} [spec.covered]        False means we did not really look. See `reason`.
  * @param {NotCoveredReason} [spec.reason]
+ * @param {string} [spec.detail]          What the thing itself said, in its own words, when it
+ *                                        said anything. Goes onto the refusal's reason, which
+ *                                        is where a person reads why a hole is a hole. Never
+ *                                        compared — see `whatItSaid` for why that matters.
  * @param {{file?: string, line?: number, url?: string}} [spec.where]
  * @param {string} [spec.evidence]
  * @param {string} [spec.journey]
@@ -414,7 +418,16 @@ export function observation(spec) {
     // — and never this flag. Written down on 2026-08-31 after the refusal lane found the two
     // meanings sharing one field.
     meta.refused = true;
-    meta.refusedWhy = `${NOT_COVERED_MEANING[spec.reason ?? 'refused']} (${spec.reason ?? 'refused'})`;
+    // The reason word stays first and stays in the fixed vocabulary, because the ledger counts
+    // these and a free-text reason cannot be counted. What the thing ITSELF said goes on the
+    // end. That position is deliberate: `staysfixed coverage` prints this line with a 400
+    // character budget and the sentence above it with 160, so this is the place where the real
+    // error — the `ModuleNotFoundError`, the `SyntaxError` — reliably survives being trimmed
+    // and reaches the person who has to go and fix it. Added 2026-08-31, after three broken
+    // products were checked and none of their owners was ever told what was wrong.
+    meta.refusedWhy = `${NOT_COVERED_MEANING[spec.reason ?? 'refused']} (${spec.reason ?? 'refused'})${
+      spec.detail ? ` — and this is what it said for itself: ${spec.detail}` : ''
+    }`;
   }
   return makeObservation(path, spec.channel, stableValue(spec.value), meta);
 }
@@ -431,6 +444,7 @@ export function observation(spec) {
  * @param {string|(string|number)[]} spec.path
  * @param {NotCoveredReason} spec.reason
  * @param {string} spec.says              What we would have looked at, and why we did not.
+ * @param {string} [spec.detail]          What the thing itself said about it, in its own words.
  * @param {{file?: string, line?: number, url?: string}} [spec.where]
  * @returns {Observation}
  */
@@ -438,10 +452,15 @@ export function notCovered(spec) {
   return observation({
     channel: spec.channel,
     path: spec.path,
+    // The VALUE stays the fixed sentence and never carries what the thing said. Two builds
+    // that fall over with two different messages would otherwise differ at this address, and
+    // the report would call a crash a change in the product. The words go in `says` and in the
+    // refusal's reason, neither of which is ever compared.
     value: `not checked — ${NOT_COVERED_MEANING[spec.reason]}`,
     says: spec.says,
     covered: false,
     reason: spec.reason,
+    detail: spec.detail,
     where: spec.where,
   });
 }
@@ -609,6 +628,108 @@ export function undoOurFootprint(text, footprint) {
   }
   return out;
 }
+
+/**
+ * What a program said about itself, cut down to the part a person can act on.
+ *
+ * WHY THIS EXISTS. Measured on 2026-08-31, against three deliberately broken products: a Node
+ * server whose source has a syntax error, a Python command importing a module that is not
+ * installed, and a Node command importing a package that is not installed. All three were
+ * correctly refused — no false all-clear, and that half worked. But a grep of the whole reply,
+ * `--verbose` included, found no mention of `SyntaxError`, `ModuleNotFoundError` or
+ * `ERR_MODULE_NOT_FOUND` anywhere in it. Every owner was told "the thing being observed fell
+ * over before it could be read" and then had to go and find the reason themselves. Each
+ * product had printed the reason, in one line, on its own standard error, and this tool threw
+ * it away. Handing somebody a sentence they can act on is the whole design; this is the
+ * function that keeps the product's own sentence instead of a paraphrase of it.
+ *
+ * NOTHING IS INVENTED HERE. What comes out is the program's own words. What is dropped is only
+ * what carries nothing for the person reading: blank lines, the `at ...` frames of a stack
+ * trace, the caret lines that underline a column of a terminal that is not this one, "... 4
+ * more" frame counts, and Node's own version footer. What is left over the budget is dropped
+ * from the FRONT, because every runtime in use here — Node, Python, a shell — puts the
+ * sentence that says what went wrong at the END of what it printed.
+ *
+ * This is evidence, not noise, and it belongs in the reply. It is never compared: it goes into
+ * the sentence and into the refusal's reason, both of which live in `meta`, so a crash that
+ * words itself differently on two machines can never register as a difference in the product.
+ *
+ * @param {string} text            Whatever the thing printed. Run our own footprint out of it
+ *                                 first, or a scratch path ends up quoted at a person.
+ * @param {object} [opts]
+ * @param {number} [opts.mostLines]  How many lines of it to keep. Default 6.
+ * @param {number} [opts.mostChars]  How many characters of it to keep. Default 300.
+ * @returns {string}  One line, or '' when it said nothing worth repeating.
+ */
+export function whatItSaid(text, opts = {}) {
+  const mostLines = opts.mostLines ?? 6;
+  const mostChars = opts.mostChars ?? 300;
+  const lines = String(text ?? '')
+    // Colour codes are how a program makes an error red in a terminal. Printed into a
+    // sentence they are unreadable rubbish, and they are not part of what it said.
+    .replace(/\u001b\[[0-9;]*m/g, '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !NOT_WORTH_REPEATING.some((noise) => noise.test(line)));
+  if (lines.length === 0) return '';
+
+  // ONE LINE MEANS THE ONE THAT NAMES THE TROUBLE, not simply the last one.
+  //
+  // "The last line" was the first thing tried and it is wrong often enough to matter: measured
+  // 2026-08-31 on a Node command importing a package that is not installed, Node printed the
+  // whole error object after the message, so the last line was `}` and the headline read "It
+  // said: }." — which is worse than saying nothing. So the line that looks like a runtime
+  // naming a fault is preferred, and the last line is what happens when none does. Preferred,
+  // never required: nothing is dropped by this, it only decides which single line gets quoted
+  // where there is room for one, and the fuller quote sits directly underneath it.
+  if (mostLines === 1) {
+    const named = [...lines].reverse().find((line) => NAMES_THE_TROUBLE.test(line)) ?? lines[lines.length - 1];
+    return named.length > mostChars ? `${named.slice(0, mostChars - 3)}...` : named;
+  }
+
+  /** @type {string[]} */
+  const kept = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0 && kept.length < mostLines; i--) {
+    const line = lines[i];
+    if (kept.length > 0 && used + line.length + 3 > mostChars) break;
+    kept.unshift(line);
+    used += line.length + 3;
+  }
+  // One line longer than the whole budget is still the line that says what went wrong, so it
+  // is kept and cut rather than dropped for being too long.
+  if (kept.length === 1 && kept[0].length > mostChars) kept[0] = `${kept[0].slice(0, mostChars - 3)}...`;
+  const left = lines.length - kept.length;
+  // Said out loud rather than trimmed silently: a reader who is told six lines were left out
+  // knows to open the evidence file, and a reader who is not told assumes they have all of it.
+  return `${left > 0 ? `(${left} earlier ${left === 1 ? 'line' : 'lines'} left out) ` : ''}${kept.join(' / ')}`;
+}
+
+/**
+ * A line that reads like a runtime saying what went wrong.
+ *
+ * The three shapes measured on 2026-08-31, one from each broken product: `SyntaxError:
+ * Unexpected end of input`, `ModuleNotFoundError: No module named 'tabulate'`, and `Error
+ * [ERR_MODULE_NOT_FOUND]: Cannot find package 'chalk' imported from ...`. The second pattern is
+ * for the tools that write their trouble in lower case instead — a compiler, git, a shell.
+ */
+const NAMES_THE_TROUBLE =
+  /^[A-Za-z_$][A-Za-z0-9_$.]*(?:Error|Exception|Warning)(?:\s*\[[^\]]*\])?\s*:|^(?:fatal|error|panic|Traceback)\b/i;
+
+/**
+ * Lines that are in the way of the sentence rather than part of it.
+ *
+ * Deliberately short. Every pattern here has to be something that cannot possibly BE the
+ * reason a product fell over — a stack frame under the message, a caret underlining a column,
+ * a version footer. Anything else stays, because a rule that guesses which of a program's own
+ * lines matter is a rule that will one day drop the only line that did.
+ */
+const NOT_WORTH_REPEATING = [
+  /^at\s+\S/,                    // a stack frame under the message that already said it
+  /^[\^~]+$/,                    // the caret line underlining a column in somebody else's terminal
+  /^\.\.\.\s*\d+\s+more$/,        // "... 4 more", the frames a runtime left out itself
+  /^Node\.js v[\d.]+$/,          // Node's version footer, printed under every uncaught throw
+];
 
 /**
  * Keep a piece of text at a size worth storing.

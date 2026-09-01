@@ -40,7 +40,7 @@ import assert from 'node:assert/strict';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { httpAdapter } from '../../src/v2/adapters/http.js';
+import { describeRequest, httpAdapter } from '../../src/v2/adapters/http.js';
 import {
   addressesTouched, buildLedger, doorFact, isAStyleValue, justTheDoors, ledger, sourceFoldersFor,
   toCoverage, walkFromCapture,
@@ -396,5 +396,80 @@ describe('the door count is the product, all of it, and only doors', () => {
     });
     assert.equal(led.sampled, 0);
     assert.equal(led.opened, 0, 'nothing was asked for, so nothing was opened');
+  });
+});
+
+describe('a route that refused the call is not a route that was walked', () => {
+  /**
+   * One request, described the way the adapter describes a real one.
+   *
+   * @param {object} input
+   * @param {string} input.method
+   * @param {number} input.status
+   * @param {string} [input.text]
+   * @param {any} [input.body]     What the tool sent, when it sent anything.
+   */
+  const walk = ({ method, status, text = '{}', body }) =>
+    describeRequest({
+      journey: /** @type {any} */ ({ name: `${method} /api/quote`, describe: `ask for ${method} /api/quote` }),
+      detail: /** @type {any} */ ({ method, route: '/api/quote', url: '/api/quote', unfilled: [], body }),
+      answer: /** @type {any} */ ({
+        status,
+        headers: new Headers({ 'content-type': 'application/json' }),
+      }),
+      text,
+      failure: null,
+      ms: 4,
+      changes: [],
+      reachedOut: [],
+      footprint: { dirs: [] },
+    });
+
+  // Measured 2026-08-31 on a small quote API. The source says a route's address and its verb
+  // and nothing about the body it takes, so POST /api/quote was asked with no body, answered
+  // 400 correctly, and the 400 was written down as the route's behaviour. Every later run
+  // compared 400 against 400, agreed, and the ledger presented the route as walked — while the
+  // arithmetic that decides what a customer is charged had never once run.
+  test('a POST refused for having no body is a hole, not the route answering', () => {
+    const out = walk({ method: 'POST', status: 400, text: '{"error":"qty and unitPrice are required numbers"}' });
+    assert.equal(out.find((o) => o.path === 'api.POST /api/quote.status'), undefined,
+      'the 400 is this tool being turned away, and must not be stored as what the route does');
+    const hole = out.find((o) => o.path === 'api.POST /api/quote.answered at all');
+    assert.ok(hole, 'and it has to be recorded as a door found and not opened');
+    assert.equal(hole.meta?.refused, true);
+    assert.match(String(hole.meta?.describe), /not really walked/);
+    assert.match(String(hole.meta?.describe), /qty and unitPrice/, 'what the route said is the fastest way to fix it');
+    assert.match(String(hole.meta?.describe), /"requests"/, 'and it has to say where to put the body');
+  });
+
+  test('nothing at all is left un-refused, so the ledger counts the door as never tried', () => {
+    const out = walk({ method: 'POST', status: 400 });
+    const real = out.filter((o) => o.channel !== 'contract' && o.meta?.refused !== true);
+    assert.deepEqual(real, [], 'one plain observation here would put the route back in the walked column');
+    const walked = walkFromCapture(
+      /** @type {any} */ ({ journey: 'POST /api/quote', observations: out, build: { id: 'b' } }),
+      /** @type {any} */ ({ steps: [{ door: '/api/quote', kind: 'route', doorDetail: 'POST' }] }),
+    );
+    assert.deepEqual(walked.notTried, ['POST /api/quote']);
+    assert.equal(walked.doorAddresses, undefined, 'it must not be counted as a door this walk opened');
+  });
+
+  test('a 400 to a body somebody wrote themselves is the product answering, and is compared', () => {
+    const out = walk({ method: 'POST', status: 400, body: { qty: 'not a number' } });
+    const status = out.find((o) => o.path === 'api.POST /api/quote.status');
+    assert.ok(status, 'the request was properly formed, so what came back is a real observation');
+    assert.equal(status.value, 400);
+  });
+
+  test('a GET that answers 400 is untouched, and so is a POST that answers 200', () => {
+    const get = walk({ method: 'GET', status: 400 });
+    assert.equal(get.find((o) => o.path === 'api.GET /api/quote.status')?.value, 400);
+    const ok = walk({ method: 'POST', status: 200 });
+    assert.equal(ok.find((o) => o.path === 'api.POST /api/quote.status')?.value, 200);
+  });
+
+  test('401 is left alone, because "you are not signed in" is a different hole with a different fix', () => {
+    const out = walk({ method: 'POST', status: 401 });
+    assert.equal(out.find((o) => o.path === 'api.POST /api/quote.status')?.value, 401);
   });
 });

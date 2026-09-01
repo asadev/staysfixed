@@ -33,7 +33,7 @@ import net from 'node:net';
 import path from 'node:path';
 import {
   defineAdapter, joinPath, notCovered, observation, sizeBucket, stableValue,
-  howLongItTook, timeBucket, trimForStorage, undoOurFootprint,
+  howLongItTook, timeBucket, trimForStorage, undoOurFootprint, whatItSaid,
 } from './contract.js';
 import {
   compareTrees, copyForScratch, frozenEnvironment, readWatcher, snapshotTree, watcherScript,
@@ -533,7 +533,16 @@ export const httpAdapter = defineAdapter({
     const framework = ['express', 'fastify', 'hono', 'koa', 'next', 'polka', '@hapi/hapi']
       .find((name) => name in dependencies);
 
-    const reading = await readContract({ root: project.root });
+    // The folders the settings name, not the built-in guess. Route discovery read only src,
+    // lib, app, bin, server, pages, api, electron, main and packages, so a project that keeps
+    // its routes in a folder outside that list had them read as not existing — measured
+    // 2026-08-31 with routes in a top-level `routes/` folder, where `GET /api/orders` and
+    // `POST /api/orders` were both invisible and the run reported one route where there were
+    // three. NOTE, and this is a real limit of the fix: an adapter is only handed the settings
+    // under its OWN name, so this reads `http.folders` and cannot see `source.folders`, which
+    // is where `staysfixed init` writes them today. Naming them under `http` works now; making
+    // `source.folders` reach here needs one line in check.js, which this lane does not own.
+    const reading = await readContract({ root: project.root, folders: project.config?.folders });
     const routes = [...reading.doors.filter((d) => d.kind === 'route'), ...(await readFileRoutes(project.root)).doors];
 
     if (!config.start) {
@@ -582,7 +591,16 @@ export const httpAdapter = defineAdapter({
   async journeys(project) {
     const config = project.config ?? {};
     const samples = config.samples ?? {};
-    const reading = await readContract({ root: project.root });
+    // The folders the settings name, not the built-in guess. Route discovery read only src,
+    // lib, app, bin, server, pages, api, electron, main and packages, so a project that keeps
+    // its routes in a folder outside that list had them read as not existing — measured
+    // 2026-08-31 with routes in a top-level `routes/` folder, where `GET /api/orders` and
+    // `POST /api/orders` were both invisible and the run reported one route where there were
+    // three. NOTE, and this is a real limit of the fix: an adapter is only handed the settings
+    // under its OWN name, so this reads `http.folders` and cannot see `source.folders`, which
+    // is where `staysfixed init` writes them today. Naming them under `http` works now; making
+    // `source.folders` reach here needs one line in check.js, which this lane does not own.
+    const reading = await readContract({ root: project.root, folders: project.config?.folders });
     const routes = [...reading.doors.filter((d) => d.kind === 'route'), ...(await readFileRoutes(project.root)).doors];
 
     /** @type {Map<string, import('./contract.js').Journey>} */
@@ -733,9 +751,21 @@ export const httpAdapter = defineAdapter({
 
     if (!up.up) {
       await stopServer(child);
+      // WHAT THE SERVER SAID GOES FIRST, ahead of the wait's own account of the port it knocked
+      // on. Measured 2026-08-31: a server whose source has a syntax error prints `SyntaxError`
+      // and the failing line on its standard error, and this sentence used to bury that behind
+      // a hundred and fifty characters about loopback addresses. `staysfixed coverage` prints
+      // the sentence built from this with a 160 character budget, so buried meant gone: the
+      // owner of a product that would not boot was never told why, on any surface, even with
+      // `--verbose`. The port is the tool's own business; the syntax error is the product's,
+      // and it is the only line here that anybody can act on.
+      const printed = Buffer.concat(bootErr).toString('utf8') || Buffer.concat(bootOut).toString('utf8');
+      const headline = whatItSaid(printed, { mostLines: 1 });
       return {
         build, root: work, ready: false,
-        why: `${up.why} What it printed while trying: ${trimForStorage(Buffer.concat(bootErr).toString('utf8') || Buffer.concat(bootOut).toString('utf8'), 1500).text || '(nothing)'}`,
+        why: `${headline ? `It said: ${headline}. ` : ''}${up.why} What it printed while trying, in full: ${
+          trimForStorage(printed, 1500).text || '(nothing)'
+        }`,
         dispose: async () => { await stopServer(child); await fsp.rm(base, { recursive: true, force: true }); },
       };
     }
@@ -807,7 +837,20 @@ export const httpAdapter = defineAdapter({
         channel: 'effects',
         path: joinPath('api', journey.name, 'answered at all'),
         reason: 'irreversible',
-        says: `${detail.method} ${detail.route} was left alone. The project marked it as spending money, sending a message or destroying data, and nothing is watching this server from the inside, so there is no way to stop it happening for real. This is a hole in what was checked, not a pass.`,
+        // The sentence names the setting, because this is the one place where the guess costs
+        // something. The list under "irreversible" is written by `staysfixed init` by matching
+        // WORDS IN A ROUTE'S NAME, and a name can be wrong: measured 2026-08-31, a pure
+        // arithmetic route called `/api/invoice/estimate` was put on that list because the word
+        // "invoice" is in it. On a Node server that costs nothing — the route is walked anyway,
+        // behind a refusal boundary that is proven to be in force — but here nothing is
+        // watching, and a wrong guess costs the whole route silently. Telling somebody a
+        // control exists without telling them where it is leaves them exactly where they were.
+        says:
+          `${detail.method} ${detail.route} was left alone. It is on the "irreversible" list under "http" in the ` +
+          `settings — routes that spend money, send a message or destroy data — and nothing is watching this server ` +
+          `from the inside, so there is no way to stop it happening for real. This is a hole in what was checked, not ` +
+          `a pass. That list is first written by matching words in a route's name, which is a guess: if this route ` +
+          `only reads or works something out, take it off the list and it starts being checked.`,
       })];
     }
 
@@ -878,6 +921,23 @@ async function snapshotForFolders(root, folders) {
 // ---------------------------------------------------------------------------
 
 /**
+ * The verbs that carry a body. Asking one of these with no body at all is asking a question
+ * the route was never designed to answer, so whatever comes back is about the question.
+ */
+const CARRIES_A_BODY = new Set(['POST', 'PUT', 'PATCH']);
+
+/**
+ * What a route answers when what it was handed is not what it needs: 400 Bad Request, 411
+ * Length Required, 415 Unsupported Media Type, 422 Unprocessable Content.
+ *
+ * Deliberately short, and deliberately NOT including 401 or 403. Those mean "you are not
+ * signed in", which is a different hole with a different fix, and folding them in here would
+ * quietly stop comparing every route of every product behind a login wall on the strength of a
+ * guess made in this file.
+ */
+const NOT_WHAT_IT_NEEDS = new Set([400, 411, 415, 422]);
+
+/**
  * @param {object} input
  * @param {import('./contract.js').Journey} input.journey
  * @param {RouteJourneyDetail} input.detail
@@ -907,39 +967,95 @@ export function describeRequest(input) {
     return out;
   }
 
-  out.push(observation({
-    channel: 'results',
-    path: joinPath('api', id, 'status'),
-    value: answer.status,
-    says: `${asked} answered ${answer.status}${answer.status >= 400 ? ', which is a refusal' : ''}.`,
-  }));
-
-  const headers = headersThatMatter(answer.headers);
-  for (const [name, value] of Object.entries(headers)) {
+  // A ROUTE THAT REFUSED THE CALL IS NOT A ROUTE THAT WAS WALKED.
+  //
+  // Measured 2026-08-31 on a small quote API. The route list comes out of the source, and the
+  // source says a route's address and its verb and nothing whatever about the body it expects —
+  // so `POST /api/quote` was asked with no body at all. It answered 400, correctly, and this
+  // function wrote that 400 down as the route's behaviour. From then on every run compared the
+  // new build's 400 against the old build's 400, agreed, and reported the route as walked in
+  // the coverage ledger. The route's real work — the arithmetic that decides what a customer is
+  // charged — had never once been run, and a rounding bug in it was invisible for ever, under a
+  // result that said the route was covered.
+  //
+  // A 400 to a request this tool got wrong is an observation of THIS TOOL, not of the product.
+  // So it is recorded as what it is: a door found and not opened, with the reason. Everything
+  // about this request is marked refused, which is what puts the route in the ledger's
+  // never-opened list instead of its walked list — see `walkFromCapture` in coverage.js, where
+  // a capture whose whole non-contract record is refusals counts as a walk that did nothing.
+  //
+  // NARROW ON PURPOSE, in three ways at once, because the cost of getting this wrong is that a
+  // real answer stops being compared. It only applies to a verb that carries a body; only when
+  // this tool sent no body, so a body somebody wrote into the settings themselves is always the
+  // product's own answer and is always compared; and only to the four codes that mean "that is
+  // not what I need". A route that answers 400 to a request that was properly formed is
+  // untouched by this and goes on being compared exactly as before.
+  const verb = String(detail.method ?? 'GET').toUpperCase();
+  const weSentNoBody = detail.body === undefined;
+  const ourOwnFault = CARRIES_A_BODY.has(verb) && weSentNoBody && NOT_WHAT_IT_NEEDS.has(answer.status);
+  if (ourOwnFault) {
+    // What the route said about it, in the route's own words. It is usually the exact list of
+    // fields it wanted, which is the fastest way for somebody to write the body it needs — so
+    // it is quoted rather than summarised, for the same reason a crash's own words are.
+    const complained = whatItSaid(undoOurFootprint(input.text, footprint), { mostLines: 2 });
+    out.push(notCovered({
+      channel: 'results',
+      path: joinPath('api', id, 'answered at all'),
+      reason: 'needs a sample',
+      says:
+        `${asked} was not really walked. It answered ${answer.status}, and that is this tool's request being turned ` +
+        `away rather than anything the route does: it was asked with no body at all, because a route's address and ` +
+        `verb can be read out of the source and the body it expects cannot.${complained ? ` It said: ${complained}.` : ''} ` +
+        `Whatever is behind that check has never run, so a bug in the route's own working — the kind that charges ` +
+        `somebody the wrong amount — would not be seen here, and this route is counted as a door found and not ` +
+        `opened. Put a real body under "requests" in the "http" settings — ` +
+        `{ name: '${asked}', method: '${verb}', url: '${detail.route}', body: { ... } } — and it starts being checked.`,
+      detail: complained,
+    }));
+  } else {
     out.push(observation({
       channel: 'results',
-      path: joinPath('api', id, 'header', name),
-      value: undoOurFootprint(Array.isArray(value) ? value.join(', ') : value, footprint),
-      says: `${asked} answered with ${name}: ${Array.isArray(value) ? value.join(', ') : value}.`,
+      path: joinPath('api', id, 'status'),
+      value: answer.status,
+      says: `${asked} answered ${answer.status}${answer.status >= 400 ? ', which is a refusal' : ''}.`,
     }));
   }
 
-  const body = readBody(answer.headers.get('content-type') ?? '', undoOurFootprint(input.text, footprint));
-  out.push(observation({
-    channel: 'results',
-    path: joinPath('api', id, 'body'),
-    value: body.value,
-    says: body.truncated
-      ? `What ${asked} sent back, with the middle left out — the whole of it is ${sizeBucket(body.bytes)}.`
-      : `What ${asked} sent back.`,
-  }));
-  if (body.shape !== undefined) {
+  // The headers, the body and its shape describe the answer to a request the route rejected,
+  // so on a rejected request they describe this tool and not the product. They are left out
+  // rather than compared, which is what every other never-really-tried branch in this adapter
+  // does — and what the route said for itself is quoted in the sentence above, where somebody
+  // will actually read it. Comparing them would be worse than useless: two builds whose
+  // validation message was reworded would report a difference nobody caused, at an address
+  // standing in for a route neither run has ever been inside.
+  if (!ourOwnFault) {
+    const headers = headersThatMatter(answer.headers);
+    for (const [name, value] of Object.entries(headers)) {
+      out.push(observation({
+        channel: 'results',
+        path: joinPath('api', id, 'header', name),
+        value: undoOurFootprint(Array.isArray(value) ? value.join(', ') : value, footprint),
+        says: `${asked} answered with ${name}: ${Array.isArray(value) ? value.join(', ') : value}.`,
+      }));
+    }
+
+    const body = readBody(answer.headers.get('content-type') ?? '', undoOurFootprint(input.text, footprint));
     out.push(observation({
       channel: 'results',
-      path: joinPath('api', id, 'shape'),
-      value: body.shape,
-      says: `The fields ${asked} sends back and what type each one is. This stays the same while the values change, so a renamed or dropped field shows up on its own instead of buried in a diff of the whole body.`,
+      path: joinPath('api', id, 'body'),
+      value: body.value,
+      says: body.truncated
+        ? `What ${asked} sent back, with the middle left out — the whole of it is ${sizeBucket(body.bytes)}.`
+        : `What ${asked} sent back.`,
     }));
+    if (body.shape !== undefined) {
+      out.push(observation({
+        channel: 'results',
+        path: joinPath('api', id, 'shape'),
+        value: body.shape,
+        says: `The fields ${asked} sends back and what type each one is. This stays the same while the values change, so a renamed or dropped field shows up on its own instead of buried in a diff of the whole body.`,
+      }));
+    }
   }
 
   for (const change of input.changes) {
@@ -950,6 +1066,12 @@ export function describeRequest(input) {
       says: change.what === 'deleted'
         ? `Answering ${asked} deleted ${change.file}.`
         : `Answering ${asked} ${change.what} ${change.file}. A route that still answers correctly but has stopped writing this file is broken, and only this line sees it.`,
+      // A file written while the route was turning our request away is a real thing the product
+      // did, and it is kept on the record — but it is not evidence that the route works, and if
+      // it were left as a plain observation this one line would put the route back in the
+      // ledger's walked column and undo the whole fix above.
+      covered: ourOwnFault ? false : undefined,
+      reason: ourOwnFault ? 'needs a sample' : undefined,
     }));
   }
 
