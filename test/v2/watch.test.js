@@ -542,7 +542,7 @@ describe('the findings and the report share the window', () => {
     // The height that broke it. A shorter window would hide the bug by never filling.
     const page = await browser.newPage({ viewport: { width: 480, height: 952 } });
     await page.setContent(panelHtml(panelPlan({ product: 'shop', journeys: [] })), { waitUntil: 'load' });
-    const read = await page.evaluate((n) => {
+    const read = await page.evaluate((/** @type {number} */ n) => {
       const foot = /** @type {HTMLElement} */ (document.getElementById('footer'));
       const needs = /** @type {HTMLElement} */ (document.getElementById('needs'));
       // A FULL BODY, because an empty one hides the bug. The live window had 41,914px of
