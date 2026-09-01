@@ -115,8 +115,12 @@ describe('the temporary folder will not take a new folder', () => {
     assert.ok(!/ENOENT/.test(outcome.summary), `the error code reached the reader: ${outcome.summary}`);
     assert.match(outcome.summary, /throwaway folder it works in/, outcome.summary);
     assert.match(outcome.summary, /There is no folder at/, outcome.summary);
-    // And the half that says what to DO about it.
-    assert.match(outcome.summary, /TMPDIR/, outcome.summary);
+    // And the half that says what to DO about it — naming the setting THIS machine reads.
+    // Windows reads TEMP and everything else reads TMPDIR, and the sentence said TMPDIR
+    // everywhere until 2026-08-31, so the only instruction a stuck Windows user was given
+    // named a setting their operating system does not look at. A test that demands the word
+    // TMPDIR on every machine is the same mistake, written down and defended.
+    assert.match(outcome.summary, process.platform === 'win32' ? /\bTEMP\b/ : /TMPDIR/, outcome.summary);
     assert.match(outcome.summary, /run the check again/, outcome.summary);
   });
 
