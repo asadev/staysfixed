@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import { StaysFixedError, messageOf } from '../core/errors.js';
-import { warn, detail, shortPath } from '../core/log.js';
+import { say, warn, detail, shortPath } from '../core/log.js';
 import { findConfigFile, rootForConfig } from '../core/paths.js';
 import { sha256 } from '../core/hash.js';
 
@@ -46,6 +46,7 @@ import { whatChanged, NOT_THE_TOOLS_OWN_FOLDER } from './rank.js';
 
 import { attachWatcher, watchOptionsFrom } from './watch/index.js';
 import { guardTheScreen, describeGuard } from './watch/focus.js';
+import { watchForDialogs, describeDialogs } from './watch/dialogs.js';
 import {
   isOffScreen, moveWindowByPid, offScreen, windowBoundsByPid, withoutTakingTheScreen,
 } from './watch/window.js';
@@ -1447,7 +1448,29 @@ async function mindTheScreen(project, events) {
   // Nothing will appear and nobody asked for a window: there is no screen to look after.
   if (!wantsPanel && !couldShow) return null;
 
+  // A WINDOW NOBODY KNOWS ABOUT IS A WINDOW THAT DOES NOT EXIST.
+  //
+  // This tool draws a live view of a run — surfaces, journeys ticking, the reference it is
+  // measuring against, the findings as they land. It is off unless somebody types `--watch`,
+  // and even then it opens BEHIND their work on purpose and never comes forward again. All
+  // three of those are right on their own, and together they meant the owner ran this tool
+  // for weeks and never once saw the window, because nothing anywhere told him it was there.
+  // `staysfixed init` mentions it, which helps exactly once and only if you read the setup.
+  //
+  // So the run itself says it, once, on a project where there is something to watch.
+  if (!wantsPanel) {
+    say('There is a live window for this run — add --watch to open it beside what is being checked.');
+  }
+
   const guard = guardTheScreen();
+  // THE BOXES THIS RUN CAUSES ARE THIS RUN'S PROBLEM.
+  //
+  // Every adapter starts the thing under test in a throwaway settings folder, which is exactly
+  // the condition that makes an application ask the operating system for something it has never
+  // been granted. On 2026-09-01 that was a keychain, and the alert it raised sat on screen for
+  // two minutes of a four-minute run while a journey waited behind it for a person who was
+  // never going to arrive. Only ours, only harmless buttons, and everything seen is reported.
+  const dialogs = watchForDialogs({ elapsed: () => events.elapsed() });
   // Said under --verbose rather than always, because a person who was not interrupted
   // should not be told about the machinery that did not interrupt them. It is here at all
   // so that "the guard is running" is something anybody can see rather than take on trust.
@@ -1473,6 +1496,14 @@ async function mindTheScreen(project, events) {
         // AND --watch-front is somebody asking, in so many words, for this window in front.
         // Claiming it would have the guard undoing the flag a second after it was obeyed.
         onOpen: (browser) => {
+          // AND SAY WHERE IT WENT. The window opens behind whatever the person is doing and
+          // never asks for the screen again, which is the behaviour they asked for — but it
+          // makes a window that came up correctly look exactly like one that never came up.
+          // One line, at the moment it opens, is the whole difference between the two.
+          say(
+            `The live window is open on the ${watch.side === 'left' ? 'left' : 'right'} of your screen` +
+              (watch.foreground === true ? '.' : ", behind what you are working on — it will not come forward on its own."),
+          );
           if (browser.borrowed || watch.foreground === true) return;
           guard.claim(browser.name);
         },
@@ -1489,6 +1520,7 @@ async function mindTheScreen(project, events) {
     // Claimed the instant the process exists, before it has drawn anything. A moment
     // later and its first appearance is read as the person choosing it.
     guard.claim(app.name);
+    dialogs.claim(app.name);
     events.emit({
       type: 'note',
       at: events.elapsed(),
@@ -1506,7 +1538,14 @@ async function mindTheScreen(project, events) {
     handingBack ??= (async () => {
       stopped = true;
       stopListening();
+      // One last look before letting go: a box that came up during the final journey is the
+      // one most likely to explain a missing answer, and the periodic sweep may not have
+      // come round again before the run ended.
+      await dialogs.sweepNow().catch(() => {});
+      await dialogs.stop();
       await guard.release();
+      const said = describeDialogs(dialogs.report());
+      if (said) events.emit({ type: 'note', at: events.elapsed(), message: said });
       const line = describeGuard(guard.report());
       if (line) events.emit({ type: 'note', at: events.elapsed(), message: line });
       await Promise.allSettled(placing);

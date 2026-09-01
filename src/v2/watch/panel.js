@@ -568,7 +568,10 @@ button { font: inherit; color: inherit; }
 }
 
 /* --- the scrolling body -------------------------------------------------- */
-.scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 0 var(--pad) 18px; }
+/* A FLOOR, so the report can never be reduced to a slit again. Whatever else is on screen,
+   the body keeps enough height to show a heading and a few rows under it — which is the
+   difference between "there is more here, scroll" and "the detail is gone". */
+.scroll { flex: 1 1 auto; min-height: 132px; overflow-y: auto; overflow-x: hidden; padding: 0 var(--pad) 18px; }
 .scroll::-webkit-scrollbar { width: 9px; }
 .scroll::-webkit-scrollbar-thumb { background: var(--resting); border-radius: 999px; }
 .scroll::-webkit-scrollbar-track { background: transparent; }
@@ -778,8 +781,25 @@ button { font: inherit; color: inherit; }
 .nothing { padding: 30px 16px; color: var(--faint); font-size: var(--t-body); line-height: 1.8; text-align: center; }
 
 /* --- the only thing that ever reaches a person --------------------------- */
+/* THE FOOTER MAY NEVER EAT THE WINDOW.
+   It used to be "flex: 0 0 auto" with nothing capping it, so its height was simply however
+   many things needed a person. On a real run that found seventeen, the footer grew past the
+   height of the whole panel and squeezed the scrolling body — the walk, the wobble, what
+   survived, what was not checked, every journey and its address count — down to EIGHTEEN
+   PIXELS holding 41,115 of content. Measured, not guessed: clientHeight 18, scrollHeight
+   41115. What a person saw at the end of a run was one clipped line of text where the whole
+   report had been a second earlier, which reads exactly like the tool throwing its detail
+   away at the moment it finishes.
+   So it shrinks now, the list inside it scrolls, and the body below keeps a floor. */
 .foot {
+  /* Sizes to its content, and stops at half the window. Not "0 1 auto": that let the flex
+     row below it take every pixel and shrank the footer to its label, so seventeen things
+     needing a person rendered at zero height — the same detail lost, from the other end. */
   flex: 0 0 auto;
+  max-height: 52%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   padding: 13px var(--pad) 15px;
   background: var(--glass);
   backdrop-filter: blur(22px) saturate(120%);
@@ -787,6 +807,12 @@ button { font: inherit; color: inherit; }
   border-top: 1px solid var(--line);
   animation: arrive 340ms var(--ease) both;
 }
+/* The label above and the sentence below stay put; only the list moves. A person reading
+   "Needs a person" must never have to scroll to find out that is what they are reading. */
+#needs { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+#needs::-webkit-scrollbar { width: 9px; }
+#needs::-webkit-scrollbar-thumb { background: var(--resting); border-radius: 999px; }
+#needs::-webkit-scrollbar-track { background: transparent; }
 .nextlabel {
   font-size: var(--t-label); font-weight: 600; letter-spacing: 0.2em;
   text-transform: uppercase; color: var(--wait); margin-bottom: 8px;

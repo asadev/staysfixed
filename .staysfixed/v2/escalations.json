@@ -1,0 +1,22 @@
+{
+  "demo": {
+    "product": "demo",
+    "at": "2026-09-01T19:35:13.160Z",
+    "items": [
+      {
+        "id": "f-e0d85f",
+        "kind": "sealed",
+        "what": "\"SessionBar\" now reads differently.",
+        "why": "No agent may wave this through: it touches losing data.",
+        "todo": "Say whether that change is meant to happen. It can lose data. This one is worth thirty seconds before anything ships.",
+        "class": "data-loss",
+        "paths": [
+          "exports.SessionBar"
+        ]
+      }
+    ],
+    "waived": 0,
+    "expiredWaivers": 0,
+    "note": "Stays Fixed: 1 thing needs your word on demo."
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "at": "2026-09-01T19:35:13.160Z",
+  "product": "demo",
+  "reference": "no-reference-yet",
+  "verdict": "differences found",
+  "findings": [
+    {
+      "id": "f-e0d85f",
+      "title": "\"SessionBar\" now reads differently.",
+      "why": "",
+      "class": "data-loss",
+      "sealed": true,
+      "rank": 1,
+      "differences": [
+        {
+          "path": "exports.SessionBar",
+          "channel": "exports",
+          "kind": "changed",
+          "reference": "a class",
+          "candidate": "a class",
+          "distance": 0.4
+        }
+      ],
+      "paths": [
+        "exports.SessionBar"
+      ],
+      "sample": {
+        "path": "exports.SessionBar",
+        "channel": "exports",
+        "kind": "changed",
+        "reference": "a class",
+        "candidate": "a class",
+        "distance": 0.4
+      },
+      "count": 1,
+      "nearFiles": [],
+      "distance": 1,
+      "fingerprint": "f7c0697466155b9c",
+      "unwaivable": true,
+      "unwaivableWhy": "Nobody may wave this through on their own: it touches losing data. Code can be edited back. Data that was deleted cannot.",
+      "sealedBy": {
+        "class": "data-loss",
+        "says": "losing data",
+        "why": "Nobody may wave this through on their own: it touches losing data. Code can be edited back. Data that was deleted cannot.",
+        "matched": [],
+        "where": [],
+        "from": "engine",
+        "strength": "likely"
+      }
+    }
+  ],
+  "newlyUnstable": [],
+  "accounting": {
+    "reported": 1,
+    "waived": 0,
+    "unwaivable": 1,
+    "expiredWaivers": 0,
+    "budget": 5,
+    "spent": 0,
+    "left": 5,
+    "intent": null,
+    "note": "1 of what is left is in a class nobody may wave through. Nothing is the new normal until a build ships."
+  },
+  "result": {
+    "runId": "run-1",
+    "product": "demo",
+    "ok": false,
+    "mode": "paired",
+    "reference": {
+      "id": "git-old",
+      "product": "demo"
+    },
+    "candidate": {
+      "id": "work-new",
+      "product": "demo"
+    },
+    "findings": [
+      {
+        "id": "engine-changed",
+        "title": "\"SessionBar\" now reads differently.",
+        "why": "",
+        "class": "data-loss",
+        "sealed": true,
+        "rank": 1,
+        "differences": [
+          {
+            "path": "exports.SessionBar",
+            "channel": "exports",
+            "kind": "changed",
+            "reference": "a class",
+            "candidate": "a class",
+            "distance": 0.4
+          }
+        ],
+        "paths": [
+          "exports.SessionBar"
+        ],
+        "sample": {
+          "path": "exports.SessionBar",
+          "channel": "exports",
+          "kind": "changed",
+          "reference": "a class",
+          "candidate": "a class",
+          "distance": 0.4
+        },
+        "count": 1,
+        "nearFiles": [],
+        "distance": 1
+      }
+    ],
+    "differencesReal": 1,
+    "differencesNoise": 0,
+    "newlyUnstable": [],
+    "coverage": {
+      "paths": 10,
+      "journeys": 1,
+      "byChannel": {},
+      "gaps": []
+    },
+    "summary": "Something changed.",
+    "durationMs": 1,
+    "startedAt": "2026-09-01T00:00:00.000Z"
+  }
+}

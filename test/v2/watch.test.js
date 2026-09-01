@@ -505,3 +505,102 @@ describe('the sentence the window ends on', () => {
     await panel.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+
+/**
+ * The report may not be squeezed out of the window by the findings.
+ *
+ * Found on 2026-09-01 by the owner watching a real run finish, and confirmed by measuring
+ * the live window rather than by reading the CSS. His words: "some things like popups hides
+ * the full details at the end", and "its not showing detailings".
+ *
+ * WHAT WAS ACTUALLY HAPPENING. The footer holding "Needs a person" was `flex: 0 0 auto` with
+ * nothing capping it, so its height was however many things needed a person. A run that
+ * found seventeen grew it past the height of the whole panel, and the scrolling body — the
+ * walk, every journey and its address count, the wobble, what survived, what was NOT checked
+ * — was squeezed to EIGHTEEN PIXELS holding 41,115 of content. Measured on the running
+ * window: clientHeight 18, scrollHeight 41115. At the moment a check finished, everything it
+ * had spent four minutes drawing collapsed into one clipped line of text.
+ *
+ * AND THE OVER-CORRECTION, which is why this test measures both ends. Letting the footer
+ * shrink instead (`flex: 0 1 auto`) moved the same bug rather than fixing it: the body took
+ * every pixel and the footer collapsed to its label, so seventeen sealed findings rendered
+ * at ZERO height — the detail lost again, from the other side. Measured the same way:
+ * footer 36px, list 0px, seventeen rows in it.
+ *
+ * So the rule this holds is both halves at once, at the sizes that actually broke: with a
+ * long list of findings on screen, the body still shows a heading and rows under it, AND the
+ * findings list is still visible and scrolls inside its own box.
+ */
+describe('the findings and the report share the window', () => {
+  /**
+   * @param {number} count how many things need a person
+   * @returns {Promise<{body: number, foot: number, listSeen: number, listAll: number, rows: number, close: () => Promise<void>}>}
+   */
+  async function withFindings(count) {
+    // The height that broke it. A shorter window would hide the bug by never filling.
+    const page = await browser.newPage({ viewport: { width: 480, height: 952 } });
+    await page.setContent(panelHtml(panelPlan({ product: 'shop', journeys: [] })), { waitUntil: 'load' });
+    const read = await page.evaluate((n) => {
+      const foot = /** @type {HTMLElement} */ (document.getElementById('footer'));
+      const needs = /** @type {HTMLElement} */ (document.getElementById('needs'));
+      // A FULL BODY, because an empty one hides the bug. The live window had 41,914px of
+      // walk in it, and it is that content pushing from below that made the flex row give
+      // the footer everything. Measured against an almost-empty body, the broken CSS and
+      // the fixed CSS return the same numbers and the test proves nothing.
+      const body = /** @type {HTMLElement} */ (document.querySelector('.scroll'));
+      const filler = document.createElement('div');
+      filler.style.height = '41914px';
+      body.appendChild(filler);
+      foot.hidden = false;
+      needs.textContent = '';
+      for (let i = 0; i < n; i++) {
+        const row = document.createElement('div');
+        row.className = 'need';
+        row.innerHTML =
+          '<span class="dot glyph"></span><span class="needtext">In the doors the code opens, "SessionBar' + i +
+          '" is there now and was not before. It says "a class with createElement, start, noteOutput, destroy, ' +
+          'receive, as" and more.<span class="needwhy">It touches losing data.</span></span>';
+        needs.appendChild(row);
+      }
+      return {
+        body: body.clientHeight,
+        foot: foot.offsetHeight,
+        listSeen: needs.clientHeight,
+        listAll: needs.scrollHeight,
+        rows: needs.children.length,
+      };
+    }, count);
+    return { ...read, close: () => page.close() };
+  }
+
+  test('seventeen findings do not squeeze the report to a slit', async (t) => {
+    if (!browser) return t.skip(noBrowser);
+    const m = await withFindings(17);
+    assert.equal(m.rows, 17);
+    // 18px was the measured failure. A heading plus a few rows needs three figures.
+    assert.ok(m.body >= 132, `the report was squeezed to ${m.body}px by ${m.rows} findings`);
+    await m.close();
+  });
+
+  test('and the findings themselves are still on screen', async (t) => {
+    if (!browser) return t.skip(noBrowser);
+    const m = await withFindings(17);
+    assert.ok(m.listSeen > 100, `seventeen things need a person and the list is ${m.listSeen}px tall`);
+    assert.ok(m.listAll > m.listSeen, 'a list taller than its box has to be the one that scrolls');
+    await m.close();
+  });
+
+  test('forty findings change neither answer', async (t) => {
+    if (!browser) return t.skip(noBrowser);
+    const many = await withFindings(40);
+    assert.ok(many.body >= 132, `the report was squeezed to ${many.body}px by ${many.rows} findings`);
+    assert.ok(many.listSeen > 100, `the list of forty is ${many.listSeen}px tall`);
+    // The footer is capped, so twice the findings must not mean a taller footer.
+    const some = await withFindings(17);
+    assert.equal(many.foot, some.foot, 'the footer is still growing with the number of findings');
+    await many.close();
+    await some.close();
+  });
+});

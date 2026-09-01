@@ -610,6 +610,31 @@ function buildEscalations(product, record, verdict) {
 }
 
 /**
+ * Which way a finding moved, read off the differences it stands for.
+ *
+ * A sealed class says what a change TOUCHES. It does not say what the change DID, and the
+ * two were treated as one thing until 2026-09-01, when a real run on a real product printed
+ * `"SessionBar" is there now and was not before` and then asked, one line below it, "Say
+ * whether that deletion is meant to happen." Nothing had been deleted. That sentence is the
+ * one a person is asked to rule on, and it described the opposite of what happened.
+ *
+ * So the direction is read rather than assumed. 'gone' only when something actually went
+ * away, 'new' only when everything is an arrival, and 'changed' for a mix or anything else —
+ * because a sentence that has to hedge is still better than one that is wrong.
+ *
+ * @param {DecidedFinding} f
+ * @returns {'gone'|'new'|'changed'}
+ */
+function whichWay(f) {
+  const kinds = (f.differences ?? []).map((d) => d && d.kind).filter(Boolean);
+  if (kinds.length === 0 && f.sample && f.sample.kind) kinds.push(f.sample.kind);
+  if (kinds.length === 0) return 'changed';
+  if (kinds.every((k) => k === 'vanished')) return 'gone';
+  if (kinds.every((k) => k === 'appeared')) return 'new';
+  return 'changed';
+}
+
+/**
  * @param {DecidedFinding} f
  * @returns {string}
  */
@@ -619,7 +644,15 @@ function sealedTodo(f) {
   if (cls === 'guard') return 'This is a bug you already reported once, coming back. Say whether it goes back on the list, or the guard was wrong.';
   if (cls === 'money') return 'Say whether that is the amount you wanted. If it is, shipping makes it the new normal; if it is not, nothing ships.';
   if (cls === 'sign-in') return 'Say whether signing in is meant to behave like that now. Nothing ships until you do.';
-  if (cls === 'data-loss') return 'Say whether that deletion is meant to happen. This one is worth thirty seconds before anything ships.';
+  if (cls === 'data-loss') {
+    // The class means "this touches losing data". Which way it moved is a separate fact, and
+    // saying the wrong one at somebody who is about to rule on it is worse than saying less.
+    const worth = ' This one is worth thirty seconds before anything ships.';
+    const way = whichWay(f);
+    if (way === 'gone') return `Say whether that deletion is meant to happen.${worth}`;
+    if (way === 'new') return `Say whether that is meant to be there. It can lose data.${worth}`;
+    return `Say whether that change is meant to happen. It can lose data.${worth}`;
+  }
   if (cls === 'crash') return 'This has to be fixed before anything ships. Nobody needs to decide anything, but you should know it happened.';
   return `Say whether that is what you wanted${where ? `, at ${where}` : ''}. If it is, ship — shipping is what makes it the new normal.`;
 }
