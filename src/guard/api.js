@@ -33,6 +33,34 @@ export class ExpectationFailed extends Error {
 }
 
 /**
+ * This guard cannot answer its question on this machine, and that is not a verdict.
+ *
+ * Added 2026-09-02, after fifty guards were written for a real product in one night and four
+ * of them failed for reasons that had nothing to do with the product: one wanted a paired
+ * machine, one an Android phone, two a session in a particular state. Nothing was broken. The
+ * guards were simply being run somewhere that could not answer them.
+ *
+ * Until this existed a guard in that position had two ways out and both were wrong. Passing is
+ * a lie — it reports that a bug did not come back, having checked nothing. Failing is a false
+ * alarm, and worse than it sounds: the line a run prints for a failed guard is "bugs that were
+ * already fixed are back", so somebody goes hunting a regression that never happened, and after
+ * it happens twice they stop believing any of them.
+ *
+ * "Not proved" is a third answer and it is the honest one. It is the same distance from a pass
+ * as "nothing was compared" is from "nothing changed", which is the distinction this whole tool
+ * is built on, and it had a hole in it exactly here.
+ */
+export class GuardCannotRunHere extends Error {
+  /** @param {string} why  Plain English: what is missing, and what would let it run. */
+  constructor(why) {
+    super(why);
+    this.name = 'GuardCannotRunHere';
+    /** @type {string} */
+    this.why = why;
+  }
+}
+
+/**
  * The run has given up on this guard, and the guard is still going.
  *
  * Every door in the object a guard is handed throws this once the attempt that opened it has
@@ -198,6 +226,21 @@ export function makeGuardApi(page, project, opts = {}) {
   return {
     page: refusable(page),
     project,
+
+    /**
+     * Say this guard cannot be answered here, and stop.
+     *
+     * Use it for what the machine is missing, never for what the product is doing: no phone
+     * attached, no second machine paired, no signed-in account to switch between. A guard that
+     * reaches for this because the product looks wrong has turned a real finding into silence.
+     *
+     * @param {string} why  What is missing, and what would let it run.
+     * @returns {never}
+     */
+    cannotRunHere(why) {
+      announce(ACTION, `cannot run here: ${short(String(why))}`)('ok');
+      throw new GuardCannotRunHere(String(why));
+    },
 
     /**
      * @param {string} to

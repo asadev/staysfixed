@@ -16,7 +16,7 @@
  * this one is not" is most of the value of running it at all.
  */
 
-import { makeGuardApi, ExpectationFailed, GuardAbandoned } from './api.js';
+import { makeGuardApi, ExpectationFailed, GuardAbandoned, GuardCannotRunHere } from './api.js';
 import { resetWindow } from '../drive/launch.js';
 import { emitEvent } from '../core/events.js';
 
@@ -29,6 +29,7 @@ const FRESH_KEY = 'fresh';
  * @typedef {import('../types.js').GuardResult & {
  *   retriedToPass?: boolean,
  *   assertedNothing?: boolean,
+ *   cannotRunHere?: boolean,
  *   timedOut?: boolean,
  *   checks?: import('../types.js').CheckStep[],
  * }} GuardRunResult
@@ -41,6 +42,9 @@ const FRESH_KEY = 'fresh';
  * @property {string} [failedAt]
  * @property {boolean} [timedOut]  The clock ran out before the guard answered. Not the same
  *                                 as the answer being no — see the note on the result below.
+ * @property {boolean} [cannotRunHere]  The guard said this machine cannot answer it and stopped.
+ *                                 `ok` is true because nothing went wrong; the flag is what stops
+ *                                 it being counted as a bug that did not come back.
  */
 
 /** @typedef {(step: import('../types.js').CheckStep) => void} StepSink */
@@ -150,12 +154,16 @@ export async function runGuards(project, app, guards, opts = {}) {
     // Its OWN questions, not the runner's. Every guard gets a "fresh start" step from this
     // file whether it asks anything or not, so counting the whole list would always find one.
     const asked = checks.filter((c) => c.key !== FRESH_KEY && !String(c.key ?? '').endsWith(`-${FRESH_KEY}`));
-    const assertedNothing = outcome.ok && asked.length === 0;
+    // A guard that stopped because this machine cannot answer it did not "check nothing" in the
+    // sense the rule below is about — it deliberately declined to claim anything, which is the
+    // opposite failure and has to be told apart from it.
+    const couldNotRun = outcome.cannotRunHere === true;
+    const assertedNothing = outcome.ok && asked.length === 0 && !couldNotRun;
 
     /** @type {GuardRunResult} */
     const result = {
       name: guard.name,
-      status: outcome.ok && !assertedNothing ? 'passed' : 'failed',
+      status: couldNotRun ? 'skipped' : outcome.ok && !assertedNothing ? 'passed' : 'failed',
       file: guard.file,
       because: guard.because,
       durationMs: Date.now() - startedAt,
@@ -163,7 +171,13 @@ export async function runGuards(project, app, guards, opts = {}) {
     };
     if (checks.length > 0) result.checks = checks;
 
-    if (assertedNothing) {
+    if (couldNotRun) {
+      // Neither a pass nor a failure, and it must not be summarised as either. The message
+      // carries what is missing so somebody reading a run can tell at a glance whether it is
+      // worth plugging a phone in, or whether this guard will never run on a build machine.
+      result.cannotRunHere = true;
+      result.message = outcome.message ?? 'This guard could not be answered on this machine.';
+    } else if (assertedNothing) {
       result.assertedNothing = true;
       // The story of the bug is not repeated in here. It travels on `because`, and the console,
       // the HTML report, the MCP answer and the live panel each print it themselves — so
@@ -366,6 +380,22 @@ async function attemptGuard(project, app, guard, baseUrl, timeoutMs, onStep) {
         ok: false,
         failedAt: error.claim,
         message: `This should still be true, and it is not: "${error.claim}".${consoleNote(app)}`,
+      };
+    }
+    // NOT PROVED, which is neither of the two answers above it.
+    //
+    // The guard asked for something this machine does not have — a paired machine, a phone, a
+    // second signed-in account — and stopped. Nothing about the product was learned, so nothing
+    // about the product may be reported. Passing here would be the false all-clear this whole
+    // tool exists to prevent, and failing would say "a bug that was already fixed is back" about
+    // a bug nobody looked for.
+    if (error instanceof GuardCannotRunHere) {
+      return {
+        ok: true,
+        cannotRunHere: true,
+        message:
+          `Not proved here: ${error.why} Nothing about this bug was checked on this run, so nothing here ` +
+          `says it has not come back.`,
       };
     }
     // Out of time is its own answer, and it is not "no". The guard was still going when the

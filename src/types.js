@@ -273,6 +273,9 @@
 
 /**
  * @typedef {object} GuardApi
+ * @property {(why: string) => never} cannotRunHere               Stop, saying this machine cannot answer
+ *                                                                this guard. For what the MACHINE is
+ *                                                                missing, never for what the product does.
  * @property {PageApi} page                                       Full page control.
  * @property {(path: string) => Promise<void>} open               Shorthand for page.goto.
  * @property {(selector: string) => Promise<void>} click
@@ -506,6 +509,11 @@ export {};
  *                                          as a pass — but it is not a bug coming back, and anything
  *                                          drawing this stream has to be able to tell the two apart.
  * @property {boolean} [assertedNothing]      A guard that finished without asking a single question.
+ * @property {boolean} [cannotRunHere]       A guard that stopped because this machine cannot answer it —
+ *                                          no phone attached, no second machine paired, no second account
+ *                                          to switch between. Reported with the status 'skipped': it is
+ *                                          not a pass, because nothing about the bug was checked, and it
+ *                                          is not a failure, because nothing about the product went wrong.
  * @property {string} [thumbnail]             A small JPEG as a data: URI — an instant preview, shown
  *                                          while the real file is still being written.
  * @property {string} [shotFile]              file:// URL of the FULL-RESOLUTION picture just taken.
