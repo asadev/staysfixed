@@ -2256,6 +2256,21 @@ function nextCommands(readiness, project) {
         ? 'The first real run. It walks everything and shows you what it sees. It cannot record what "working" means — only shipping does that.'
         : 'The first real run. Nothing here is fully set up yet, so it walks what it can reach and says plainly what it left out — which is more useful than waiting.',
     });
+    // Nothing said this existed, anywhere. A person ran a check, watched a blank terminal for
+    // minutes, and reasonably asked why there was no window — the panel was there the whole
+    // time behind a flag nobody had been told about. A run that looks like nothing is
+    // happening is indistinguishable from a run that is stuck, which is the state somebody
+    // kills it in. Said once, here, where a person is deciding what to type next.
+    // Measured 2026-09-01.
+    const hasAScreen =
+      (project.pages?.length ?? 0) > 0
+      || project.products.some((p) => ['web', 'electron', 'ios', 'android', 'macos', 'linux', 'windows', 'extension'].includes(String(p.surface)));
+    if (hasAScreen) {
+      next.push({
+        command: 'staysfixed check --watch',
+        what: 'The same run, with a window beside it drawing every screen as it is walked. Worth it once, to see what this actually does. It opens behind what you are working on; --watch-front brings it forward.',
+      });
+    }
   }
   if (project.tests.files > 0) {
     next.push({ command: 'staysfixed check --journeys suite', what: `Walk the ${project.tests.files} test${project.tests.files === 1 ? '' : 's'} this project already has, under instrumentation.` });
