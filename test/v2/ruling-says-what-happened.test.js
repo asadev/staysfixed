@@ -29,7 +29,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { decide, readDecisions, rememberCheck, escalationsFor } from '../../src/v2/escalate.js';
-import { openStore } from '../../src/v2/store.js';
+import { openStore, ensureStore } from '../../src/v2/store.js';
 import { scratchDir, cleanUp } from '../support.mjs';
 
 after(cleanUp);
@@ -40,7 +40,13 @@ const PRODUCT = 'demo';
 async function store() {
   const root = await scratchDir('staysfixed-ruling');
   await fsp.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: PRODUCT, version: '1.0.0' }));
-  return openStore(root);
+  // openStore takes an OPTIONS OBJECT. Handed a bare string it reads opts.root as undefined
+  // and falls back to process.cwd(), so this file quietly wrote its scratch product's records
+  // into the real repository's own .staysfixed folder — and they were committed before anyone
+  // noticed. An argument shape that silently means "the current project" is worth this comment.
+  const store = openStore({ root });
+  await ensureStore(store);
+  return store;
 }
 
 /**

@@ -50,3 +50,8 @@ desktop.ini
 # The example projects the test suite drives get the same treatment.
 fixtures/**/.staysfixed/results/
 fixtures/**/.staysfixed/report.html
+
+# Run records this tool writes about the project it is checking. Machine-local state,
+# never source — and a test that passed a bare string to openStore once wrote a scratch
+# product's records in here and got them committed.
+.staysfixed/v2/
