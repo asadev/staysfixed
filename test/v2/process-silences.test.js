@@ -145,12 +145,34 @@ describe('every command door reading as never walked', () => {
     assert.equal(did?.state, 'opened');
   });
 
-  test('an import journey still opens its exports through their own addresses', async () => {
+  test('reading an export off a module REACHES it — opening it means calling it', async () => {
+    // This asserted `opened` until 2026-08-31, and that word was the whole of a false
+    // all-clear: importing a module and reading the names on it proves the names are still
+    // there and nothing else. A library whose every function returned a different answer
+    // passed clean, because the ledger counted those names as doors that had been opened.
+    // Reached and opened are two different things and the ledger now says which.
     const did = await askTheLedger(
       { kind: 'export', name: 'check', file: 'src/index.js' },
       { imports: [{ name: 'the public entry', module: './src/index.js' }] },
       'the public entry',
       ['export.the public entry.check', 'count.the public entry.exports'],
+    );
+    assert.equal(did?.state, 'reached');
+  });
+
+  test('and calling it, with its answer compared, is what opens it', async () => {
+    // The other half of the same law. The answers journey writes what a function ANSWERED at
+    // the door's own address, so the address is asked of `doorFact` rather than spelled out
+    // here — spelling it out is how a test comes to pass about a shape nothing produces.
+    const door = doorFact({
+      kind: 'export', name: 'check', file: 'src/index.js',
+      detail: '', line: 1, inTest: false, named: true, via: 'package.json',
+    });
+    const did = await askTheLedger(
+      { kind: 'export', name: 'check', file: 'src/index.js' },
+      { imports: [{ name: 'the public entry', module: './src/index.js' }] },
+      'the public entry',
+      [door.address],
     );
     assert.equal(did?.state, 'opened');
   });

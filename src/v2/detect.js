@@ -32,7 +32,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { whatItCallsItself, pythonEntryPoints, pythonRunFor } from './init.js';
+import { whatItCallsItself, pythonEntryPoints } from './init.js';
 import { fileURLToPath } from 'node:url';
 
 /** @typedef {import('./types.js').Surface} Surface */
@@ -2020,34 +2020,25 @@ async function foreignProjectIn(dir, listing) {
     }
     for (const entry of reading.entries) {
       const name = path.basename(entry, '.py');
-      // Run it the way Python can actually run it, not by handing python3 a file path. A
-      // module inside a package dies on its first relative import when it is run by path —
-      // `ImportError: attempted relative import with no known parent package` — so a command
-      // written that way is red on a fresh clone through nobody's fault. Measured 2026-08-31.
-      const runnable = pythonRunFor(dir, entry);
-      commands.push({
-        name: `${name} --help`,
-        run: runnable ? `${runnable.run} --help` : `${typed} ${entry} --help`,
-        describe: `ask ${name} to print its help, and compare every word of it`,
-        ...(runnable?.env ? { env: runnable.env } : {}),
-      });
+      // Written as the plain path here, deliberately. `commandsThatRun` in init.js judges every
+      // suggested command against the project and repairs it — turning a module run by path
+      // into one Python can actually import, and carrying a src layout as PYTHONPATH rather
+      // than in front of the command. Repairing it twice, in two places, is how the two come
+      // to disagree: doing it here as well dropped the PYTHONPATH that the repair adds.
+      // Measured by the gate on 2026-09-01.
+      commands.push({ name: `${name} --help`, run: `${typed} ${entry} --help`, describe: `ask ${name} to print its help, and compare every word of it` });
     }
     // A console script is a command somebody types AFTER INSTALLING — pip writes those files
-    // at install time, so on a checkout the name is simply not there and the command exits
-    // 127. What goes in the settings is the runnable form of what the script points at.
-    // Poetry and setuptools each spell this their own way, and reading only one of the three
-    // meant a Poetry project got no commands out of its manifest at all.
-    for (const [scriptName, target] of pythonEntryPoints(dir)) {
+    // at install time, so on a checkout the name is simply not there. `judgeCommand` knows
+    // that and rewrites it into something runnable; what matters here is that Poetry's and
+    // setuptools' own spellings are read at all, because reading only `[project.scripts]`
+    // meant a Poetry project had no commands worked out for it whatsoever.
+    for (const [scriptName] of pythonEntryPoints(dir)) {
       if (commands.some((c) => c.name.startsWith(`${scriptName} `))) continue;
-      const runnable = pythonRunFor(dir, target);
-      // No honest way to run it — the module the script points at is not in this checkout.
-      // Writing the bare script name here is what made a fresh clone exit 127.
-      if (!runnable) continue;
       commands.push({
         name: `${scriptName} --help`,
-        run: `${runnable.run} --help`,
+        run: `${scriptName} --help`,
         describe: `ask ${scriptName} to print its help, and compare every word of it`,
-        ...(runnable.env ? { env: runnable.env } : {}),
       });
     }
   } else {
