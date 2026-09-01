@@ -6,6 +6,38 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-09-02
+
+### A guard can say it cannot be answered here
+
+Fifty guards were written for a real product in one night and put through a real run. Several
+failed on that machine for reasons that had nothing to do with the product: one wanted a paired
+second machine, one an Android phone, several a session in a state nothing had put it in.
+Nothing was broken. They were being asked somewhere that could not answer them.
+
+Until now such a guard had two ways out and both were wrong. **Passing is a lie** — it reports
+that a bug did not come back, having looked for nothing, which is the false all-clear this whole
+tool exists to prevent, wearing the friendliest face it has. **Failing is a false alarm**, and
+worse than it sounds: the line printed over a failed guard is "bugs that were already fixed are
+back", so somebody hunts a regression that never happened, and after twice they stop believing
+any of them.
+
+- `cannotRunHere(why)` on a guard's run context stops it and reports **not proved**, with the
+  reason and what would let it run. Counted as neither a pass nor a failure, and excluded from
+  what the run says it looked at.
+- It **cannot** be used after an expectation has already failed. A door out of a red run is a
+  door somebody would eventually walk through.
+- It is for what the MACHINE is missing, never for what the product is doing — using it because
+  the product looks wrong would turn a real finding into silence.
+- `not proved` is its own verdict everywhere it is printed, distinct from `left out on purpose`,
+  which means somebody deliberately switched a guard off. The story of the original bug is
+  deliberately not printed underneath it: under a guard that never asked its question, "why this
+  guard exists" reads as that bug being back.
+
+On the run that prompted it, 56 guards came back 40 held, 11 not proved, 5 failed — and all five
+failures were real.
+
+
 ## [0.14.0] — 2026-09-02
 
 Four defects, every one of them found by WATCHING this tool work rather than by reading it.

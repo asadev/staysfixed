@@ -25,14 +25,11 @@
  * an expectation that has already failed cannot be taken back by declining afterwards.
  */
 
-import { test, describe, after } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import fsp from 'node:fs/promises';
 import os from 'node:os';
 
 import { runGuards } from '../src/guard/run.js';
-
-after(async () => {});
 
 const fakeApp = () => /** @type {any} */ ({
   page: { goto: async () => {}, consoleErrors: () => [], clearConsole: () => {}, exists: async () => true },
@@ -51,7 +48,7 @@ describe('a guard that cannot be answered here', () => {
       name: 'the phone stays silent while the app is in front',
       because: 'Notifications drew over the app he was already looking at.',
       file: 'x.guard.js',
-      async run({ cannotRunHere }) {
+      async run(/** @type {any} */ { cannotRunHere }) {
         cannotRunHere('no Android phone or emulator is attached to this machine.');
       },
     });
@@ -73,7 +70,7 @@ describe('a guard that cannot be answered here', () => {
       name: 'a session on a paired machine can be controlled from the bar',
       because: 'Every control on a remote session was drawn and then refused.',
       file: 'y.guard.js',
-      async run({ cannotRunHere }) {
+      async run(/** @type {any} */ { cannotRunHere }) {
         cannotRunHere('no machine is paired with this install.');
       },
     });
@@ -88,7 +85,7 @@ describe('a guard that cannot be answered here', () => {
       name: 'a guard that fails and then tries to excuse itself',
       because: 'A door out of a red run is a door somebody will eventually use.',
       file: 'z.guard.js',
-      async run({ expect, cannotRunHere }) {
+      async run(/** @type {any} */ { expect, cannotRunHere }) {
         await expect('something that is not true', async () => false);
         cannotRunHere('and now let me out of it');
       },
@@ -102,7 +99,7 @@ describe('a guard that cannot be answered here', () => {
       name: 'an ordinary guard',
       because: 'It holds.',
       file: 'w.guard.js',
-      async run({ expect }) {
+      async run(/** @type {any} */ { expect }) {
         await expect('this is true', async () => true);
       },
     });

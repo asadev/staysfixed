@@ -127,17 +127,25 @@ function shorten(s, max) {
  *  - `unanswered` — nobody got an answer: it ran out of time, or it asserted nothing at all.
  *                   Not a pass, and not a returned bug either.
  *  - `left out`   — marked skip. Never ran.
+ *  - `not proved` — the guard asked for something this machine has not got and declined: no
+ *                   phone attached, no machine paired, no server. Distinct from `left out`,
+ *                   which is somebody deliberately switching a guard off. Somebody reading
+ *                   "left out on purpose" against a guard that WANTED to run and could not
+ *                   would go looking for the person who disabled it.
  *  - `held`       — asked, and the answer was yes.
  *
  * Anything unrecognised counts as `unanswered`, never as `held`: the one thing that must
  * never happen here is a result nobody understood being read as a clean bill of health.
  *
  * @param {import('../types.js').GuardResult} guard
- * @returns {'held'|'back'|'unanswered'|'left out'}
+ * @returns {'held'|'back'|'unanswered'|'left out'|'not proved'}
  */
 export function guardVerdict(guard) {
   const g = /** @type {any} */ (guard ?? {});
   if (g.status === 'passed') return 'held';
+  // Read before the plain 'skipped' below it: both wear that status and they mean opposite
+  // things about whether anybody wanted this guard to run.
+  if (g.cannotRunHere === true) return 'not proved';
   if (g.status === 'skipped') return 'left out';
   if (g.timedOut === true || g.assertedNothing === true) return 'unanswered';
   if (g.status === 'failed') return 'back';
@@ -162,6 +170,10 @@ function guardOutcome(g) {
       return 'still holds';
     case 'left out':
       return 'left out on purpose';
+    case 'not proved':
+      // The reason, not a fixed phrase: what is missing is the only thing worth reading here,
+      // and it is the difference between "plug a phone in" and "this will never run on CI".
+      return shorten(String(g.message || 'could not be answered on this machine'), 90);
     case 'unanswered':
       if (any.timedOut === true) return 'ran out of time — nothing was proved either way';
       if (any.assertedNothing === true) return 'checks nothing, so it is protecting nothing';
@@ -385,6 +397,16 @@ export function printGuardResult(r) {
   }
   if (verdict === 'left out') {
     say(`${paint.grey(sym(mark.info))} ${paint.grey(`${name} left out on purpose`)}`);
+    return;
+  }
+  // NOT PROVED gets its own line, and deliberately NOT the story of the bug underneath it.
+  // The story is printed to say whether a failure matters; under a guard that never asked its
+  // question, "why this guard exists: long messages used to vanish" reads as that bug being
+  // back — which is exactly the impression this whole file exists to prevent. What belongs
+  // here is what is missing, so somebody can decide whether to go and plug it in.
+  if (verdict === 'not proved') {
+    say(`${paint.yellow(sym(mark.warn))} ${paint.yellow(`${name} ${r.message || 'could not be answered on this machine'}`)} ${time}`);
+    if (r.file) detail(`    ${shortPath(r.file)}`);
     return;
   }
   // A question nobody answered is not painted like a bug coming back. It still keeps the run
