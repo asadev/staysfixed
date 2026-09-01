@@ -2829,7 +2829,15 @@ async function gatherJourneys({ root, config, options }) {
       // because it cannot break anything and it sees what no journey does.
     }
     /** @type {import('./adapters/contract.js').AdapterProject} */
-    const project = { root, config: config[adapter.name] ?? {} };
+    // The folders the settings name, handed to every adapter alongside its own block.
+    //
+    // An adapter is given only the settings under its own name, so `http` could see
+    // `http.folders` and never `source.folders` — which is where `init` actually writes them.
+    // Route discovery therefore read the folders it guesses at, and a route outside them was
+    // never found on a project that had said, in its own settings, exactly where its code is.
+    // The adapter's own block still wins, because a project that overrode this meant it.
+    // Measured 2026-08-31.
+    const project = { root, config: { folders: config.source?.folders, ...(config[adapter.name] ?? {}) } };
     let detection;
     try {
       detection = await adapter.detect(project);

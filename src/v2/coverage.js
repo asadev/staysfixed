@@ -1199,7 +1199,11 @@ export function buildLedger(input) {
       `${bouncedDoors.size} ${bouncedDoors.size === 1 ? 'door' : 'doors'} answered with a redirect rather than with ${bouncedDoors.size === 1 ? 'a page' : 'pages'} — ${[...bouncedDoors.entries()].sort(byFirst).slice(0, 5).map(([door, code]) => `${door} answered ${code}`).join(', ')}${bouncedDoors.size > 5 ? ', and more' : ''}. What was seen is the bounce, not what is behind it.${all ? ' EVERY door that answered did this, which is what a sign-in wall looks like from out here: this run has not been inside the product at all.' : ''}`,
     );
   }
-  // A door whose journey was refused before anything ran. Nobody knocked on it, so it is not
+  // A door nothing got through. Either its journey never ran, or it ran and the route turned
+  // the request away — a POST answered 400 because this tool sent no body is not a route that
+  // works, and since 2026-08-31 it is recorded as a door found and not opened rather than as
+  // the route's behaviour. The old wording said "refused before anything ran", which is now
+  // wrong for half the cases it covers. Nobody knocked through, so it is not
   // shut and it is not bounced — it is untouched, and the only wrong answer is to leave it
   // out. This says the number out loud so nobody has to notice a door that quietly stopped
   // being counted as walked.
@@ -1209,7 +1213,7 @@ export function buildLedger(input) {
   if (untriedDoors.size > 0) {
     const listed = [...untriedDoors].sort().slice(0, 6).join(', ');
     caveats.push(
-      `${untriedDoors.size} ${untriedDoors.size === 1 ? 'door was' : 'doors were'} never tried at all (${listed}${untriedDoors.size > 6 ? ', and more' : ''}). The journey that would have opened ${untriedDoors.size === 1 ? 'it' : 'them'} was refused before anything ran — the thing it needed did not start, or a value it needed was never supplied — and the reason is on the record beside it. ${untriedDoors.size === 1 ? 'It is' : 'They are'} counted here as never opened, because nothing knocked.`,
+      `${untriedDoors.size} ${untriedDoors.size === 1 ? 'door was' : 'doors were'} never tried at all (${listed}${untriedDoors.size > 6 ? ', and more' : ''}). The journey that would have opened ${untriedDoors.size === 1 ? 'it' : 'them'} either never ran, or ran and could not get past what the route asked for — and the reason is on the record beside it. ${untriedDoors.size === 1 ? 'It is' : 'They are'} counted here as never opened, because nothing knocked.`,
     );
   }
   // WHAT AN EXPORTED NAME BEING "REACHED" REALLY MEANS, said in the report rather than left
