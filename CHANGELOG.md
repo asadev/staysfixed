@@ -6,6 +6,59 @@ numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-09-02
+
+Four defects, every one of them found by WATCHING this tool work rather than by reading it.
+The owner could not find its live window, then recorded four minutes of it running and the
+recording contained three faults nobody had noticed in a month of testing.
+
+### A system dialog can no longer stall a run in silence
+
+A real check froze for two of its four minutes behind a macOS alert — *"A keychain cannot be
+found to store 'Terminal Deck Key'"* — while a journey waited for a person who was never going
+to arrive. The run finished and reported one journey with no answer, and never said why.
+
+Every adapter here starts the product under test in a throwaway settings folder, which is
+exactly the condition that makes an application ask the operating system for something it has
+never been granted. These dialogs are a normal consequence of how this tool works, so they are
+its problem.
+
+- Modal boxes belonging to an application **this run started** are noticed, closed and reported
+  with their own words. Nothing else is touched.
+- The button pressed comes from a fixed list that decline, dismiss or close — never one that
+  grants, resets, deletes or agrees. On the alert that started this, the other button was
+  *Reset To Defaults*, on a keychain, and it was the default.
+- A dialog with nothing safe on it is **left exactly as it is** and named in the result instead.
+- `AXModal` is the test, not the subrole: an ordinary Terminal window reports the same
+  `AXDialog` subrole the real alert does, so matching on that would send this tool hunting for
+  buttons to press in somebody's actual work.
+
+### The report survives the findings
+
+When a verdict landed, everything the run had spent four minutes drawing — the walk, every
+journey and its address count, the wobble, what survived, what was not checked — vanished. The
+footer holding "Needs a person" had no cap, so seventeen findings grew it past the height of the
+panel and squeezed the body to **eighteen pixels holding 41,115** of content.
+
+The footer is capped and its list scrolls inside itself; the body keeps a floor. Held both ways
+by a guard, including against the first over-correction, which lost the same detail from the
+other end by letting the footer collapse to its label.
+
+### The live window says that it exists
+
+`--watch` is off by default, the window opens behind your work on purpose, and nothing anywhere
+ever mentioned it. Three correct decisions adding up to a feature nobody could find. `check` now
+says one line on a project that has a screen: that the window is there and how to open it, or,
+when it is open, which side of the screen it went to.
+
+### Something added is no longer described as a deletion
+
+An escalation read *"SessionBar is there now and was not before"* and then, one line below,
+*"Say whether that deletion is meant to happen."* A sealed class says what a change TOUCHES; it
+says nothing about which way it moved, and the sentence a person is asked to rule on has to
+describe what actually happened.
+
+
 ### The self-check corpus knows about the five false all-clears found on 2026-08-31
 
 Five defects were found and fixed that day, each of which could have blessed a broken build,
